@@ -1,0 +1,71 @@
+# 推荐流水线：需求 → 设计 → 编码 → 测试(真命令) → 审查(结论文件)
+# 默认通道 openai_compat（唯一跑通全链的路径）。CLI 需真实样本后再启用。
+
+task_workdir = "./workspace"
+state_dir = "./.orchestrator"
+serial = true
+allow_yolo = false
+
+# 父目录快照默认关闭；显式设置 watch_root 后才扫描，默认仅告警。
+# 真正的写入约束 = API 适配器相对路径校验 + git 按清单提交。
+# 需要把根外变更当失败时才设 true；硬隔离请用容器/系统级作业对象。
+watch_enforce = false
+# watch_root = "off"             # off 完全关闭根外扫描（零开销）
+
+[run_budget]
+max_tokens = 200000
+max_duration_s = 1800
+
+[[stages]]
+name = "requirements"
+adapter = "api"
+prompt = "prompts/requirements.md"
+kind = "report"
+timeout_s = 120
+
+[[stages]]
+name = "design"
+adapter = "api"
+prompt = "prompts/design.md"
+kind = "report"
+timeout_s = 120
+approval = true                  # 设计人工确认后再往下
+
+[[stages]]
+name = "coding"
+adapter = "api"
+prompt = "prompts/coding.md"
+kind = "code"
+timeout_s = 180
+max_attempts = 2
+
+[[stages]]
+name = "testing"
+kind = "test"                    # 不调用模型：真实执行命令
+test_cmd = ["python", "-m", "unittest", "discover", "-s", "tests"]
+timeout_s = 600
+feedback_to = "coding"           # 退出码非零 => 直接把执行记录反馈回编码
+max_rounds = 2
+
+[[stages]]
+name = "review"
+adapter = "api"
+prompt = "prompts/review.md"
+kind = "review"                  # 结论写 review_verdict.json，报告只给人看
+timeout_s = 180
+feedback_to = "coding"
+max_rounds = 2                   # 只在有文件级问题时返工，否则停下等人
+
+[adapters.api]
+type = "openai_compat"
+base_url = "https://api.deepseek.com"
+model = "deepseek-chat"
+api_key_env = "DEEPSEEK_API_KEY"   # 只存环境变量名，不存密钥
+
+# 其他兼容端点（按需切换）：
+# base_url = "https://dashscope.aliyuncs.com/compatible-mode/v1"  model = "qwen3-coder-plus"  api_key_env = "DASHSCOPE_API_KEY"
+# base_url = "https://ark.cn-beijing.volces.com/api/v3"           model = "<接入点ID>"        api_key_env = "ARK_API_KEY"
+
+# CLI 适配器留在注册表，但**默认不参与流水线**：
+# 各工具 stdin 语义与输出格式尚无真机样本，先抓真实 --version 与一次成功输出，
+# 替换 tests/fixtures 下的合成样本后再启用。

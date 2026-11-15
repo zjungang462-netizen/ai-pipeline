@@ -1,0 +1,421 @@
+"""产物管理（评审 B3）。
+
+- 代码类产物 = commit/branch：上游在自身 worktree 提交，下游基于上游 commit 拉分支。
+- 报告类产物 = 文件 + 哈希。
+- 保留删除/重命名与 git 历史，可 diff 可复现。
+"""
+from __future__ import annotations
+
+import os
+import shutil
+import subprocess
+import tempfile
+from pathlib import Path
+
+from .state import sha256_file
+
+
+class GitError(RuntimeError):
+    pass
+
+
+# 可配置 git 可执行文件路径（config.git_exe）；空则自动解析
+_GIT_EXE: str | None = None
+_GIT_RESOLVED: str | None = None
+
+
+def set_git_exe(path: str | None) -> None:
+    """设置 git 可执行文件路径（来自配置）。设后重新解析。"""
+    global _GIT_EXE, _GIT_RESOLVED
+    _GIT_EXE = path or None
+    _GIT_RESOLVED = None
+
+
+def _git_registry_paths() -> list[str]:
+    """从 Windows 注册表读 Git 安装路径（InstallPath），避免硬编码盘符。"""
+    paths: list[str] = []
+    try:
+        import winreg
+    except ImportError:
+        return paths
+    keys = [
+        (winreg.HKEY_LOCAL_MACHINE, r"SOFTWARE\GitForWindows"),
+        (winreg.HKEY_CURRENT_USER, r"SOFTWARE\GitForWindows"),
+        (winreg.HKEY_LOCAL_MACHINE, r"SOFTWARE\WOW6432Node\GitForWindows"),
+    ]
+    for hive, sub in keys:
+        try:
+            with winreg.OpenKey(hive, sub) as k:
+                install, _ = winreg.QueryValueEx(k, "InstallPath")
+                if install:
+                    paths.append(str(Path(install) / "cmd" / "git.exe"))
+        except OSError:
+            continue
+    return paths
+
+
+def _git_fallback_paths() -> list[str]:
+    """常见 git 安装位置兜底（评审 G1：PATH 无 git 时不静默失效）。
+
+    优先注册表 InstallPath（机器无关），再环境变量推导的 Program Files，
+    最后 POSIX 常见路径。不硬编码具体盘符。
+    """
+    cands: list[str] = _git_registry_paths()
+    for env_key in ("PROGRAMFILES", "PROGRAMFILES(X86)", "LOCALAPPDATA"):
+        base = os.environ.get(env_key)
+        if base:
+            cands.append(str(Path(base) / "Git" / "cmd" / "git.exe"))
+    cands += ["/usr/bin/git", "/usr/local/bin/git"]
+    return cands
+
+
+def resolve_git() -> str | None:
+    """解析 git：配置路径 > PATH > 常见安装位置。返回可用 exe 或 None。"""
+    global _GIT_RESOLVED
+    if _GIT_RESOLVED is not None:
+        return _GIT_RESOLVED
+    candidates: list[str] = []
+    if _GIT_EXE:
+        candidates.append(_GIT_EXE)
+    found = shutil.which("git")
+    if found:
+        candidates.append(found)
+    candidates += _git_fallback_paths()
+    for cand in candidates:
+        if not cand:
+            continue
+        if Path(cand).is_file() or shutil.which(cand):
+            try:
+                proc = subprocess.run([cand, "--version"], capture_output=True,
+                                      text=True, timeout=15)
+                if proc.returncode == 0:
+                    _GIT_RESOLVED = cand
+                    return cand
+            except (OSError, subprocess.TimeoutExpired):
+                continue
+    return None
+
+
+def _no_hooks_dir() -> str:
+    """空目录当作 core.hooksPath，引擎发起的 git 不执行仓库 hook。"""
+    path = Path(tempfile.gettempdir()) / "ai-pipeline-no-hooks"
+    path.mkdir(parents=True, exist_ok=True)
+    return path.resolve().as_posix()
+
+
+def _git(args: list[str], cwd: Path, check: bool = True,
+         timeout: int = 120) -> subprocess.CompletedProcess:
+    """git 子进程：env 白名单（不透传 API Key）+ 超时 + 禁用 hook。"""
+    from .safety import build_subprocess_env
+    exe = resolve_git() or "git"
+    cmd = [exe, "-c", f"core.hooksPath={_no_hooks_dir()}", *args]
+    try:
+        proc = subprocess.run(
+            cmd, cwd=str(cwd), env=build_subprocess_env(),
+            capture_output=True, text=True, encoding="utf-8", errors="replace",
+            timeout=timeout,
+        )
+    except subprocess.TimeoutExpired as e:
+        raise GitError(f"git {' '.join(args)} 超时（{timeout}s）") from e
+    if check and proc.returncode != 0:
+        raise GitError(f"git {' '.join(args)} 失败: {proc.stderr.strip() or proc.stdout.strip()}")
+    return proc
+
+
+def git_available() -> bool:
+    return resolve_git() is not None
+
+
+def ensure_repo(workdir: Path) -> None:
+    """确保 workdir 是一个 git 仓库（含初始提交）。"""
+    workdir = Path(workdir)
+    workdir.mkdir(parents=True, exist_ok=True)
+    if not (workdir / ".git").exists():
+        _git(["init", "-q"], workdir)
+        _git(["config", "user.email", "orchestrator@local"], workdir)
+        _git(["config", "user.name", "orchestrator"], workdir)
+    # 无任何提交时建一个空基线提交
+    head = _git(["rev-parse", "--verify", "HEAD"], workdir, check=False)
+    if head.returncode != 0:
+        _git(["commit", "-q", "--allow-empty", "-m", "baseline"], workdir)
+
+
+def head_sha(workdir: Path) -> str:
+    return _git(["rev-parse", "HEAD"], workdir).stdout.strip()
+
+
+def commit_all(workdir: Path, message: str) -> str | None:
+    """提交全部改动（含删除/重命名）。无改动返回 None。"""
+    _git(["add", "-A"], workdir)
+    status = _git(["status", "--porcelain"], workdir).stdout.strip()
+    if not status:
+        return None
+    _git(["commit", "-q", "-m", message], workdir)
+    return head_sha(workdir)
+
+
+def changed_files_since(workdir: Path, base_sha: str) -> list[str]:
+    """相对基线的变更文件（含工作区未提交改动）。"""
+    out = _git(["diff", "--name-only", "-z", base_sha], workdir).stdout
+    files = [name for name in out.split("\0") if name]
+    # 未跟踪文件也算变更
+    untracked = _git(["ls-files", "-z", "--others", "--exclude-standard"], workdir).stdout
+    files += [name for name in untracked.split("\0") if name]
+    return sorted(set(files))
+
+
+def add_worktree(repo: Path, base_sha: str, branch: str, dest: Path) -> Path:
+    """基于上游 commit 拉新分支建 worktree（评审 B3：非基于主干）。"""
+    dest = Path(dest)
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    _git(["worktree", "add", "-q", "-b", branch, str(dest), base_sha], repo)
+    return dest
+
+
+def remove_worktree(repo: Path, dest: Path) -> None:
+    _git(["worktree", "remove", "--force", str(dest)], repo, check=False)
+
+
+def merge_branch(repo: Path, branch: str) -> str:
+    """把阶段分支合并回主线（快进），返回合并后 HEAD。"""
+    _git(["merge", "--ff-only", "-q", branch], repo)
+    return head_sha(repo)
+
+
+def report_hashes(files: list[Path]) -> dict[str, str]:
+    return {str(f): sha256_file(f) for f in files if Path(f).is_file()}
+
+
+def unsafe_rel_paths(files: list[str]) -> list[str]:
+    """绝对路径、`..` 或路径分段里的 `.git`。这些不能交给 git add。"""
+    bad: list[str] = []
+    for f in files:
+        p = Path(f)
+        parts = p.parts
+        if (p.is_absolute()
+                or any(part == ".." or part.lower() == ".git" for part in parts)):
+            bad.append(f.replace("\\", "/"))
+    return bad
+
+
+def remove_git_metadata_files(workdir: Path, rels: list[str]) -> None:
+    """删掉清单里落到本仓库 `.git` 下的文件（模型刚写入的 hook）。不跟随 `..`。"""
+    root = Path(workdir).resolve()
+    for rel in rels:
+        p = Path(rel)
+        parts = p.parts
+        if p.is_absolute() or any(part == ".." for part in parts):
+            continue
+        if not any(part.lower() == ".git" for part in parts):
+            continue
+        target = (root / p).resolve()
+        try:
+            rel_to_root = target.relative_to(root)
+        except ValueError:
+            continue
+        if ".git" not in [part.lower() for part in rel_to_root.parts]:
+            continue
+        if target.is_file():
+            try:
+                target.unlink()
+            except OSError:
+                pass
+
+
+def commit_files(workdir: Path, files: list[str], message: str) -> str | None:
+    """按清单提交（评审 B4）：只 git add 指定文件，不用 add -A 全仓。
+
+    files 为相对 workdir 的路径。清单为空或无实际改动返回 None。
+    越界或 `.git` 路径直接拒绝，不调用 git add。
+    """
+    if not files:
+        return None
+    bad = unsafe_rel_paths(files)
+    if bad:
+        raise GitError(f"拒绝提交越界或 .git 路径: {bad[:5]}")
+    _git(["add", "--", *files], workdir)
+    staged = _git(["diff", "--cached", "--name-only"], workdir).stdout.strip()
+    if not staged:
+        return None
+    _git(["commit", "-q", "--only", "-m", message, "--", *files], workdir)
+    return head_sha(workdir)
+
+
+def untracked_outside(workdir: Path, declared: list[str]) -> list[str]:
+    """检测清单之外的未跟踪/改动文件（评审 B4：越界改动告警）。"""
+    declared_set = {f.replace("\\", "/") for f in declared}
+    changed = changed_files_since(workdir, head_sha(workdir))
+    return [f for f in changed if f.replace("\\", "/") not in declared_set]
+
+
+def normalize_rel(workdir: Path, files: list[str]) -> list[str]:
+    """把变更文件清单归一化为相对 workdir 的路径（评审 B4：按清单提交）。"""
+    workdir = Path(workdir).resolve()
+    out: list[str] = []
+    for f in files:
+        p = Path(f)
+        if p.is_absolute():
+            try:
+                rel = p.resolve().relative_to(workdir)
+            except ValueError:
+                rel = p  # 根外路径保留，交由越界扫描处理
+        else:
+            rel = p
+        out.append(str(rel).replace("\\", "/"))
+    return sorted(set(out))
+
+
+def snapshot_files(workdir: Path) -> set[str]:
+    """工作区文件快照（相对路径集合，排除 .git），用于越界改动检测（评审 M2）。"""
+    workdir = Path(workdir)
+    out: set[str] = set()
+    for p in workdir.rglob("*"):
+        if p.is_file() and ".git" not in p.parts:
+            out.add(str(p.relative_to(workdir)).replace("\\", "/"))
+    return out
+
+
+def diff_summary(workdir: Path, commit_sha: str, max_lines: int = 200) -> str:
+    """上游代码变更摘要（评审 B1）：相对父提交的 diff，截断防超长。"""
+    proc = _git(["diff", f"{commit_sha}~1", commit_sha], workdir, check=False)
+    if proc.returncode != 0:
+        # 无父提交（首个 commit）=> 用 show
+        proc = _git(["show", "--format=", commit_sha], workdir, check=False)
+    lines = (proc.stdout or "").splitlines()
+    if len(lines) > max_lines:
+        lines = lines[:max_lines] + [f"...（diff 截断，共 {len(proc.stdout.splitlines())} 行）"]
+    return "\n".join(lines)
+
+
+_SKIP_DIRS = {".git", "__pycache__", "node_modules", ".venv", "venv",
+              ".state", ".smoke_state", ".full_state", ".orchestrator",
+              ".demo_state", "attempts", "worktree", ".pytest_cache"}
+_CODE_SUFFIX = {".py", ".js", ".ts", ".java", ".cs", ".go", ".rs", ".toml",
+                ".md", ".json", ".yaml", ".yml", ".sql", ".vue", ".sh"}
+
+
+def workspace_files(workdir: Path, exclude: Path | None = None):
+    """提前剪枝，既不遍历依赖目录，也不跟随根外链接。"""
+    root = Path(workdir).resolve()
+    excluded = Path(exclude).resolve() if exclude else None
+    for directory, names, files in os.walk(root):
+        names[:] = sorted(n for n in names if n not in _SKIP_DIRS
+                          and not n.startswith(".")
+                          and not (Path(directory) / n).is_symlink()
+                          and (Path(directory) / n).resolve() != excluded)
+        for name in sorted(files):
+            target = Path(directory) / name
+            if (not name.startswith(".") and target.is_file()
+                    and target.resolve().is_relative_to(root)
+                    and (not excluded or not target.resolve().is_relative_to(excluded))):
+                yield target
+
+
+def workspace_hash(workdir: Path, exclude: Path | None = None) -> str:
+    from .state import sha256_text
+    files = [(p.relative_to(workdir).as_posix(), sha256_file(p))
+             for p in workspace_files(workdir, exclude)]
+    return sha256_text(repr(sorted(files)))
+
+
+def existing_code_context(workdir: Path, max_file_bytes: int = 12000,
+                          max_total_bytes: int = 120000) -> str:
+    """读取工作区现有源码，供"审查已有代码库"场景（无上游 coding 阶段）。
+
+    跳过缓存/状态/依赖目录；单文件与总量都有上限，超限截断并标注。
+    """
+    workdir = Path(workdir)
+    if not workdir.is_dir():
+        return ""
+    parts: list[str] = []
+    total = 0
+    skipped: list[str] = []
+    for p in workspace_files(workdir):
+        rel = p.relative_to(workdir)
+        if p.suffix.lower() not in _CODE_SUFFIX:
+            continue
+        try:
+            size = p.stat().st_size
+        except OSError:
+            continue
+        if total >= max_total_bytes:
+            skipped.append(str(rel).replace("\\", "/"))
+            break
+        try:
+            with p.open("rb") as stream:
+                data = stream.read(min(max_file_bytes, max_total_bytes - total))
+            text = data.decode("utf-8", errors="replace")
+        except OSError:
+            continue
+        if size > max_file_bytes:
+            text = text[:max_file_bytes] + f"\n...（文件截断，原 {size} 字节）"
+        relstr = str(rel).replace("\\", "/")
+        parts.append(f"### 文件: {relstr}\n```\n{text}\n```")
+        total += len(data)
+    if skipped:
+        parts.append(f"（因总量上限未纳入的文件: {', '.join(skipped[:20])}）")
+    return "\n\n".join(parts)
+
+
+_BASELINE_CACHE: dict[str, str | None] = {}
+
+
+def baseline_sha(workdir: Path) -> str | None:
+    """项目基线 = 首个（根）提交。累积 diff 以此为起点。
+
+    根提交在仓库生命周期内不变，故缓存以免每次 diff 都跑一次 rev-list。
+    """
+    key = str(Path(workdir).resolve())
+    if key in _BASELINE_CACHE:
+        return _BASELINE_CACHE[key]
+    proc = _git(["rev-list", "--max-parents=0", "HEAD"], workdir, check=False)
+    result: str | None = None
+    if proc.returncode == 0:
+        roots = [l.strip() for l in proc.stdout.splitlines() if l.strip()]
+        result = roots[0] if roots else None
+    _BASELINE_CACHE[key] = result
+    return result
+
+
+def cumulative_diff(workdir: Path, commit_sha: str, max_lines: int = 600) -> str:
+    """相对项目基线的累积全量 diff + 文件清单（修复 M0）。
+
+    审查阶段必须看到完整实现，而非仅末次提交（commit~1..commit）。
+    否则返工轮次里审查员只看到增量测试改动，会误判"实现代码缺失"。
+    """
+    base = baseline_sha(workdir)
+    if base and base != commit_sha:
+        listing = _git(["diff", "--stat", base, commit_sha], workdir, check=False).stdout
+        proc = _git(["diff", base, commit_sha], workdir, check=False)
+    else:
+        listing = _git(["ls-tree", "-r", "--name-only", commit_sha], workdir, check=False).stdout
+        proc = _git(["show", "--format=", commit_sha], workdir, check=False)
+    body = proc.stdout or ""
+    lines = body.splitlines()
+    if len(lines) > max_lines:
+        lines = lines[:max_lines] + [
+            f"...（diff 截断，共 {len(body.splitlines())} 行；完整代码见工作区文件）"]
+    head = f"变更文件清单（相对项目基线，累积全量）:\n{listing.strip()}\n" if listing.strip() else ""
+    return head + "\n".join(lines)
+
+
+def tree_content_hash(workdir: Path, commit_sha: str) -> str:
+    """基于 commit 树对象的内容哈希（评审 B3/S1）。
+
+    用 git ls-tree -r 列出所有 blob 的路径+对象哈希，排序后再哈希。
+    只反映文件内容，与提交时间戳/基线无关 => 重跑内容相同则哈希相同。
+    """
+    out = _git(["ls-tree", "-r", commit_sha], workdir).stdout
+    entries = []
+    for line in out.splitlines():
+        # 格式: <mode> blob <sha>\t<path>
+        if "\t" not in line:
+            continue
+        meta, path = line.split("\t", 1)
+        parts = meta.split()
+        if len(parts) >= 3 and parts[1] == "blob":
+            entries.append((path, parts[2]))
+    entries.sort()
+    import hashlib
+    payload = "\n".join(f"{p}:{h}" for p, h in entries)
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()

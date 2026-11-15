@@ -1,0 +1,73 @@
+# 可运行的受控双缺陷示例。运行会实际调用 API 并修改 examples/unattended_demo 下的两个源码文件。
+task_workdir = "./examples/unattended_demo"
+state_dir = "./.unattended_state"
+serial = true
+watch_root = "off"
+
+[run_budget]
+max_tokens = 12000
+max_duration_s = 180
+
+[autonomy]
+enabled = true
+auto_approve = ["coding"]
+allowed_files = ["name_ops.py", "count_ops.py"]
+baseline_paths = ["name_ops.py", "count_ops.py", "tests"]
+max_repair_rounds = 3
+max_stagnant_rounds = 2
+repair_batch_size = 1
+output_tokens = 1024
+context_chars = 8000
+
+[autotune]
+enabled = true
+auto_apply = true
+min_runs = 5
+max_batch_size = 2
+
+[[stages]]
+name = "coding"
+kind = "code"
+adapter = "api"
+prompt = "prompts/unattended_coding.md"
+approval = true
+context_files = ["name_ops.py", "count_ops.py"]
+precheck_cmd = ["python", "-m", "unittest", "discover", "-s", "tests", "-v"]
+timeout_s = 60
+max_attempts = 2
+
+[[stages]]
+name = "testing"
+kind = "test"
+test_cmd = ["python", "-m", "unittest", "discover", "-s", "tests", "-v"]
+timeout_s = 30
+feedback_to = "coding"
+max_rounds = 3
+
+[[stages]]
+name = "review"
+kind = "review"
+adapter = "reviewer"
+prompt = "prompts/unattended_review.md"
+timeout_s = 60
+max_attempts = 2
+feedback_to = "coding"
+max_rounds = 2
+
+[adapters.api]
+type = "openai_compat"
+base_url = "https://api.deepseek.com"
+model = "deepseek-chat"
+api_key_env = "DEEPSEEK_API_KEY"
+max_tokens = 1024
+temperature = 0.0
+timeout_s = 60
+
+[adapters.reviewer]
+type = "openai_compat"
+base_url = "https://api.deepseek.com"
+model = "deepseek-chat"
+api_key_env = "DEEPSEEK_API_KEY"
+max_tokens = 1024
+temperature = 0.0
+timeout_s = 60

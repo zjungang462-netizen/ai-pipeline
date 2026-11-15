@@ -1,0 +1,4 @@
+{"type":"session.started","session_id":"s1"}
+{"type":"item.completed","item":{"type":"agent_message","text":"已完成需求分析：\n1. 支持添加待办\n2. 支持列出待办"}}
+{"type":"item.completed","item":{"type":"command_execution","command":"ls","aggregated_output":"file1\nfile2"}}
+{"type":"turn.completed","usage":{"input_tokens":100,"output_tokens":50}}

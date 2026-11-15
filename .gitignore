@@ -1,0 +1,52 @@
+# Python 缓存、虚拟环境与构建产物
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.venv/
+venv/
+*.egg-info/
+build/
+dist/
+.coverage
+.coverage.*
+htmlcov/
+coverage.xml
+
+# 本机凭据与环境变量；保留环境示例
+.env
+.env.*
+!.env.example
+!.env.sample
+*.pem
+*.key
+
+# 编辑器、系统临时文件与日志
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
+*.log
+*.tmp
+*.swp
+
+# 编排器运行状态和自动生成的任务工作区
+/agent-orchestrator/.orchestrator/
+/agent-orchestrator/.*_state/
+/agent-orchestrator/workspace/
+/agent-orchestrator/*_workspace/
+
+# 本机运行配置；可共享配置使用 *.example.toml
+/agent-orchestrator/config.toml
+/agent-orchestrator/fullchain_deepseek.toml
+/agent-orchestrator/pipeline_run.toml
+/agent-orchestrator/selfreview.toml
+/agent-orchestrator/smoke_deepseek.toml
+
+# 本地审查、实测、修复的快照和过程证据
+/autonomy-20??-??-??/
+/live-validation-20??-??-??/
+/repair-20??-??-??/
+/review-20??-??-??/
+/workbench-20??-??-??/
