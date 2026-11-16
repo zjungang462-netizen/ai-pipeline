@@ -17,6 +17,13 @@ allow_yolo = false
 watch_enforce = false
 # watch_root = "off"             # off 完全关闭根外扫描（零开销）
 
+[review_coverage]
+# 覆盖不完整默认待人工确认；无人值守仍失败。
+# schema: review_coverage.incomplete：覆盖不完整时 manual 待审批、fail 失败、allow 显式接受风险；无人值守 manual 仍失败
+incomplete = "manual"
+# schema: review_coverage.diff_lines：累积 diff 注入行数上限
+diff_lines = 600
+
 [run_budget]
 # schema: run_budget.max_tokens：运行累计 token 上限；无人值守时必须为正数
 max_tokens = 200000

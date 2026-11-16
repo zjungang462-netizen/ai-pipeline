@@ -79,6 +79,7 @@ python -m orchestrator.cli resume workbench.example.toml --run-id demo-1
 | root | `tune_proposal_id` | `str` | `""` | 已批准调优提案标识；空或 tune- 加 12 位十六进制 |
 | root | `autonomy` | `Autonomy` | `{}` | 显式预授权的无人值守策略 |
 | root | `autotune` | `AutoTune` | `{}` | 有界的后续运行策略选择 |
+| root | `review_coverage` | `ReviewCoverage` | `{}` | 审查提示词覆盖上限与不完整处理策略 |
 | stages | `name` | `str` | `必填` | 唯一阶段名；字母数字、下划线、点或横线，禁止父目录段 |
 | stages | `adapter` | `str` | `必填` | 非 test 阶段必填，引用具名适配器 |
 | stages | `prompt` | `str` | `必填` | 非 test 阶段必填；提示词文件或内联文本 |
@@ -113,6 +114,13 @@ python -m orchestrator.cli resume workbench.example.toml --run-id demo-1
 | autotune | `auto_apply` | `bool` | `false` | 自动选择需同时启用 autonomy 和 autotune |
 | autotune | `min_runs` | `int` | `5` | >= 5；最少同配置终态记录数 |
 | autotune | `max_batch_size` | `int` | `2` | >= 1，<= 3；可自动选择的修复文件批量上限 |
+| review_coverage | `diff_lines` | `int` | `600` | >= 1，<= 10000；累积 diff 注入行数上限 |
+| review_coverage | `per_file_bytes` | `int` | `24000` | >= 1，<= 2097152；变更文件全文注入的单文件字节上限 |
+| review_coverage | `total_bytes` | `int` | `180000` | >= 1，<= 8388608；变更文件全文注入总字节上限 |
+| review_coverage | `max_files` | `int` | `60` | >= 1，<= 1000；全文注入文件数上限 |
+| review_coverage | `existing_per_file_bytes` | `int` | `12000` | >= 1，<= 2097152；审查现有代码库的单文件注入字节上限 |
+| review_coverage | `existing_total_bytes` | `int` | `120000` | >= 1，<= 8388608；审查现有代码库的总注入字节上限 |
+| review_coverage | `incomplete` | `str` | `"manual"` | 覆盖不完整时 manual 待审批、fail 失败、allow 显式接受风险；无人值守 manual 仍失败 |
 <!-- CONFIG_SCHEMA:END -->
 
 非 test 阶段须填写 `adapter` 与 `prompt`；test 阶段必须有真实 `test_cmd`，不调用模型。未知顶层、阶段、预算和策略字段会报错；`config_keys` 不接受 TOML 日期等无法 JSON 序列化的值。
@@ -125,7 +133,8 @@ python -m orchestrator.cli resume workbench.example.toml --run-id demo-1
 | `cli_codex` | 可设 `exe`、`model`、`isolate_config`、`reasoning_effort`、`extra_env`、`timeout_s`；已有版本与真实样本见 fixtures |
 | `cli_agy` | 可设 `exe`、`model`、无凭据 `proxy_url`、`extra_env`、`timeout_s`；已有真实样本 |
 | `cli_dsh` | 可设 `exe`、`permission_mode`、无凭据 `proxy_url`、`extra_env`、`timeout_s`；已有真实样本 |
-| `cli_qwen` / `cli_qoder` / `cli_doubao` | 注册不等于已验证；真实版本、stdin 与成功输出的范围见交付说明 |
+| `cli_qwen` | Qwen Code 0.26.0 的 stdin/JSON 数组/终态用量已有真实样本；后端为 DeepSeek，工具执行与其它版本仍待验证 |
+| `cli_qoder` / `cli_doubao` | 注册不等于已验证；真实版本、stdin 与成功输出的范围见交付说明 |
 | `fake` | 仅用于离线演示和确定性回归 |
 
 CLI 子进程使用环境白名单；额外凭据变量须在 `extra_env` 显式列名。Windows 的 Codex 建议配置原生 `codex.exe`，减少 npm `.cmd` 的参数转义影响。CLI 版本未知、缺少完成事件或输出无法解析时，不会按成功处理。样本来源与真实性见 [tests/fixtures/README.md](tests/fixtures/README.md)。
@@ -137,6 +146,7 @@ CLI 子进程使用环境白名单；额外凭据变量须在 `extra_env` 显式
 - 测试执行配置中的 argv。失败记录可直接反馈到先前编码阶段，不依赖模型转述；测试隔离创建失败会停止，不回退到用户工作区。
 - 审查只认独立的 `review_verdict.json`；`pass` 要求问题列表为空。`fail` 有文件级问题且轮次允许时返工；缺少可执行问题或结论无法解析时交人工处理。
 - 审查 diff 过长时尝试补充变更文件全文，仍覆盖不完整时不自动采纳 pass：人工模式待确认，无人值守失败。审查现有代码库时工作区变化会使旧结论失效。
+- `[review_coverage]` 可配置覆盖上限；默认 `incomplete=manual`，也可选择 `fail` 或显式承担不完整风险的 `allow`。未覆盖清单与策略保存在 attempt 和结果记录；CLI 额外读取不会自动被算作完整覆盖。
 - code/test 审批校验申请时冻结值、attempt 归档与 evidence；report/review 仍检查实时输入变化。讨论建议不会自动成为实现或通过结论。
 - CLI 中断与恢复保留已报告用量及未知预留，续跑不重置原预算、期限和调用次数。CLI token 是观察与预扣口径，不等于实际账单，也不是服务端单次输出硬上限。
 

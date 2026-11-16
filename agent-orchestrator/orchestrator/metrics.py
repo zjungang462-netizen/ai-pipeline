@@ -51,7 +51,12 @@ def write_metrics(engine, results: dict[str, str]) -> None:
     data['unknown_calls'] = state.usage_total.get('unknown_calls', 0)
     data['model_calls'] = sum(e['kind'] == 'model_call_started' for e in state.events)
     data['repair_cycles'] = sum(e['kind'] == 'repair_cycle' for e in state.events)
-    data['retries'] = sum(e['kind'] == 'recovery_hint' for e in state.events)
+    # 按实际分配过的 attempt 计数；提示词返工提示不是额外调用的可靠代理。
+    data['retries'] = sum(max(0, len({a.n for a in state.stage(s.name).attempts})-1)
+                          for s in config.stages)
+    data['attempts_total'] = sum(len({a.n for a in state.stage(s.name).attempts}) for s in config.stages)
+    data['failed_attempts'] = sum(not a.success for s in config.stages for a in state.stage(s.name).attempts)
+    data['retry_count_scope'] = 'actual_allocated_attempts_including_feedback_cycles'
     data['test_attempts'] = sum(e['kind'] == 'test_start' for e in state.events)
     data['failure_history'] = state.autonomy.get('failures', {})
     data['repair_batch_size'] = config.autonomy.repair_batch_size

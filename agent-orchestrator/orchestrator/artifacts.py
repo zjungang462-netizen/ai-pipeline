@@ -386,37 +386,52 @@ def existing_code_context(workdir: Path, max_file_bytes: int = 12000,
 
     跳过缓存/状态/依赖目录；单文件与总量都有上限，超限截断并标注。
     """
+    return existing_code_context_info(workdir, max_file_bytes, max_total_bytes)[0]
+
+
+def existing_code_context_info(workdir: Path, max_file_bytes: int = 12000,
+                               max_total_bytes: int = 120000, max_files: int = 60,
+                               exclude: Path | None = None) -> tuple[str, list[str]]:
+    """返回正文与完整缺失清单；任何被截断/不可读源码都计入覆盖缺失。"""
     workdir = Path(workdir)
     if not workdir.is_dir():
-        return ""
+        return "", []
     parts: list[str] = []
     total = 0
     skipped: list[str] = []
-    for p in workspace_files(workdir):
+    included = 0
+    for p in sorted(workspace_files(workdir, exclude=exclude)):
         rel = p.relative_to(workdir)
+        relstr = rel.as_posix()
         if p.suffix.lower() not in _CODE_SUFFIX:
             continue
         try:
             size = p.stat().st_size
         except OSError:
+            skipped.append(relstr+'（不可读）')
             continue
-        if total >= max_total_bytes:
-            skipped.append(str(rel).replace("\\", "/"))
-            break
+        if total >= max_total_bytes or included >= max_files:
+            skipped.append(relstr)
+            continue
         try:
             with p.open("rb") as stream:
                 data = stream.read(min(max_file_bytes, max_total_bytes - total))
             text = data.decode("utf-8", errors="replace")
         except OSError:
+            skipped.append(relstr+'（不可读）')
             continue
-        if size > max_file_bytes:
-            text = text[:max_file_bytes] + f"\n...（文件截断，原 {size} 字节）"
-        relstr = str(rel).replace("\\", "/")
+        if b'\0' in data:
+            skipped.append(relstr+'（二进制，未注入）')
+            continue
+        if size > len(data):
+            text += f"\n...（文件截断，原 {size} 字节）"
+            skipped.append(relstr+'（未完整注入）')
         parts.append(f"### 文件: {relstr}\n```\n{text}\n```")
         total += len(data)
+        included += 1
     if skipped:
         parts.append(f"（因总量上限未纳入的文件: {', '.join(skipped[:20])}）")
-    return "\n\n".join(parts)
+    return "\n\n".join(parts), skipped
 
 
 _BASELINE_CACHE: dict[str, str | None] = {}

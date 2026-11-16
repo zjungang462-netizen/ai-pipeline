@@ -51,7 +51,7 @@ def diagnose(path: str | Path) -> dict:
             del table[key]
 
     unknown(sanitized, schema['root'], 'root')
-    for section in ('autonomy', 'autotune', 'run_budget'):
+    for section in ('autonomy', 'autotune', 'run_budget', 'review_coverage'):
         unknown(sanitized.get(section), schema[section], section)
     stages = sanitized.get('stages', [])
     if isinstance(stages, list):
@@ -68,6 +68,8 @@ def diagnose(path: str | Path) -> dict:
         add('error', 'validation', detail, '修正后再次运行 doctor；使用与运行命令相同的严格校验')
         return result()
     add('ok', 'validation', '字段、类型、阶段引用、预算与无人值守约束校验通过')
+    if cfg.review_coverage.incomplete == 'allow':
+        add('warning', 'review_coverage.incomplete', '显式允许未完整覆盖的审查 pass；结果仍标记缺失清单')
 
     for key, target in (('task_workdir', cfg.task_workdir), ('state_dir', cfg.state_dir)):
         if target.exists() and not target.is_dir():
@@ -134,8 +136,11 @@ def diagnose(path: str | Path) -> dict:
                 add('warning', label+'.'+key, '阶段额度大于运行总额度，实际仍受运行总额度限制')
         if stage.prompt:
             prompt = cfg.base_dir/stage.prompt
-            # 引擎允许内联文本，仅将显式路径式提示词诊断为缺失文件。
-            if (stage.prompt.startswith(('prompts/', './', '../')) or Path(stage.prompt).suffix in ('.md', '.txt')) and not prompt.is_file():
+            # 含空白的自然语言不因末尾提及 README.md 被误认为文件路径。
+            text = stage.prompt
+            explicit = text.startswith(('prompts/', './', '../'))
+            path_like = not any(ch.isspace() for ch in text) and Path(text).suffix in ('.md', '.txt')
+            if (explicit or path_like) and not prompt.is_file():
                 add('error', label+'.prompt', '提示词文件不存在', str(prompt))
         for key, command in (('test_cmd', stage.test_cmd), ('precheck_cmd', stage.precheck_cmd)):
             if command and not command_exists(command[0], cfg.task_workdir):

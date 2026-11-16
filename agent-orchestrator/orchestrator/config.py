@@ -84,6 +84,17 @@ class AutoTune:
 
 
 @dataclass
+class ReviewCoverage:
+    diff_lines: int = config_field('累积 diff 注入行数上限', default=600, numeric=True, integer=True, minimum=1, maximum=10000)
+    per_file_bytes: int = config_field('变更文件全文注入的单文件字节上限', default=24000, numeric=True, integer=True, minimum=1, maximum=2097152)
+    total_bytes: int = config_field('变更文件全文注入总字节上限', default=180000, numeric=True, integer=True, minimum=1, maximum=8388608)
+    max_files: int = config_field('全文注入文件数上限', default=60, numeric=True, integer=True, minimum=1, maximum=1000)
+    existing_per_file_bytes: int = config_field('审查现有代码库的单文件注入字节上限', default=12000, numeric=True, integer=True, minimum=1, maximum=2097152)
+    existing_total_bytes: int = config_field('审查现有代码库的总注入字节上限', default=120000, numeric=True, integer=True, minimum=1, maximum=8388608)
+    incomplete: str = config_field('覆盖不完整时 manual 待审批、fail 失败、allow 显式接受风险；无人值守 manual 仍失败', default='manual')
+
+
+@dataclass
 class Config:
     task_workdir: Path = config_field('任务工作目录，相对配置文件目录解析')
     state_dir: Path = config_field('状态目录，相对配置文件目录解析')
@@ -103,6 +114,7 @@ class Config:
     tune_proposal_id: str = config_field('已批准调优提案标识；空或 tune- 加 12 位十六进制', default='')
     autonomy: Autonomy = config_field('显式预授权的无人值守策略', default_factory=Autonomy)
     autotune: AutoTune = config_field('有界的后续运行策略选择', default_factory=AutoTune)
+    review_coverage: ReviewCoverage = config_field('审查提示词覆盖上限与不完整处理策略', default_factory=ReviewCoverage)
 
     def stage(self, name: str) -> StageSpec:
         for s in self.stages:
@@ -118,7 +130,7 @@ class Config:
 
 
 CONFIG_SECTIONS = {"root": Config, "stages": StageSpec, "run_budget": RunBudget,
-                   "autonomy": Autonomy, "autotune": AutoTune}
+                   "autonomy": Autonomy, "autotune": AutoTune, "review_coverage": ReviewCoverage}
 _ROOT_KEYS = set(describe(Config))
 _STAGE_KEYS = set(describe(StageSpec))
 _BUDGET_KEYS = set(describe(RunBudget))
@@ -171,10 +183,21 @@ def parse_config(raw: dict[str, Any], base_dir: Path | None = None) -> Config:
     # 未知键必须明确拒绝：拼错 approval/watch_enforce/max_tokens 等安全或
     # 预算字段时，静默按默认值运行会让门禁/限额无声失效（P2-10）。
     _reject_unknown(raw, _ROOT_KEYS, "配置根")
-    for key in ("autonomy", "autotune", "adapters", "run_budget"):
+    for key in ("autonomy", "autotune", "adapters", "run_budget", "review_coverage"):
         _require(isinstance(raw.get(key, {}), dict), f"{key} 必须是表")
     autonomy = _policy(raw.get("autonomy", {}), Autonomy)
     autotune = _policy(raw.get("autotune", {}), AutoTune)
+    coverage_raw = raw.get('review_coverage', {})
+    _reject_unknown(coverage_raw, set(describe(ReviewCoverage)), '[review_coverage]')
+    coverage_values = {}
+    for key, info in describe(ReviewCoverage).items():
+        value = coverage_raw.get(key, default_value(ReviewCoverage, key))
+        if info['numeric']:
+            value = _schema_number(value, ReviewCoverage, key, 'review_coverage.'+key)
+        coverage_values[key] = value
+    _require(coverage_values['incomplete'] in ('manual', 'fail', 'allow'),
+             'review_coverage.incomplete 必须为 manual、fail 或 allow')
+    coverage = ReviewCoverage(**coverage_values)
     _require(not autotune.auto_apply or (autotune.enabled and autonomy.enabled),
              "自动应用调优必须同时启用 autonomy 和 autotune")
 
@@ -331,6 +354,7 @@ def parse_config(raw: dict[str, Any], base_dir: Path | None = None) -> Config:
         tune_proposal_id=str(raw.get("tune_proposal_id", default_value(Config, "tune_proposal_id"))),
         autonomy=autonomy,
         autotune=autotune,
+        review_coverage=coverage,
     )
 
 

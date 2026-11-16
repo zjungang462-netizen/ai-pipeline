@@ -28,11 +28,15 @@ def git(repo, *args, check=True):
 
 
 def credential_findings(data, path, source):
-    if b'\0' in data[:8192]:
-        return []  # 只扫描文本；不把二进制作为配置或源码读取。
+    utf16 = data[:2] in (b'\xff\xfe', b'\xfe\xff')
+    if not utf16 and b'\0' in data[:8192]:
+        return []  # 只扫描文本；带 BOM 的 Windows UTF-16 脚本需继续检查。
     if len(data) > MAX_SCAN_BYTES:
         return [dict(path=path, source=source, kind='scan_size_limit', line=0)]
-    text = data.decode('utf8', errors='replace')
+    try:
+        text = data.decode('utf-16') if utf16 else data.decode('utf8', errors='replace')
+    except UnicodeDecodeError:
+        return [dict(path=path, source=source, kind='encoding_error', line=0)]
     findings = []
     for number, line in enumerate(text.splitlines(), 1):
         kinds = []

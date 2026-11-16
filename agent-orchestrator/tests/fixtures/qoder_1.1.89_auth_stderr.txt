@@ -1,0 +1,5 @@
+An unexpected critical error occurred:NonInteractiveAuthRequiredError: Not logged in · Please run /login
+    at BUd (file:///C:/fixture/qodercli.js)
+    at EFA (file:///C:/fixture/qodercli.js)
+    at Object.init (file:///C:/fixture/qodercli.js)
+    at async file:///C:/fixture/qodercli.js

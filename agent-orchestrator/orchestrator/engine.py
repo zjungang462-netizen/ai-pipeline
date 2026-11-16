@@ -304,6 +304,8 @@ class Engine(GuardControls, StageExecutor, ReviewPolicy, BudgetPolicy, ArchiveOp
         del self.state.pending_approvals[stage_name]
         atomic_write_json(directory / "approval.json", record)
         st.status = StageStatus.DONE
+        self.state._set_attempt_record(stage_name, st.current_attempt, directory, success=True,
+                                       outputs_hash=st.outputs_hash, commit_sha=st.commit_sha)
         self.state.log_event("approved", stage_name)
         self.state.save()
         return True

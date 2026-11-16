@@ -169,7 +169,7 @@ def evidence_plan(root: Path, *, older_than=DEFAULT_RETENTION_DAYS,
             else:
                 unmanaged += info['bytes']
         except (OSError, ValueError) as error:
-            issues.append(dict(path=str(folder), reason=str(error)))
+            issues.append(dict(path=str(folder), reason='unreadable_or_unsafe_bundle'))
     total = unmanaged + sum(info['bytes'] for _, info in rows)
     remaining = total
     for folder, info in sorted(rows, key=lambda row: (row[1]['newest'], str(row[0]))):
@@ -180,7 +180,7 @@ def evidence_plan(root: Path, *, older_than=DEFAULT_RETENTION_DAYS,
                                 fingerprint=info['fingerprint']))
             remaining -= info['bytes']
     if remaining > max_bytes:
-        issues.append(dict(path=str(root), reason='受保护或非诊断文件使占用仍超过上限'))
+        issues.append(dict(path=str(root), reason='protected_files_over_capacity'))
     return dict(actions=actions, issues=issues, total_bytes=total, remaining_bytes=remaining)
 
 

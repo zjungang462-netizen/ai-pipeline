@@ -55,5 +55,31 @@
     "source_sha256": null,
     "fixture_sha256": "06eecb7f224bc04ea7f3c2a5adfe7e312dcfce35f50a153cf033d068c48fd057",
     "note": "原始抓包未保留独立副本；此 fixture 即脱敏后的字节。"
+  },
+  "qwen_0.26.0_real.json": {
+    "source": "真实本机 Qwen Code 0.26.0 stdin 无工具协议探针；不是合成结构",
+    "version": "0.26.0",
+    "captured_at": "2026-11-17T02:01:45.937799+08:00",
+    "backend": "DeepSeek OpenAI-compatible API (deepseek-chat), not a Qwen model",
+    "redacted_fields": [
+      "session_id",
+      "uuid",
+      "cwd",
+      "known local source paths"
+    ],
+    "source_sha256": "7e86a98948c87f604e7561c6ee42c316588f8349221f65abe1d895c29f2d8df2",
+    "fixture_sha256": "95f084c68c966780f0a2497e560afb42e48435f2e92e0abc25d5e4b8092c8f54",
+    "scope": "JSON array final result, stdin, reported usage; no tool calls verified"
+  },
+  "qoder_1.1.89_auth_stderr.txt": {
+    "source": "真实本机 Qoder 1.1.89 非交互未登录失败；不是成功样本",
+    "version": "1.1.89",
+    "captured_at": "2026-11-17T02:12:59.654253+08:00",
+    "redacted_fields": [
+      "stack local installation path"
+    ],
+    "source_sha256": "205d27ce46fd272d7155ec23418de5fd3b1a2678767476dcaae0955db3e1c09f",
+    "fixture_sha256": "ad63e1a9e14b52bedcdf6aad512d64954f2b7f4d45492469fcfc562dc9dc844e",
+    "scope": "authentication rejection only; no model or tool success verified"
   }
 }

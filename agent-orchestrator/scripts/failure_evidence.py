@@ -226,6 +226,19 @@ def _relative_label(index,root,path):
     return 'root-'+str(index)+('/'+relative if relative and relative!='.' else '')
 
 
+def _retention_summary(plan):
+    """只保留数字和有界原因代码，丢弃任意绝对路径/异常正文。"""
+    summary={key:value for key in ('total_bytes','remaining_bytes')
+             if type(value:=plan.get(key)) is int and value>=0}
+    reasons=[]
+    for issue in plan.get('issues',[])[:80]:
+        reason=issue.get('reason') if isinstance(issue,dict) else None
+        code=reason if isinstance(reason,str) and re.fullmatch(r'[a-z][a-z0-9_]{0,79}',reason) else 'retention_issue'
+        if code not in reasons:reasons.append(code)
+    summary['issues']=[{'reason':reason} for reason in reasons]
+    return summary
+
+
 def capture(test_id, roots, output=None, secrets=(), failure='', metadata=None):
     """只复制允许的诊断摘要；成功返回前根目录尚未被 TestCase 清理。"""
     target=Path(output or os.environ.get(ENV_OUTPUT) or Path.cwd()/'.test-failures').resolve()
@@ -313,13 +326,23 @@ def capture(test_id, roots, output=None, secrets=(), failure='', metadata=None):
         folder.mkdir()
         (folder/'evidence.json').write_bytes(raw)
         try:
-            prune_evidence(target, keep=(folder,))
+            retention=prune_evidence(target, keep=(folder,))
         except (OSError, ValueError):
             # 保留策略不能吞掉本次失败现场；清理错误独立记入诊断包。
             payload['issues'].append({'reason':'retention_cleanup_failed'})
             raw=json.dumps(payload,ensure_ascii=True,indent=2).encode('utf8')
             if len(raw)<=MAX_BUNDLE_BYTES:
                 (folder/'evidence.json').write_bytes(raw)
+        else:
+            payload['retention']=_retention_summary(retention)
+            raw=json.dumps(payload,ensure_ascii=True,indent=2).encode('utf8')
+            while len(raw)>MAX_BUNDLE_BYTES and payload['records']:
+                payload['records'].pop()
+                payload['causes']=classify(payload['records'])
+                raw=json.dumps(payload,ensure_ascii=True,indent=2).encode('utf8')
+            if len(raw)<=MAX_BUNDLE_BYTES:
+                from orchestrator.state import atomic_write_json
+                atomic_write_json(folder/'evidence.json',payload)
     return folder/'evidence.json'
 
 

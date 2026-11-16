@@ -1,5 +1,6 @@
 """固定提交、产物归档、工作区清理与测试产物记录。"""
 from __future__ import annotations
+from dataclasses import asdict
 
 from . import artifacts
 from .contracts import ErrorKind, Result, RunContext, StageSpec, StageStatus
@@ -116,5 +117,13 @@ class ArchiveOperations:
                     if Path(source).resolve() != dest.resolve():
                         shutil.copy2(source, dest)
                     break
+        if spec.kind == 'review':
+            from .state import atomic_write_json
+            missing = self._review_missing.get(spec.name, [])
+            atomic_write_json(attempt_dir/'review-coverage.json', {
+                'schema_version': 1, 'complete': not missing, 'missing': missing,
+                'policy': asdict(self.config.review_coverage),
+                'scope': 'injected_prompt_files_only', 'channel': result.channel,
+                'cli_extra_reads_verified': False})
         from .evidence import seal
         return seal(attempt_dir, self.config.task_workdir, result.commit_sha)

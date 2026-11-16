@@ -34,6 +34,9 @@ class ReviewPolicy:
         对未注入的实现给 pass。仍无法完整注入时记录到 _review_missing。
         """
         current_kind = spec.kind
+        policy = self.config.review_coverage
+        if current_kind == 'review':
+            self._review_missing[spec.name] = []
         parts: list[str] = []
         reports: list[Path] = []
         for up in self.config.stages[:index]:
@@ -64,18 +67,20 @@ class ReviewPolicy:
                 if current_kind == "review":
                     diff, total_lines, truncated = artifacts.cumulative_diff_info(
                         self.config.task_workdir, st.commit_sha,
-                        base_sha=self.state.control.get('project_baseline'))
+                        base_sha=self.state.control.get('project_baseline'), max_lines=policy.diff_lines)
                     label = "代码全量（相对项目基线累积）"
                     if truncated:
                         changed = artifacts.changed_files_at(
                             self.config.task_workdir, st.commit_sha,
                             base_sha=self.state.control.get('project_baseline'))
                         body, missing = artifacts.review_file_context(
-                            self.config.task_workdir, st.commit_sha, changed)
+                            self.config.task_workdir, st.commit_sha, changed,
+                            per_file_bytes=policy.per_file_bytes, total_bytes=policy.total_bytes,
+                            max_files=policy.max_files)
                         if missing:
-                            self._review_missing[spec.name] = missing
+                            self._review_missing[spec.name] = sorted(set(self._review_missing[spec.name]) | set(missing))
                         if body:
-                            diff = (f"{diff}\n\n...（累积 diff 超过 600 行已截断，"
+                            diff = (f"{diff}\n\n...（累积 diff 超过 {policy.diff_lines} 行已截断，"
                                     f"以下为按 commit 注入的变更文件全文，共 {len(changed)} 个文件）\n\n{body}")
                 else:
                     diff = artifacts.diff_summary(self.config.task_workdir, st.commit_sha)
@@ -88,7 +93,11 @@ class ReviewPolicy:
                 u.kind == "code" and self.state.stage(u.name).commit_sha
                 for u in self.config.stages[:index])
             if not has_upstream_code:
-                existing = artifacts.existing_code_context(self.config.task_workdir)
+                existing, missing = artifacts.existing_code_context_info(
+                    self.config.task_workdir, max_file_bytes=policy.existing_per_file_bytes,
+                    max_total_bytes=policy.existing_total_bytes, max_files=policy.max_files,
+                    exclude=self.config.state_dir)
+                self._review_missing[spec.name] = missing
                 if existing:
                     parts.append(f"### 被审查代码库（工作区现有源码）\n{existing}")
         return "\n\n".join(parts), reports
@@ -239,6 +248,8 @@ class ReviewPolicy:
                      workspace_hash_override: str | None = None) -> str:
         # 渲染结果计入 inputs_hash（评审 B1）：上游产物变了 => 指纹变 => 下游 stale。
         config_keys = dict(spec.config_keys)
+        if spec.kind == 'review':
+            config_keys['__review_coverage__'] = asdict(self.config.review_coverage)
         adapter = self.config.adapters.get(spec.adapter)
         config_keys["__execution__"] = {
             "protocol": 2, "kind": spec.kind,
@@ -296,6 +307,8 @@ class ReviewPolicy:
             saved = self.state.autonomy.setdefault('execution_inputs', {}).get(spec.name)
             if prompt_override is None and saved and saved['logical_hash'] == logical:
                 self._prompts[spec.name] = saved['prompt']
+                if spec.kind == 'review':
+                    self._review_missing[spec.name] = saved.get('coverage_missing', [])
                 return saved['inputs_hash']
         if spec.kind == "test":
             prompt = ""
@@ -305,7 +318,8 @@ class ReviewPolicy:
         inputs_hash = compute_inputs_hash(prompt, self._upstream_hashes(index), config_keys)
         if logical:
             self.state.autonomy['execution_inputs'][spec.name] = {
-                'logical_hash': logical, 'inputs_hash': inputs_hash, 'prompt': prompt}
+                'logical_hash': logical, 'inputs_hash': inputs_hash, 'prompt': prompt,
+                'coverage_missing': self._review_missing.get(spec.name, [])}
         return inputs_hash
 
     def _exhausted_review_stands(self, spec: StageSpec, inputs_hash: str) -> bool:
@@ -342,22 +356,18 @@ class ReviewPolicy:
 
         missing = self._review_missing.get(spec.name, [])
         if verdict is not None and verdict.passed and missing:
-            # 审查模型只看到部分实现时，pass 不能当作完成：交人工确认；
-            # 无人值守下沿用 AWAITING→FAILED 的保守语义。
-            reason = (f"审查上下文覆盖不完整：{len(missing)} 个变更文件未注入提示词"
-                      f"（{missing[:5]}）；通过结论不能自动采纳")
-            self.state.pending_approvals[spec.name] = {
-                "stage": spec.name, "outputs_hash": outputs_hash,
-                "n": n, "inputs_hash": inputs_hash,
-                "requested_at": time.time(), "requested_by": "review_incomplete",
-            }
-            self.state.log_event("review_incomplete", spec.name, round=rounds_used,
-                                 missing=missing[:20])
-            self.state.commit_success(
-                spec.name, n, attempt_dir, inputs_hash, outputs_hash,
-                result.commit_sha, result.branch, verdict="unparsed",
-                status=StageStatus.AWAITING_APPROVAL, error=reason)
-            return StageStatus.AWAITING_APPROVAL
+            action = self.config.review_coverage.incomplete
+            if action == 'fail':
+                self.state.log_event('review_incomplete', spec.name, missing=missing[:20], policy=action)
+                self.state.commit_success(spec.name, n, attempt_dir, inputs_hash, outputs_hash,
+                    result.commit_sha, result.branch, verdict='fail', status=StageStatus.FAILED,
+                    error='审查覆盖不完整，按 review_coverage.incomplete=fail 拒绝通过')
+                return StageStatus.FAILED
+            if action == 'allow':
+                self.state.log_event('review_incomplete_allowed', spec.name, missing=missing[:20], policy=action)
+            else:
+                return self._incomplete_review_approval(spec, result, attempt_dir, n, inputs_hash,
+                                                        outputs_hash, rounds_used, missing)
 
         if verdict is None:
             self.state.pending_approvals[spec.name] = {
@@ -381,6 +391,31 @@ class ReviewPolicy:
                 result.commit_sha, result.branch, verdict="pass")
             return None
 
+        return self._failed_review_feedback(spec, result, attempt_dir, n, inputs_hash,
+                                             outputs_hash, rounds_used, verdict)
+
+    def _incomplete_review_approval(self, spec, result, attempt_dir, n, inputs_hash,
+                                   outputs_hash, rounds_used, missing):
+        # 审查模型只看到部分实现时，pass 不能当作完成：交人工确认；
+        # 无人值守下沿用 AWAITING→FAILED 的保守语义。
+        reason = (f"审查上下文覆盖不完整：{len(missing)} 个变更文件未注入提示词"
+                  f"（{missing[:5]}）；通过结论不能自动采纳")
+        self.state.pending_approvals[spec.name] = {
+            "stage": spec.name, "outputs_hash": outputs_hash,
+            "n": n, "inputs_hash": inputs_hash,
+            "requested_at": time.time(), "requested_by": "review_incomplete",
+        }
+        self.state.log_event("review_incomplete", spec.name, round=rounds_used,
+                             missing=missing[:20])
+        self.state.commit_success(
+            spec.name, n, attempt_dir, inputs_hash, outputs_hash,
+            result.commit_sha, result.branch, verdict="unparsed",
+            status=StageStatus.AWAITING_APPROVAL, error=reason)
+        return StageStatus.AWAITING_APPROVAL
+
+    def _failed_review_feedback(self, spec, result, attempt_dir, n, inputs_hash,
+                                outputs_hash, rounds_used, verdict):
+        from .review import format_feedback
         # 不通过
         stopped = self._feedback_limit(spec, format_feedback(verdict, rounds_used)) if spec.feedback_to else ''
         if not spec.feedback_to or rounds_used >= spec.max_rounds or stopped:

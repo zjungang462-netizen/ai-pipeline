@@ -1,0 +1,171 @@
+[
+  {
+    "type": "system",
+    "subtype": "init",
+    "uuid": "fixture-event",
+    "session_id": "fixture-session",
+    "cwd": "C:/fixture",
+    "tools": [
+      "read_file",
+      "run_shell_command",
+      "get_goal",
+      "update_goal",
+      "edit",
+      "notebook_edit"
+    ],
+    "mcp_servers": [],
+    "model": "deepseek-chat",
+    "permission_mode": "default",
+    "slash_commands": [
+      "advisor",
+      "auth",
+      "bug",
+      "clear",
+      "compress",
+      "compress-fast",
+      "config",
+      "context",
+      "curator",
+      "diff",
+      "docs",
+      "doctor",
+      "effort",
+      "export",
+      "extensions",
+      "goal",
+      "hooks",
+      "import-config",
+      "init",
+      "insight",
+      "language",
+      "model",
+      "output-style",
+      "stats",
+      "status",
+      "summary",
+      "tasks",
+      "update"
+    ],
+    "qwen_code_version": "0.26.0",
+    "agents": [
+      "general-purpose",
+      "Explore",
+      "statusline-setup",
+      "review-agent",
+      "claude-code",
+      "codex"
+    ]
+  },
+  {
+    "type": "assistant",
+    "uuid": "fixture-event",
+    "session_id": "fixture-session",
+    "parent_tool_use_id": null,
+    "message": {
+      "id": "3ef60b70-3de5-4fb9-8366-618b50fb9835",
+      "type": "message",
+      "role": "assistant",
+      "model": "deepseek-chat",
+      "content": [
+        {
+          "type": "text",
+          "text": "QWEN_PROTOCOL_CAPTURE_20261117"
+        }
+      ],
+      "stop_reason": null,
+      "usage": {
+        "input_tokens": 7270,
+        "output_tokens": 12,
+        "cache_read_input_tokens": 0,
+        "total_tokens": 7282
+      }
+    }
+  },
+  {
+    "type": "result",
+    "subtype": "success",
+    "uuid": "fixture-event",
+    "session_id": "fixture-session",
+    "is_error": false,
+    "duration_ms": 1218,
+    "duration_api_ms": 1210,
+    "num_turns": 1,
+    "result": "QWEN_PROTOCOL_CAPTURE_20261117",
+    "usage": {
+      "input_tokens": 7270,
+      "output_tokens": 12,
+      "cache_read_input_tokens": 0,
+      "total_tokens": 7282
+    },
+    "permission_denials": [],
+    "stats": {
+      "models": {
+        "deepseek-flash": {
+          "api": {
+            "totalRequests": 1,
+            "totalErrors": 0,
+            "totalLatencyMs": 1153
+          },
+          "tokens": {
+            "prompt": 7270,
+            "candidates": 12,
+            "total": 7282,
+            "cached": 0,
+            "thoughts": 0
+          },
+          "bySource": {
+            "main": {
+              "api": {
+                "totalRequests": 1,
+                "totalErrors": 0,
+                "totalLatencyMs": 1153
+              },
+              "tokens": {
+                "prompt": 7270,
+                "candidates": 12,
+                "total": 7282,
+                "cached": 0,
+                "thoughts": 0
+              }
+            }
+          }
+        }
+      },
+      "tools": {
+        "totalCalls": 0,
+        "totalSuccess": 0,
+        "totalFail": 0,
+        "totalDurationMs": 0,
+        "totalDecisions": {
+          "accept": 0,
+          "reject": 0,
+          "modify": 0,
+          "auto_accept": 0
+        },
+        "byName": {}
+      },
+      "files": {
+        "totalLinesAdded": 0,
+        "totalLinesRemoved": 0
+      },
+      "skills": {
+        "totalCalls": 0,
+        "totalSuccess": 0,
+        "totalFail": 0,
+        "byName": {}
+      },
+      "generation": {
+        "timedRequests": 1,
+        "totalTtftMs": 1016,
+        "totalGenerationDurationMs": 135,
+        "totalThroughputOutputTokens": 12,
+        "last": {
+          "model": "deepseek-flash",
+          "ttftMs": 1016,
+          "generationDurationMs": 135,
+          "outputTokens": 12
+        }
+      }
+    }
+  }
+]

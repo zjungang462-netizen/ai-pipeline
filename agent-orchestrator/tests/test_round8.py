@@ -209,7 +209,7 @@ class TestOutsideWrite(unittest.TestCase):
             self.assertIn("可写根外", eng.state.stage("requirements").error)
             self.assertEqual(sibling.read_text(encoding="utf-8"), "overwritten-content")
 
-    def test_new_outside_file_is_removed_and_not_retried(self):
+    def test_new_outside_file_is_preserved_and_not_retried(self):
         class Escape(Adapter):
             channel = "fake"
 
@@ -243,7 +243,12 @@ class TestOutsideWrite(unittest.TestCase):
             escaped = cfg.task_workdir.parent / "escaped.txt"
             self.assertEqual(res["requirements"], StageStatus.FAILED.value)
             self.assertEqual(ad.calls, 1)
-            self.assertFalse(escaped.exists())
+            self.assertEqual(escaped.read_text(encoding='utf8'),'evil')
+            violation = eng.state.control['write_violations']['requirements']
+            self.assertTrue(violation['source_files_preserved'])
+            self.assertTrue((eng.state.run_dir/violation['evidence']).is_file())
+            self.assertEqual(eng.run()['requirements'],StageStatus.FAILED.value)
+            self.assertEqual(ad.calls,1)
 
     def test_delete_outside_file_fails_stage(self):
         class Deleter(Adapter):

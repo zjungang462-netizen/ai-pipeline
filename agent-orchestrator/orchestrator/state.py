@@ -379,7 +379,21 @@ class RunState:
         n = (max(existing) + 1) if existing else 1
         path = adir / str(n)
         path.mkdir(parents=True, exist_ok=True)
+        # 调用前即持久化：失败、超时或进程崩溃也必须留下真实尝试次数。
+        self._set_attempt_record(name, n, path, success=False)
+        self.save()
         return n, path
+
+    def _set_attempt_record(self, name: str, n: int, path: Path, *, success: bool,
+                            outputs_hash=None, commit_sha=None) -> None:
+        stage = self.stage(name)
+        record = next((a for a in stage.attempts if a.n == n), None)
+        if record is None:
+            stage.attempts.append(AttemptRecord(n=n, path=str(path), success=success,
+                                               outputs_hash=outputs_hash, commit_sha=commit_sha))
+        else:
+            record.path, record.success = str(path), success
+            record.outputs_hash, record.commit_sha = outputs_hash, commit_sha
 
     def current_attempt_dir(self, name: str) -> Path | None:
         st = self.stage(name)
@@ -395,6 +409,10 @@ class RunState:
             if not adir.is_dir():
                 continue
             for p in adir.iterdir():
+                if p.is_dir() and p.name.isdigit() and not any(a.n == int(p.name) for a in st.attempts):
+                    # 恢复目录创建后、状态保存前崩溃的孤立 attempt；没有证据不猜成功。
+                    self._set_attempt_record(name, int(p.name), p, success=False)
+                    self.save()
                 if p.is_dir() and p.name.isdigit() and not (p / "success.json").is_file():
                     # 该 attempt 未完成；若它正是 current 则阶段不可信
                     if st.current_attempt == int(p.name):
@@ -456,12 +474,8 @@ class RunState:
         st.branch = data.get("branch")
         st.status = status
         st.error = error
-        if not any(a.n == n for a in st.attempts):
-            st.attempts.append(AttemptRecord(
-                n=n, path=str(adir / str(n)),
-                success=status == StageStatus.DONE,
-                outputs_hash=data.get("outputs_hash"),
-                commit_sha=data.get("commit_sha")))
+        self._set_attempt_record(name, n, adir / str(n), success=status == StageStatus.DONE,
+                                 outputs_hash=data.get("outputs_hash"), commit_sha=data.get("commit_sha"))
 
     def terminal_replay(self, name: str, inputs_hash: str) -> str | None:
         """最新匹配记录若是失败或不可解析结论，恢复该状态，不当作通过。
@@ -527,14 +541,19 @@ class RunState:
             payload["verdict"] = verdict
         if error:
             payload["error"] = error
+        coverage_path = attempt_dir/'review-coverage.json'
+        if coverage_path.is_file():
+            coverage = json.loads(coverage_path.read_text(encoding='utf8'))
+            payload['review_coverage'] = {'complete': coverage['complete'],
+                                          'missing': coverage['missing'],
+                                          'incomplete_policy': coverage['policy']['incomplete']}
         atomic_write_json(attempt_dir / "success.json", payload)
         atomic_write_json(attempt_dir / "decision.json", {
             **payload, "verdict": verdict or "pass", "status": status.value,
         })
         st = self.stage(name)
-        st.attempts.append(AttemptRecord(
-            n=n, path=str(attempt_dir), success=status == StageStatus.DONE,
-            outputs_hash=outputs_hash, commit_sha=commit_sha))
+        self._set_attempt_record(name, n, attempt_dir, success=status == StageStatus.DONE,
+                                 outputs_hash=outputs_hash, commit_sha=commit_sha)
         st.current_attempt = n
         st.inputs_hash = inputs_hash
         st.outputs_hash = outputs_hash
