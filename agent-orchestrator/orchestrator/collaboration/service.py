@@ -1,17 +1,20 @@
 """本地控制服务，不接受浏览器提供的任意磁盘路径或命令。"""
 from __future__ import annotations
 
+import base64
 import hashlib
 import json
 import os
 import threading
+import subprocess
+import sys
 import time
 from pathlib import Path
 
 from ..config import load_config
 from ..state import RunState, atomic_write_json
 from .storage import Store, Conflict, identifier
-from .projection import project, directory, lifecycle, artifact_list, read_json, stage_target
+from .projection import project, directory, lifecycle, artifact_list, read_json, stage_target, SummaryCache
 
 
 class Service:
@@ -19,11 +22,26 @@ class Service:
         self.store = Store(database)
         self.operations = threading.RLock()
         self.active = {}
+        self.active_topics = {}
+        self._command_waiters = set()
+        self._configs = {}
+        self._projection_cache = {}
+        self._summary_cache = SummaryCache()
         self.closed = threading.Event()
         for path in configs:
             cfg = load_config(path)
             self.store.register_project(cfg.source_path)
-        self.sync()
+        self.sync(recover=True)
+
+    def config(self, path):
+        key = str(path)
+        stat = Path(path).stat()
+        signature = (stat.st_size, stat.st_mtime_ns)
+        cached = self._configs.get(key)
+        if cached is None or cached[0] != signature:
+            cached = (signature, load_config(path))
+            self._configs[key] = cached
+        return cached[1]
 
     def redact(self, value):
         secrets = []
@@ -42,22 +60,40 @@ class Service:
             return item
         return scrub(value)
 
-    def sync(self):
+    def sync(self, recover=False):
+        with self.store.session():
+            return self._sync(recover)
+
+    def _sync(self, recover=False):
         for entry in self.store.projects():
-            cfg = load_config(entry['config'])
+            if self.closed.is_set():return
+            cfg = self.config(entry['config'])
             root = cfg.state_dir / 'runs'
             if root.is_dir():
                 for path in root.iterdir():
+                    if self.closed.is_set():return
                     if path.is_dir() and (path / 'state.json').is_file():
                         try:
                             RunState(cfg.state_dir, path.name)
                         except ValueError:
                             continue
-                        self.store.register_run(entry['id'], path.name, entry['config'], cfg.state_dir)
+                        key = self.store.register_run(entry['id'], path.name, entry['config'], cfg.state_dir)
+                        job = read_json(path / 'job.json')
+                        candidate = Path(job.get('config', entry['config'])).resolve()
+                        if candidate.parent == cfg.base_dir and candidate.suffix == '.toml' and candidate.is_file():
+                            pinned = self.config(candidate)
+                            if pinned.source_hash == job.get('config_hash'):
+                                self.store.pin_import_config(key, candidate)
         for run in self.store.runs():
-            state, job = project(self.store, run)
-            if run['managed'] and lifecycle(state, job) in ('running', 'pending', 'recovering'):
+            if self.closed.is_set():return
+            state, job = project(self.store, run, self._projection_cache)
+            if recover and run['managed'] and (lifecycle(state, job) in ('running', 'pending', 'recovering')
+                                               or self.store.commands(run['id'])):
                 self.launch(run['id'])
+            if recover:
+                for topic in self.store.threads(run['id']):
+                    if topic['status'] in ('queued', 'running'):
+                        self.launch_discussion(topic['id'])
             # state 先提交、收据尚未投影时，补齐命令而不重复执行。
             for command_id, receipt in state.get('control', {}).get('receipts', {}).items():
                 try:
@@ -67,7 +103,7 @@ class Service:
 
     def snapshot(self, key):
         run = self.store.run(key)
-        state, job = project(self.store, run)
+        state, job = project(self.store, run, self._projection_cache)
         status = lifecycle(state, job)
         managed = bool(run['managed'])
         active = status in ('pending', 'running', 'recovering')
@@ -82,12 +118,343 @@ class Service:
                 'capabilities': {'pause': managed and active, 'resume': managed and paused,
                                  'cancel': managed and status in ('pending', 'running', 'recovering', 'paused', 'waiting_approval'),
                                  'approve': managed and waiting, 'derive': True,
+                                 'rerun': managed and status in ('paused', 'done', 'failed'),
                                  'discussion': bool(state.get('stages'))},
                 'parent_id': run['parent_id'], 'managed': managed,
                 'last_cursor': self.store.last_cursor(key),
-                'deadline': job.get('started_at', 0) + job.get('max_duration_s', 0) if job else None,
+                'deadline': job.get('started_at', 0) + job.get('max_duration_s', 0) if job else state.get('control',{}).get('cli_deadline'),
                 'artifacts': artifact_list(run), 'threads': self.store.threads(key)}
+        data['usage'] = dict(data['usage'])
+        data['usage'].setdefault('reported_tokens', max(0, data['usage'].get('tokens', 0) - data['usage'].get('reserved_tokens', 0)))
+        from ..cli_activity import read_activities
+        data['cli_activity']=self.redact(read_activities(run,state))
+        for activity in data['cli_activity']:
+            self.store.event(key+':cli:'+activity['call_id']+':'+str(activity['revision']),key,'cli_progress',activity)
+        data['last_cursor']=self.store.last_cursor(key)
+        cfg = self.config(run['config'])
+        data['budget'] = {'max_tokens': cfg.run_budget.max_tokens, 'max_duration_s': cfg.run_budget.max_duration_s}
+        data['code_stages'] = [s.name for s in cfg.stages if s.kind == 'code' and state.get('stages', {}).get(s.name, {}).get('commit_sha')]
+        data['metrics'] = read_json(directory(run) / 'metrics.json')
+        data['strategy'] = {'proposal_id': cfg.tune_proposal_id,
+                            'repair_batch_size': cfg.autonomy.repair_batch_size,
+                            'auto_apply': cfg.autotune.auto_apply}
+        data['capabilities']['derive'] = any(s.get('commit_sha') for s in state.get('stages', {}).values())
+        data['capabilities']['discussion'] = bool(state.get('stages')) and any(a.type == 'openai_compat' for a in cfg.adapters.values())
+        data['config_integrity'] = ('not_recorded' if not job.get('config_hash') else
+                                    'valid' if cfg.source_hash == job['config_hash'] else 'changed')
+        if data['config_integrity'] == 'changed':
+            for action in ('approve', 'resume', 'rerun', 'derive', 'discussion'):
+                data['capabilities'][action] = False
         return self.redact(data)
+
+    def list_runs(self, limit=100, before=None):
+        """列表只读摘要；产物、会诊和长记录在进入任务房间后加载。"""
+        result = []
+        with self.store.session():
+            for run in self.store.runs(limit, before):
+                task, status = self._summary_cache.read(run)
+                result.append({'id': run['id'], 'run_id': run['run_id'],
+                               'project_id': run['project_id'], 'created': run['created'],
+                               'task': task,
+                               'lifecycle': status, 'managed': bool(run['managed'])})
+        return self.redact(result)
+
+    # ── 游标格式：URL-safe Base64(JSON {"v":1,"ch":"<created.hex()>","id":"<id>","bh":"<before.hex()|null>",
+    #                                       "qh":"<q_normalized|null>","pi":"<project_id|null>","st":"<status>"})
+    _CURSOR_VERSION = 2
+    _CURSOR_MAX_LEN = 8192  # 容纳 200 个 Unicode 字符编码后的合法查询
+
+    # 合法 status 值及其对应的底层 lifecycle 集合
+    _STATUS_GROUPS: dict[str, set[str] | None] = {
+        'all': None,
+        'running': {'pending', 'running', 'recovering'},
+        'paused': {'paused'},
+        'waiting_approval': {'waiting_approval'},
+        'done': {'done'},
+        'failed': {'failed', 'timeout', 'cancelled'},
+    }
+
+    def _encode_cursor(self, created: float, run_id: str, before: float | None,
+                       q: str = '', project_id: str = '', status: str = 'all') -> str:
+        payload = json.dumps({
+            'v': self._CURSOR_VERSION,
+            'ch': float(created).hex(),
+            'id': run_id,
+            'bh': float(before).hex() if before is not None else None,
+            'qh': q if q else None,
+            'pi': project_id if project_id else None,
+            'st': status,
+        }, separators=(',', ':')).encode('utf-8')
+        return base64.urlsafe_b64encode(payload).decode('ascii')
+
+    def _decode_cursor(self, cursor: str) -> tuple[float, str, float | None, str, str, str]:
+        """返回 (created, id, before_or_None, q, project_id, status)；非法时抛 ValueError。"""
+        if not isinstance(cursor, str) or not 1 <= len(cursor) <= self._CURSOR_MAX_LEN:
+            raise ValueError('游标格式无效')
+        try:
+            payload = base64.b64decode(cursor + '=' * (-len(cursor) % 4), altchars=b'-_', validate=True)
+            obj = json.loads(payload.decode('utf-8'))
+        except (ValueError, UnicodeError):
+            raise ValueError('游标格式无效')
+        if not isinstance(obj, dict) or type(obj.get('v')) is not int:
+            raise ValueError('游标版本不支持')
+        # 兼容旧版 v=1 游标（无筛选字段），视为无筛选
+        if obj['v'] == 1:
+            if set(obj) != {'v', 'ch', 'id', 'bh'}:
+                raise ValueError('游标版本不支持')
+            try:
+                if not isinstance(obj['ch'], str) or not isinstance(obj['id'], str):
+                    raise ValueError('游标字段类型错误')
+                created = float.fromhex(obj['ch'])
+                run_id = obj['id']
+                bh = obj.get('bh')
+                if bh is not None and not isinstance(bh, str):
+                    raise ValueError('游标边界类型错误')
+                before = float.fromhex(bh) if bh is not None else None
+            except (KeyError, ValueError, TypeError, OverflowError):
+                raise ValueError('游标字段无效')
+            if not isinstance(run_id, str) or not run_id:
+                raise ValueError('游标 id 无效')
+            import math
+            if not math.isfinite(created) or (before is not None and not math.isfinite(before)):
+                raise ValueError('游标时间戳无效')
+            return created, run_id, before, '', '', 'all'
+        elif obj['v'] == self._CURSOR_VERSION:
+            if set(obj) != {'v', 'ch', 'id', 'bh', 'qh', 'pi', 'st'}:
+                raise ValueError('游标版本不支持')
+            try:
+                if not isinstance(obj['ch'], str) or not isinstance(obj['id'], str):
+                    raise ValueError('游标字段类型错误')
+                created = float.fromhex(obj['ch'])
+                run_id = obj['id']
+                bh = obj.get('bh')
+                if bh is not None and not isinstance(bh, str):
+                    raise ValueError('游标边界类型错误')
+                before = float.fromhex(bh) if bh is not None else None
+                qh = obj.get('qh')
+                if qh is not None and (not isinstance(qh,str) or len(qh)>600):
+                    raise ValueError('游标关键词类型或长度错误')
+                q = qh if isinstance(qh, str) else ''
+                pi = obj.get('pi')
+                if pi is not None and (not isinstance(pi,str) or len(pi)>512):
+                    raise ValueError('游标项目类型或长度错误')
+                project_id = pi if isinstance(pi, str) else ''
+                st = obj.get('st', 'all')
+                if not isinstance(st, str) or st not in self._STATUS_GROUPS:
+                    raise ValueError('游标状态无效')
+            except (KeyError, ValueError, TypeError, OverflowError):
+                raise ValueError('游标字段无效')
+            if not isinstance(run_id, str) or not run_id:
+                raise ValueError('游标 id 无效')
+            import math
+            if not math.isfinite(created) or (before is not None and not math.isfinite(before)):
+                raise ValueError('游标时间戳无效')
+            return created, run_id, before, q, project_id, st
+        else:
+            raise ValueError('游标版本不支持')
+
+    def list_runs_page(self, limit: int = 50, before: float | None = None, cursor: str | None = None,
+                       q: str | None = None, project_id: str | None = None,
+                       status: str | None = None):
+        """稳定游标分页，支持全历史筛选；返回 {runs, has_more, next_cursor}。"""
+        import math
+
+        # None 表示遗漏；显式空关键词、空项目不能被游标中的旧条件覆盖。
+        supplied_q, supplied_project, supplied_status = q is not None, project_id is not None, status is not None
+        q = '' if q is None else q
+        project_id = '' if project_id is None else project_id
+        status = 'all' if status is None else status
+
+        # 验证筛选参数
+        if not isinstance(q, str):
+            raise ValueError('q 必须为字符串')
+        q_norm = q.strip().casefold()  # 规范化关键词
+        if len(q) > 200:
+            raise ValueError('q 最多 200 字符')
+        if not isinstance(project_id, str):
+            raise ValueError('project_id 必须为字符串')
+        if len(project_id) > 512:
+            raise ValueError('project_id 过长')
+        if not isinstance(status, str) or status not in self._STATUS_GROUPS:
+            raise ValueError(f'status 必须为 {"/".join(self._STATUS_GROUPS)} 之一')
+
+        # 夹取 limit
+        limit = max(1, min(100, limit))
+        if before is not None and not math.isfinite(before):
+            raise ValueError('分页时间边界必须为有限数')
+
+        # 解码游标
+        cur_created: float | None = None
+        cur_id: str | None = None
+        cursor_before: float | None = None
+        cursor_q: str = ''
+        cursor_project_id: str = ''
+        cursor_status: str = 'all'
+        # 判断调用方是否显式提供了筛选参数（URL 中有 q/project_id/status）
+        # 若只传 cursor 不传筛选参数，则从游标中恢复筛选条件；
+        # 若显式传了筛选参数但与游标不一致，则返回400。
+        caller_has_filters = supplied_q or supplied_project or supplied_status
+        if cursor is not None:
+            cur_created, cur_id, cursor_before, cursor_q, cursor_project_id, cursor_status = self._decode_cursor(cursor)
+            # 遗漏范围参数时继承游标；显式改变任何已绑定参数都必须重置分页。
+            if before is not None and before != cursor_before:
+                raise ValueError('游标与当前时间范围不一致，请重置分页')
+            before = cursor_before
+            cursor_q_norm = cursor_q.strip().casefold() if cursor_q else ''
+            if ((supplied_q and q_norm != cursor_q_norm)
+                    or (supplied_project and project_id != cursor_project_id)
+                    or (supplied_status and status != cursor_status)):
+                raise ValueError('游标与当前筛选条件不一致，请重置分页')
+            q_norm = cursor_q_norm
+            project_id = cursor_project_id
+            status = cursor_status
+
+        result = []
+        # 构建基础 SQL：按 created DESC, id DESC 遍历全部历史
+        # 续页条件：(created < cur_created) OR (created = cur_created AND id < cur_id)
+        params: list = []
+        where_parts: list[str] = []
+
+        if before is not None:
+            where_parts.append('created < ?')
+            params.append(before)
+
+        if cur_created is not None and cur_id is not None:
+            where_parts.append(
+                '(created < ? OR (created = ? AND id < ?))'
+            )
+            params.extend([cur_created, cur_created, cur_id])
+
+        # project_id 精确匹配可在 SQL 层过滤（无需逐行跳过）
+        if project_id:
+            where_parts.append('project_id = ?')
+            params.append(project_id)
+
+        where_sql = ('WHERE ' + ' AND '.join(where_parts)) if where_parts else ''
+
+        # 状态组和关键词需要在 Python 层过滤（读取 state/job），因此需要全量遍历
+        # 每次批量取 BATCH 条，积累足够 limit+1 条匹配记录后停止
+        BATCH = 200
+        status_set = self._STATUS_GROUPS.get(status)  # None 表示不过滤状态
+        need_filter = bool(q_norm) or status_set is not None
+
+        with self.store.session():
+            if not need_filter:
+                # 无关键词/状态过滤：一次取 limit+1 条
+                fetch_sql = f"""
+                    SELECT *
+                    FROM runs
+                    {where_sql}
+                    ORDER BY created DESC, id DESC
+                    LIMIT ?
+                """
+                fetch_params = params + [limit + 1]
+                with self.store.connect() as db:
+                    rows = db.execute(fetch_sql, fetch_params).fetchall()
+                has_more = len(rows) > limit
+                for row in rows[:limit]:
+                    full_run = dict(row)
+                    task_text, lc = self._summary_cache.read(full_run)
+                    result.append({
+                        'id': full_run['id'], 'run_id': full_run['run_id'],
+                        'project_id': full_run['project_id'], 'created': full_run['created'],
+                        'task': task_text,
+                        'lifecycle': lc, 'managed': bool(full_run['managed']),
+                    })
+            else:
+                # 有关键词或状态过滤：批量遍历全部历史直到收集足够结果
+                # 使用游标记录已扫描到的位置，实现分批遍历
+                scan_created: float | None = cur_created
+                scan_id: str | None = cur_id
+                exhausted = False
+                found_count = 0  # 已匹配并放入 result
+                has_more = False
+
+                while not exhausted and found_count <= limit:
+                    # 构建批次 WHERE
+                    batch_where_parts = list(where_parts)  # 包含 before / project_id 条件
+                    batch_params = list(params)
+
+                    if scan_created is not None and scan_id is not None:
+                        # 续批：从上一批最后一条之后继续
+                        batch_where_parts.append(
+                            '(created < ? OR (created = ? AND id < ?))'
+                        )
+                        batch_params.extend([scan_created, scan_created, scan_id])
+                    # 移除已被 cur_created/cur_id 替代的游标续页条件（避免重复）
+                    # 注：where_parts 中若有游标条件，scan_* 初始值已是 cur_*，会重复添加
+                    # 重建 batch_where_parts 以避免重复
+                    batch_where_parts2: list[str] = []
+                    batch_params2: list = []
+                    if before is not None:
+                        batch_where_parts2.append('created < ?')
+                        batch_params2.append(before)
+                    if project_id:
+                        batch_where_parts2.append('project_id = ?')
+                        batch_params2.append(project_id)
+                    if scan_created is not None and scan_id is not None:
+                        batch_where_parts2.append(
+                            '(created < ? OR (created = ? AND id < ?))'
+                        )
+                        batch_params2.extend([scan_created, scan_created, scan_id])
+                    batch_where_sql = ('WHERE ' + ' AND '.join(batch_where_parts2)) if batch_where_parts2 else ''
+
+                    fetch_sql = f"""
+                        SELECT *
+                        FROM runs
+                        {batch_where_sql}
+                        ORDER BY created DESC, id DESC
+                        LIMIT ?
+                    """
+                    with self.store.connect() as db:
+                        batch_rows = db.execute(fetch_sql, batch_params2 + [BATCH]).fetchall()
+
+                    if len(batch_rows) < BATCH:
+                        exhausted = True
+
+                    for row in batch_rows:
+                        full_run = dict(row)
+                        task_text, lc = self._summary_cache.read(full_run)
+
+                        # 状态匹配
+                        if status_set is not None and lc not in status_set:
+                            continue
+
+                        # 关键词匹配（casefold 子串，%/_/' 不作通配符）
+                        if q_norm:
+                            task_cf = task_text.casefold()
+                            run_id_cf = full_run['run_id'].casefold()
+                            if q_norm not in task_cf and q_norm not in run_id_cf:
+                                continue
+
+                        # 匹配成功
+                        if found_count < limit:
+                            result.append({
+                                'id': full_run['id'], 'run_id': full_run['run_id'],
+                                'project_id': full_run['project_id'], 'created': full_run['created'],
+                                'task': task_text,
+                                'lifecycle': lc, 'managed': bool(full_run['managed']),
+                            })
+                        found_count += 1
+                        if found_count > limit:
+                            has_more = True
+                            break
+
+                    if found_count > limit:
+                        break
+
+                    if batch_rows:
+                        last_row = dict(batch_rows[-1])
+                        scan_created = last_row['created']
+                        scan_id = last_row['id']
+
+        next_cursor: str | None = None
+        if has_more and result:
+            last = result[-1]
+            next_cursor = self._encode_cursor(last['created'], last['id'], before,
+                                              q_norm, project_id, status)
+
+        return self.redact({'runs': result, 'has_more': has_more, 'next_cursor': next_cursor})
 
     def create_run(self, project_id, task, idem, parent=None):
         if not isinstance(task, str) or not task.strip() or len(task) > 64000:
@@ -106,14 +473,18 @@ class Service:
         run_id = 'web-' + hashlib.sha256((project_id + ':' + idem).encode()).hexdigest()[:16]
         with self.operations:
             root = cfg.state_dir / 'runs' / run_id
+            new = not (root / 'job.json').is_file()
             if (root / 'job.json').is_file():
                 job = read_json(root / 'job.json')
                 if job.get('task') != task:
                     raise Conflict('同一创建标识不能用于不同任务')
             else:
-                if any(r['project_id'] == project_id and self.snapshot(r['id'])['lifecycle'] in
+                if any(r['id'] != parent and r['project_id'] == project_id and self.snapshot(r['id'])['lifecycle'] in
                        ('pending', 'running', 'recovering', 'paused', 'waiting_approval') for r in self.store.runs()):
                     raise Conflict('此项目已有未结束任务；请先处理或取消')
+                if parent:
+                    from .config_copy import derive
+                    cfg = load_config(derive(original, run_id))
                 from ..state import sha256_text
                 job = {'run_id': run_id, 'task': task, 'task_hash': sha256_text(task),
                        'requested_config': str(cfg.source_path), 'config': str(cfg.source_path),
@@ -122,19 +493,31 @@ class Service:
                        'restarts_used': 0, 'status': 'pending', 'control_db': str(self.store.path),
                        'run_key': project_id + ':' + run_id}
                 atomic_write_json(root / 'job.json', job)
-            key = self.store.register_run(project_id, run_id, cfg.source_path, cfg.state_dir,
+            key = self.store.register_run(project_id, run_id, job['config'], cfg.state_dir,
                                           managed=True, parent=parent)
             self.store.event(key + ':created', key, 'run_created', {'task': task, 'parent_id': parent})
-            self.launch(key)
+            if new or job.get('status') in ('pending', 'running', 'recovering'):
+                self.launch(key)
             return self.snapshot(key)
 
     def launch(self, key):
         with self.operations:
-            if key in self.active and self.active[key].is_alive():
+            if key in self.active and self.active[key].poll() is None:
                 return
-            thread = threading.Thread(target=self._run, args=(key,), daemon=True)
-            self.active[key] = thread
-            thread.start()
+            run = self.store.run(key)
+            from ..state import _pid_alive
+            lock = read_json(directory(run) / '.supervisor.lock')
+            if lock and _pid_alive(lock.get('pid')):
+                return
+            cfg = load_config(run['config'])
+            from ..safety import build_subprocess_env
+            allow = [a.options['api_key_env'] for a in cfg.adapters.values() if a.type == 'openai_compat']
+            with (directory(run) / 'manager.log').open('ab') as log:
+                self.active[key] = subprocess.Popen(
+                    [sys.executable, '-X', 'utf8', '-m', 'orchestrator.collaboration.runner', str(self.store.path), key],
+                    cwd=Path(__file__).resolve().parents[2], env=build_subprocess_env(allow),
+                    stdout=log, stderr=subprocess.STDOUT, start_new_session=os.name != 'nt',
+                    creationflags=subprocess.CREATE_NEW_PROCESS_GROUP if os.name == 'nt' else 0)
 
     def _run(self, key):
         run = self.store.run(key)
@@ -150,20 +533,61 @@ class Service:
             project(self.store, run)
 
     def command(self, key, intent, payload, idem):
-        if intent not in ('pause', 'resume', 'cancel', 'approve'):
+        if intent not in ('pause', 'resume', 'cancel', 'approve', 'rerun'):
             raise ValueError('不支持的界面操作；改变需求请创建后续任务')
+        allowed = {'approve': {'stage', 'target'}, 'rerun': {'stage', 'revision'}}.get(intent, set())
+        if not isinstance(payload, dict) or set(payload) != allowed:
+            raise ValueError('指令参数与当前操作不匹配')
         with self.operations:
             run = self.store.run(key)
-            current = self.snapshot(key)
-            if not current['capabilities'].get(intent):
-                raise Conflict('当前状态不允许此操作')
-            if intent == 'approve':
-                stage = payload.get('stage')
-                if stage not in current['pending_approvals'] or payload.get('target') != stage_target(current['stages'][stage]):
-                    raise Conflict('审批目标已过期')
-            receipt = self.store.enqueue(key, intent, payload, idem)
-            self.launch(key)
+            from .control import command_gate
+            with command_gate(directory(run)):
+                receipt=self._enqueue_command(run,intent,payload,idem)
+            if receipt['status']=='queued':
+                self.launch(key)
+                if intent!='pause':self._wait_command_delivery(key)
             return receipt
+
+    def _enqueue_command(self, run, intent, payload, idem):
+        key=run['id']
+        old = [c for c in self.store.commands(key, 'queued') + self.store.commands(key, 'applied') + self.store.commands(key, 'rejected')
+               if c['idempotency'] == idem]
+        if old:
+            return self.store.enqueue(key, intent, payload, idem)
+        current = self.snapshot(key)
+        if any(t['status'] in ('queued', 'running') for t in self.store.threads(key)):
+            raise Conflict('角色会诊正在使用固定快照，请等待会诊结束再操作运行')
+        if not current['capabilities'].get(intent):
+            raise Conflict('当前状态不允许此操作')
+        if intent == 'approve':
+            stage = payload.get('stage')
+            if stage not in current['pending_approvals'] or payload.get('target') != stage_target(current['stages'][stage]):
+                raise Conflict('审批目标已过期')
+        if intent == 'rerun':
+            if payload.get('stage') not in current['stages'] or payload.get('revision') != current['revision']:
+                raise Conflict('重跑目标已过期，请刷新后操作')
+        return self.store.enqueue(key, intent, payload, idem)
+
+    def _wait_command_delivery(self,key):
+        """旧 manager 正退出时，等其释放 supervisor 锁后再交付尚未消费的指令。"""
+        process=self.active.get(key)
+        if process is None or process.poll() is not None or key in self._command_waiters:return
+        self._command_waiters.add(key)
+        def wait():
+            try:
+                while not self.closed.is_set():
+                    try:
+                        process.wait(timeout=.5)
+                        break
+                    except subprocess.TimeoutExpired:
+                        continue
+                with self.operations:
+                    if not self.closed.is_set() and self.store.commands(key):
+                        self.launch(key)
+            finally:
+                with self.operations:
+                    self._command_waiters.discard(key)
+        threading.Thread(target=wait,daemon=True).start()
 
     def discuss(self, key, question, roles, budget, idem):
         run = self.store.run(key)
@@ -176,11 +600,34 @@ class Service:
         status = self.snapshot(key)['lifecycle']
         if status in ('pending', 'running', 'recovering'):
             raise Conflict('请先在检查点暂停运行，再对固定快照发起会诊')
+        if any(t['status'] in ('queued', 'running') and t['idempotency'] != idem for t in self.store.threads(key)):
+            raise Conflict('该任务已有会诊，不能并行叠加模型调用')
         from .discussion import capture
         topic = self.store.create_thread(key, question, roles, budget, capture(run), idem)
         if topic['status'] == 'queued':
-            threading.Thread(target=self._discuss, args=(topic['id'],), daemon=True).start()
+            self.launch_discussion(topic['id'])
         return topic
+
+    def launch_discussion(self, topic):
+        if topic in self.active_topics and self.active_topics[topic].poll() is None:
+            return
+        thread = self.store.thread(topic)
+        run = self.store.run(thread['run_id'])
+        cfg = load_config(run['config'])
+        from ..safety import build_subprocess_env
+        allow = [a.options['api_key_env'] for a in cfg.adapters.values() if a.type == 'openai_compat']
+        base = Path(run['state_dir']) / 'discussions' / topic
+        base.mkdir(parents=True, exist_ok=True)
+        from ..state import _pid_alive
+        lock = read_json(base / '.discussion.lock')
+        if lock and _pid_alive(lock.get('pid')):
+            return
+        with (base / 'worker.log').open('ab') as log:
+            self.active_topics[topic] = subprocess.Popen([sys.executable, '-X', 'utf8', '-m', 'orchestrator.collaboration.discussion_runner',
+                              str(self.store.path), topic], cwd=Path(__file__).resolve().parents[2],
+                             env=build_subprocess_env(allow), stdout=log, stderr=subprocess.STDOUT,
+                             start_new_session=os.name != 'nt',
+                             creationflags=subprocess.CREATE_NEW_PROCESS_GROUP if os.name == 'nt' else 0)
 
     def _discuss(self, topic):
         from .discussion import execute

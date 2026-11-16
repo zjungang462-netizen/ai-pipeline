@@ -130,6 +130,11 @@ def _print_results(results: dict[str, str]) -> int:
     bad = {StageStatus.FAILED.value, StageStatus.RUNNING.value}
     if any(status in bad for status in results.values()):
         return 1
+    # N1：等待审批不是"成功完成"。与 worker 退出码对齐返回 11，
+    # 避免脚本把"等人工审批"误判为流水线已完成。
+    if any(status == StageStatus.AWAITING_APPROVAL.value for status in results.values()):
+        print("流水线未完成：有阶段等待人工审批（approve 后继续）。")
+        return 11
     return 0
 
 
@@ -176,6 +181,15 @@ def cmd_unattended(args) -> int:
                        args.task, args.max_restarts)
     print(json.dumps(result, ensure_ascii=False, indent=2))
     return 0 if result['status'] == 'done' else 1
+
+
+def cmd_dashboard(args) -> int:
+    from .dashboard.server import serve
+    configs = [Path(p).resolve() for p in args.config]
+    for path in configs:
+        load_config(path)
+    serve(Path(args.database).resolve(), configs, args.port)
+    return 0
 
 
 def main(argv=None) -> int:
@@ -229,6 +243,12 @@ def main(argv=None) -> int:
     add_common(sp, need_task=True)
     sp.add_argument('--max-restarts', type=int, default=2)
     sp.set_defaults(func=cmd_unattended)
+
+    sp = sub.add_parser('dashboard', help='启动本机协作工作台（任务、群聊、执行控制和证据）')
+    sp.add_argument('--config', action='append', required=True, help='登记配置文件；可重复指定')
+    sp.add_argument('--database', default='.workbench/collaboration.sqlite3')
+    sp.add_argument('--port', type=int, default=8765)
+    sp.set_defaults(func=cmd_dashboard)
 
     args = p.parse_args(argv)
     if args.cmd in ("resume", "status", "approve", "rerun-from") and not args.run_id:
