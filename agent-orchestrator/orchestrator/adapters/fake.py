@@ -55,9 +55,10 @@ class FakeAdapter(Adapter):
                           text=report.read_text(encoding="utf-8"),
                           report_files=[report], tool_version="fake-1.0")
         # code 阶段：写一个源文件（引擎负责 git 提交）
+        # 写入调用序号：返工轮必须产生真实内容变化，才能通过“零净变更”判据。
         src = workdir / f"{ctx.stage}_output.py"
-        src.write_text(f'"""{ctx.stage} 产出"""\nTASK = {ctx.task!r}\nSTAGE = {ctx.stage!r}\n',
-                       encoding="utf-8")
+        src.write_text(f'"""{ctx.stage} 产出"""\nTASK = {ctx.task!r}\nSTAGE = {ctx.stage!r}\n'
+                       f'CALL = {self.calls}\n', encoding="utf-8")
         return Result(ok=True, exit_code=0, channel=self.channel,
                       text=f"{ctx.stage} 完成", changed_files=[str(src)],
                       tool_version="fake-1.0")

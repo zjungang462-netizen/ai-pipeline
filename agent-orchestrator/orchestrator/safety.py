@@ -27,17 +27,44 @@ def windows_reserved_name(component: str) -> bool:
     return basename in _WINDOWS_RESERVED_NAMES
 
 
+def normalized_component(component: str) -> str:
+    """按 Windows 规范化规则去掉段尾的点/空格，再做大小写无关比较。
+
+    Windows 上 `.git.`、`.git `、`.git...` 都会解析到 `.git`；若只比较原始
+    字符串，这些变体可以绕过 `.git` 保护。其它平台的路径规范化同样不接受
+    这些等价形式，统一拒绝更安全。
+    """
+    return component.rstrip(' .')
+
+
+def is_parent_component(component: str) -> bool:
+    """是否为父目录引用（含尾随空格变体）；尾随点不属于合法父引用。"""
+    return component.rstrip(' ') == '..'
+
+
+def is_git_component(component: str) -> bool:
+    return normalized_component(component).lower() == '.git'
+
+
 def relative_target(root: Path, name: str) -> Path:
     """解析可移植的不受信路径；所有平台统一拒绝 Windows 保留设备名。"""
     rel = name.replace("\\", "/").strip()
     parts = rel.split("/")
     if (not rel or rel.startswith("/") or ":" in rel or '\0' in rel
             or PureWindowsPath(rel).drive
-            or any(p == ".." or p.lower() == ".git" or windows_reserved_name(p) for p in parts)):
+            or any(is_parent_component(p) or is_git_component(p)
+                   or windows_reserved_name(p) for p in parts)):
         raise WriteRootViolation(f"非法相对路径: {name}")
-    target = (Path(root).resolve() / rel).resolve()
-    if not target.is_relative_to(Path(root).resolve()):
-        raise WriteRootViolation(f"路径指向工作区外: {name}")
+    root = Path(root).resolve()
+    target = (root / rel).resolve()
+    # 原始字符串检查之后，再按解析结果检查一次：防止符号链接/大小写/等
+    # 价形式落到 `.git` 内部（例如 root/.git./config 在 Windows 上被规范化）。
+    try:
+        resolved_parts = target.relative_to(root).parts
+    except ValueError:
+        raise WriteRootViolation(f"路径指向工作区外: {name}") from None
+    if any(is_git_component(p) for p in resolved_parts):
+        raise WriteRootViolation(f"禁止访问 .git 内部: {name}")
     return target
 
 

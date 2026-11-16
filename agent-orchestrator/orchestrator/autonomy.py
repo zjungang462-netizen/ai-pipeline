@@ -15,12 +15,21 @@ from .state import atomic_write_json, sha256_text
 class AutonomousControls:
     def _feedback(self, name):
         value = self.state.feedback.get(name, "")
+        if not value:
+            # 已消费的审查反馈仍参与该阶段最终 attempt 的 inputs_hash：
+            # 返工轮产出的产物必须在续跑时仍被认作完成，否则 review 通过后
+            # 每次 resume 都会把 coding 当成输入变化而重跑（并连带重跑审查）。
+            value = self.state.control.get('consumed_feedback', {}).get(name, '')
         if not value and self.config.autonomy.enabled:
             value = self.state.autonomy.get('feedback_history', {}).get(name, '')
         return value
 
     def _consume_feedback(self, name):
         value = self.state.feedback.pop(name, None)
+        if value:
+            # 非 autonomy 模式也保留一份已消费文本，仅用于稳定 inputs_hash；
+            # rerun-from 会清掉它并恢复普通提示词。
+            self.state.control.setdefault('consumed_feedback', {})[name] = value
         if value and self.config.autonomy.enabled:
             self.state.autonomy.setdefault('feedback_history', {})[name] = value
 
@@ -180,6 +189,7 @@ class AutonomousControls:
         (directory / 'stderr.txt').write_text(result.stderr, encoding='utf8')
         atomic_write_json(directory / 'execution.json', {
             'prompt_hash': sha256_text(prompt), 'ok': result.ok,
+            'exit_code': result.exit_code, 'parse_unknown': result.parse_unknown,
             'error_kind': result.error_kind.value, 'usage': result.usage,
             'tool_version': result.tool_version, 'channel': result.channel,
         })

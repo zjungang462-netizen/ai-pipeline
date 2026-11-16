@@ -107,8 +107,13 @@ class StageLock:
 
     用 O_CREAT|O_EXCL 原子创建锁文件；持有者写入 pid+token。
     释放时校验 token，避免误删他人锁。持有进程已经不在时立即回收，
-    不等 24 小时。
+    不等 24 小时；内容损坏的锁给一个短宽限期（创建后被强杀时内容可能为空）。
+    回收先抢占 `.reclaim` sidecar，再核对旧锁，避免两个进程同时回收把对方
+    刚创建的新锁删掉（TOCTOU，P2-11）。
     """
+
+    MALFORMED_GRACE_S = 5.0
+    CLAIM_STALE_S = 30.0
 
     def __init__(self, lock_path: Path, stale_s: float = 24 * 3600.0):
         self.lock_path = Path(lock_path)
@@ -116,24 +121,79 @@ class StageLock:
         self.token = uuid.uuid4().hex
         self._held = False
 
+    def _claim_path(self) -> Path:
+        return self.lock_path.with_name(self.lock_path.name + ".reclaim")
+
+    def _content_stale(self) -> bool:
+        """锁是否可回收：持有进程已退出，或内容损坏且超过短宽限期。"""
+        try:
+            stat = self.lock_path.stat()
+        except OSError:
+            return True
+        try:
+            data = json.loads(self.lock_path.read_text(encoding="utf-8"))
+        except (OSError, ValueError, TypeError):
+            return time.time() - stat.st_mtime > self.MALFORMED_GRACE_S
+        if not isinstance(data, dict):
+            return time.time() - stat.st_mtime > self.MALFORMED_GRACE_S
+        return not _pid_alive(data.get("pid"))
+
+    def _claim_stale(self, claim: Path) -> bool:
+        try:
+            stat = claim.stat()
+            data = json.loads(claim.read_text(encoding="utf-8"))
+        except (OSError, ValueError, TypeError):
+            try:
+                return time.time() - claim.stat().st_mtime > self.MALFORMED_GRACE_S
+            except OSError:
+                return False
+        if not isinstance(data, dict):
+            return time.time() - stat.st_mtime > self.MALFORMED_GRACE_S
+        try:
+            age = time.time() - float(data.get("ts") or 0)
+        except (TypeError, ValueError):
+            age = self.CLAIM_STALE_S + 1
+        return (not _pid_alive(data.get("pid"))) or age > self.CLAIM_STALE_S
+
+    def _claim(self) -> bool:
+        """原子抢占回收权；成功返回 True 并持有 sidecar。"""
+        claim = self._claim_path()
+        try:
+            fd = os.open(claim, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+        except FileExistsError:
+            return False
+        except OSError:
+            return False
+        try:
+            os.write(fd, json.dumps({"pid": os.getpid(), "ts": time.time()}).encode("utf-8"))
+        finally:
+            os.close(fd)
+        return True
+
     def acquire(self) -> bool:
         self.lock_path.parent.mkdir(parents=True, exist_ok=True)
-        # 过期锁，或持有进程已经退出的锁，都可以回收。
-        if self.lock_path.exists():
-            reclaim = False
+        claim = self._claim_path()
+        # 有未过期的回收者 => 让路，避免两个人同时接管。
+        if claim.exists():
+            if not self._claim_stale(claim):
+                return False
             try:
-                age = time.time() - self.lock_path.stat().st_mtime
-                data = json.loads(self.lock_path.read_text(encoding="utf-8"))
-                reclaim = not _pid_alive(data.get("pid"))
-            except (OSError, ValueError, TypeError):
-                # 创建者可能刚创建文件、尚未写完；只回收真正陈旧的坏锁。
+                claim.unlink()
+            except OSError:
+                return False
+        # 过期/损坏锁：抢占 reclaim sidecar 后再动手，防止删掉别人的新锁。
+        if self.lock_path.exists() and self._content_stale():
+            if not self._claim():
+                return False
+            try:
+                if self.lock_path.exists() and self._content_stale():
+                    try:
+                        self.lock_path.unlink()
+                    except FileNotFoundError:
+                        pass
+            finally:
                 try:
-                    reclaim = time.time() - self.lock_path.stat().st_mtime > self.stale_s
-                except OSError:
-                    reclaim = False
-            if reclaim:
-                try:
-                    self.lock_path.unlink()
+                    claim.unlink()
                 except OSError:
                     pass
         try:
@@ -239,6 +299,9 @@ class RunState:
         self.autonomy: dict[str, Any] = {}
         self.revision: int = 0
         self.control: dict[str, Any] = {}
+        # 测试阶段产出的工作区文件（相对路径）。这些是测试输出而非被测输入：
+        # 计入 inputs_hash 会让每次 resume 都因新产物判为 stale（P2-1）。
+        self.test_artifacts: dict[str, list[str]] = {}
 
     # ---- 持久化 ----
     def load(self) -> bool:
@@ -257,6 +320,7 @@ class RunState:
         self.autonomy = data.get("autonomy", {})
         self.revision = data.get('revision', 0)
         self.control = data.get('control', {})
+        self.test_artifacts = data.get('test_artifacts', {})
         return True
 
     def save(self) -> None:
@@ -274,6 +338,7 @@ class RunState:
             "invalidate_nonce": self.invalidate_nonce,
             "stage_usage": self.stage_usage,
             "autonomy": self.autonomy,
+            "test_artifacts": self.test_artifacts,
             'revision': self.revision,
             'control': self.control,
         })

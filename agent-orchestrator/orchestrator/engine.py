@@ -10,9 +10,11 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 import time
 import threading
 import re
+import uuid
 from dataclasses import asdict
 from contextlib import contextmanager
 from pathlib import Path
@@ -56,6 +58,9 @@ class Engine(AutonomousControls):
         self._owner_thread = None
         self._prompts: dict[str, str] = {}
         self._reports: dict[str, list[Path]] = {}
+        # 审查上下文覆盖不完整（diff 截断且无法注入全部变更文件）=> 记录未纳入清单，
+        # pass 结论不得直接当作完成，只能交人工确认/在无人值守下失败。
+        self._review_missing: dict[str, list[str]] = {}
         # G1：应用配置的 git 路径后再探测（PATH 无 git 时走兜底）
         artifacts.set_git_exe(config.git_exe)
         self._git_ready = artifacts.git_available()
@@ -137,7 +142,9 @@ class Engine(AutonomousControls):
         # 仅当存在代码阶段时才建 git 仓库；纯审查现有代码库不改动被审项目
         has_code = any(s.kind == "code" for s in self.config.stages)
         if self._git_ready and has_code:
-            artifacts.ensure_repo(self.config.task_workdir)
+            # 既有非 git 工作区首次初始化时把已有文件提交为基线，避免 coding
+            # worktree 合并回主线时因 untracked 文件永久失败（P2-8）。
+            artifacts.ensure_repo(self.config.task_workdir, exclude=self.config.state_dir)
             if self.config.autonomy.enabled and not loaded:
                 self._bootstrap_declared_files()
             if not loaded:
@@ -153,11 +160,14 @@ class Engine(AutonomousControls):
         return spec.prompt  # 允许直接内联 prompt 文本
 
     def _upstream_context(self, index: int,
-                          current_kind: str = "") -> tuple[str, list[Path]]:
+                          spec: StageSpec) -> tuple[str, list[Path]]:
         """收集上游产物内容（评审 B1）：报告全文 + 代码 diff。
 
-        current_kind=review 时代码给累积全量（修复 M0），否则给末次变更摘要。
+        spec.kind=review 时代码给累积全量（修复 M0）；若 diff 被截断，再按
+        commit 注入变更文件全文（有上限），确保默认 API 通道的审查模型不会
+        对未注入的实现给 pass。仍无法完整注入时记录到 _review_missing。
         """
+        current_kind = spec.kind
         parts: list[str] = []
         reports: list[Path] = []
         for up in self.config.stages[:index]:
@@ -186,9 +196,21 @@ class Engine(AutonomousControls):
             # 返工轮里会误判"实现代码缺失"）；其他阶段给末次变更摘要即可。
             if up.kind == "code" and st.commit_sha and self._git_ready:
                 if current_kind == "review":
-                    diff = artifacts.cumulative_diff(self.config.task_workdir, st.commit_sha,
-                                                      base_sha=self.state.control.get('project_baseline'))
+                    diff, total_lines, truncated = artifacts.cumulative_diff_info(
+                        self.config.task_workdir, st.commit_sha,
+                        base_sha=self.state.control.get('project_baseline'))
                     label = "代码全量（相对项目基线累积）"
+                    if truncated:
+                        changed = artifacts.changed_files_at(
+                            self.config.task_workdir, st.commit_sha,
+                            base_sha=self.state.control.get('project_baseline'))
+                        body, missing = artifacts.review_file_context(
+                            self.config.task_workdir, st.commit_sha, changed)
+                        if missing:
+                            self._review_missing[spec.name] = missing
+                        if body:
+                            diff = (f"{diff}\n\n...（累积 diff 超过 600 行已截断，"
+                                    f"以下为按 commit 注入的变更文件全文，共 {len(changed)} 个文件）\n\n{body}")
                 else:
                     diff = artifacts.diff_summary(self.config.task_workdir, st.commit_sha)
                     label = "代码变更"
@@ -221,7 +243,7 @@ class Engine(AutonomousControls):
             upstream = self._rework_context(feedback)
             reports = []
         else:
-            upstream, reports = self._upstream_context(index, spec.kind)
+            upstream, reports = self._upstream_context(index, spec)
         self._reports[spec.name] = reports
         task = self.task[:2000] if feedback and spec.kind == "code" else self.task
         values = {'task': task, 'upstream': upstream or '（无上游产物）',
@@ -373,6 +395,25 @@ class Engine(AutonomousControls):
             config_keys['__precheck__'] = spec.precheck_cmd
         if spec.kind == 'code' and self._feedback(spec.name):
             config_keys['__rework_context_protocol__'] = 2
+        review_no_upstream = (
+            spec.kind == "review"
+            and not any(self.state.stage(u.name).commit_sha for u in self.config.stages[:index]))
+        if review_no_upstream:
+            # 审查现有代码库：输入是工作区源码本身。把工作区内容哈希并列
+            # 参与指纹与 autonomy 逻辑哈希，源码变化后旧 verdict 不再被采纳。
+            if getattr(self, '_review_workspace_hash', None) is None:
+                self._review_workspace_hash = artifacts.workspace_hash(
+                    self.config.task_workdir, exclude=self.config.state_dir)
+            config_keys["__review_workspace__"] = self._review_workspace_hash
+        if spec.kind == "test":
+            if not any(self.state.stage(u.name).commit_sha
+                       for u in self.config.stages[:index]):
+                # 测试命令会写工作区（junit/coverage/快照等）。这些产物属于
+                # 本次测试的输出而不是被测输入；若计入指纹，续跑时 hash 会
+                # 随产物变化而改变，导致每次 resume 都重跑测试（P2-1）。
+                config_keys["__workspace__"] = artifacts.workspace_hash(
+                    self.config.task_workdir, exclude=self.config.state_dir,
+                    ignore=set(self.state.test_artifacts.get(spec.name, [])))
         logical = None
         if self.config.autonomy.enabled and spec.kind != 'test':
             policy=asdict(self.config.autonomy)
@@ -388,10 +429,6 @@ class Engine(AutonomousControls):
                 return saved['inputs_hash']
         if spec.kind == "test":
             prompt = ""
-            if not any(self.state.stage(u.name).commit_sha
-                       for u in self.config.stages[:index]):
-                config_keys["__workspace__"] = artifacts.workspace_hash(
-                    self.config.task_workdir, exclude=self.config.state_dir)
         else:
             prompt = prompt_override if prompt_override is not None else self._render_prompt(spec, index)
             self._prompts[spec.name] = prompt
@@ -614,6 +651,12 @@ class Engine(AutonomousControls):
                                  if self.state.stage(s.name).commit_sha), None)
             worktree = None
             setup_started = time.monotonic()
+            # 无上游 commit 时测试直接跑在任务工作区：记录测试自身写出的文件，
+            # 下次指纹计算忽略它们，避免 resume 因新产物永不收敛（P2-1）。
+            before_workspace = None
+            if not (upstream_sha and self._git_ready):
+                before_workspace = artifacts.workspace_file_hashes(
+                    workdir, exclude=self.config.state_dir)
             try:
                 if upstream_sha and self._git_ready:
                     worktree = self.state.stage_dir(spec.name) / "worktree" / str(n)
@@ -621,6 +664,8 @@ class Engine(AutonomousControls):
                                            f"verify/{spec.name}/{self.run_id}/{n}", worktree)
                     workdir = worktree
                 record = run_test_cmd(spec.test_cmd, workdir, timeout_s=timeout)
+                if before_workspace is not None:
+                    self._record_test_artifacts(spec, before_workspace)
             except artifacts.GitError as error:
                 message = '隔离测试工作区创建失败，未执行测试：' + str(error)
                 record = {'ok': False, 'exit_code': -1, 'cmd': list(spec.test_cmd),
@@ -692,6 +737,25 @@ class Engine(AutonomousControls):
         finally:
             lock.release()
 
+    def _record_test_artifacts(self, spec: StageSpec, before: dict[str, str]) -> None:
+        """把测试命令新建/改写的文件记入 state.test_artifacts（有上限）。"""
+        after = artifacts.workspace_file_hashes(
+            self.config.task_workdir, exclude=self.config.state_dir)
+        changed = sorted({rel for rel, digest in after.items()
+                          if before.get(rel) != digest})
+        known = set(self.state.test_artifacts.get(spec.name, []))
+        merged = sorted(known | set(changed))
+        limit = 500
+        if len(merged) > limit:
+            merged = merged[:limit]
+            self.state.log_event("test_artifacts_truncated", spec.name,
+                                 total=len(known | set(changed)))
+        self.state.test_artifacts[spec.name] = merged
+        if changed:
+            self.state.log_event("test_artifacts", spec.name, files=changed[:20],
+                                 count=len(changed))
+        self.state.save()
+
     def _stage_base_sha(self, index: int, kind: str = "code") -> str | None:
         """代码阶段的基线 = 最近上游代码阶段的 commit（评审 B3：基于上游 commit）。
 
@@ -712,6 +776,13 @@ class Engine(AutonomousControls):
         adapter = self.adapters[spec.adapter]
         base_sha = self._stage_base_sha(index, spec.kind)
         last_error = ""
+        violation = self._write_violation_stands(spec, inputs_hash)
+        if violation:
+            st.status = StageStatus.FAILED
+            st.error = violation
+            self.state.log_event("write_violation_kept", spec.name)
+            self.state.save()
+            return StageStatus.FAILED
         cli=getattr(adapter,'channel','').startswith('cli_')
         for attempt in range(1, spec.max_attempts + 1):
             if cli:
@@ -805,6 +876,8 @@ class Engine(AutonomousControls):
 
             # 可写根守卫。默认监视工作区父目录，才能看见写到旁边的文件。
             # watch_root = "off" 关闭根外扫描；其它值则改用该目录。
+            # 落在可写根内部的监视域不会产生任何根外文件，静默空转等于没有
+            # 保护：显式告警并禁用它（P2-6）。
             roots = [self.config.task_workdir, self.state.run_dir]
             wr_cfg = (self.config.watch_root or "").strip()
             if wr_cfg.lower() == "off":
@@ -814,6 +887,19 @@ class Engine(AutonomousControls):
                 watch = [wr if wr.is_absolute() else self.config.base_dir / wr]
             else:
                 watch = None
+            if watch:
+                guard_roots = [Path(r).resolve() for r in roots]
+                usable = []
+                for candidate in watch:
+                    resolved = Path(candidate).resolve()
+                    if any(resolved == r or r in resolved.parents for r in guard_roots):
+                        self.state.log_event("watch_disabled", spec.name,
+                                             reason="watch_root 位于可写根内部，无法捕获根外写入",
+                                             path=str(resolved))
+                        self.state.save()
+                        continue
+                    usable.append(resolved)
+                watch = usable or None
             guard = WriteRootGuard(roots, watch_roots=watch)
             try:
                 guard.check(workdir)
@@ -855,7 +941,16 @@ class Engine(AutonomousControls):
                 self.state.save()
                 outside = []
             elif outside:
-                self._purge_new_outside(before_snap, outside)
+                # 不删除无归属文件：新文件移入本运行的隔离目录留证，已有文件
+                # 只记录。越界记录按 inputs_hash 持久化，续跑不能把同一输入
+                # 的违规“洗白”成通过（P2-6）。
+                moved = self._quarantine_new_outside(spec, before_snap, outside)
+                self.state.control.setdefault('write_violations', {})[spec.name] = {
+                    'inputs_hash': inputs_hash, 'files': outside[:20],
+                    'quarantined': moved[:20], 'at': time.time()}
+                self.state.log_event("watch_enforce", spec.name,
+                                     files=outside[:10], quarantined=moved[:10])
+                self.state.save()
                 result.ok = False
                 result.error_kind = ErrorKind.REJECTED
                 result.stderr = (result.stderr + f" [可写根外变更: {outside[:5]}]").strip()
@@ -996,15 +1091,38 @@ class Engine(AutonomousControls):
             return False
         return bool(st.error) and "仍未通过" in st.error
 
-    def _purge_new_outside(self, before: dict, outside: list[str]) -> None:
-        """删掉这次新写出的根外文件。改写过的原有文件留在原地，只让阶段失败。"""
+    def _quarantine_new_outside(self, spec: StageSpec, before: dict,
+                                outside: list[str]) -> list[str]:
+        """把本次新写出的根外文件移入运行目录隔离区（可恢复，不直接删除）。
+
+        改写过的既有根外文件留在原地并由持久化越界记录阻止续跑重试。
+        返回实际移动的原始路径列表。
+        """
+        target = self.state.run_dir / "violations" / spec.name
+        moved: list[str] = []
         for path in outside:
             if path in before:
                 continue
+            source = Path(path)
             try:
-                Path(path).unlink()
+                if not source.is_file():
+                    continue
+                target.mkdir(parents=True, exist_ok=True)
+                destination = target / f"{uuid.uuid4().hex[:8]}-{source.name}"
+                shutil.move(str(source), str(destination))
+                moved.append(path)
             except OSError:
-                pass
+                continue
+        return moved
+
+    def _write_violation_stands(self, spec: StageSpec, inputs_hash: str) -> str:
+        """同一输入上已记录的根外写入 => 保持失败，不再调用模型。"""
+        violation = self.state.control.get('write_violations', {}).get(spec.name)
+        if isinstance(violation, dict) and violation.get('inputs_hash') == inputs_hash:
+            return ('同一输入上已发生可写根外变更，续跑拒绝重试；'
+                    '修正根外文件后可用 rerun-from 显式覆盖: '
+                    + str(violation.get('files', [])[:5]))
+        return ''
 
     def _handle_review(self, spec: StageSpec, result: Result, attempt_dir: Path,
                        n: int, inputs_hash: str, outputs_hash: str) -> StageStatus | None:
@@ -1028,6 +1146,25 @@ class Engine(AutonomousControls):
                 verr = str(e)
         rounds_used = self.state.review_rounds.get(spec.name, 0) + 1
         self.state.review_rounds[spec.name] = rounds_used
+
+        missing = self._review_missing.get(spec.name, [])
+        if verdict is not None and verdict.passed and missing:
+            # 审查模型只看到部分实现时，pass 不能当作完成：交人工确认；
+            # 无人值守下沿用 AWAITING→FAILED 的保守语义。
+            reason = (f"审查上下文覆盖不完整：{len(missing)} 个变更文件未注入提示词"
+                      f"（{missing[:5]}）；通过结论不能自动采纳")
+            self.state.pending_approvals[spec.name] = {
+                "stage": spec.name, "outputs_hash": outputs_hash,
+                "n": n, "inputs_hash": inputs_hash,
+                "requested_at": time.time(), "requested_by": "review_incomplete",
+            }
+            self.state.log_event("review_incomplete", spec.name, round=rounds_used,
+                                 missing=missing[:20])
+            self.state.commit_success(
+                spec.name, n, attempt_dir, inputs_hash, outputs_hash,
+                result.commit_sha, result.branch, verdict="unparsed",
+                status=StageStatus.AWAITING_APPROVAL, error=reason)
+            return StageStatus.AWAITING_APPROVAL
 
         if verdict is None:
             self.state.pending_approvals[spec.name] = {
@@ -1099,7 +1236,10 @@ class Engine(AutonomousControls):
 
     def _cleanup_worktree(self, worktree: Path | None) -> None:
         if worktree is not None and self._git_ready:
-            artifacts.remove_worktree(self.config.task_workdir, worktree)
+            if not artifacts.remove_worktree(self.config.task_workdir, worktree):
+                self.state.log_event("worktree_cleanup_failed", "",
+                                     path=str(worktree))
+                self.state.save()
 
     def _archive(self, spec: StageSpec, result: Result, attempt_dir: Path,
                  base_sha: str | None, worktree: Path | None = None) -> str:
@@ -1120,19 +1260,18 @@ class Engine(AutonomousControls):
             if worktree is not None:
                 wt_sha = artifacts.commit_files(worktree, files, f"{spec.name}: {self.task[:40]}")
                 branch = artifacts._git(["rev-parse", "--abbrev-ref", "HEAD"], worktree).stdout.strip()
-                if wt_sha is not None or artifacts.head_sha(worktree) != base_sha:
-                    try:
-                        commit_sha = artifacts.merge_branch(repo, branch)
-                    except artifacts.GitError as e:
-                        # 快进合并失败（主线已分叉）=> 本阶段失败，不中断整轮
-                        raise StageArchiveError(f"合并 {branch} 失败: {e}") from e
-                else:
-                    commit_sha = artifacts.head_sha(repo)
+                if wt_sha is None and artifacts.head_sha(worktree) == base_sha:
+                    raise StageArchiveError("代码未发生变化，无法视为一次修复")
+                try:
+                    commit_sha = artifacts.merge_branch(repo, branch)
+                except artifacts.GitError as e:
+                    # 快进合并失败（主线已分叉）=> 本阶段失败，不中断整轮
+                    raise StageArchiveError(f"合并 {branch} 失败: {e}") from e
                 result.branch = branch
             else:
                 commit_sha = artifacts.commit_files(repo, files, f"{spec.name}: {self.task[:40]}")
                 if commit_sha is None:
-                    commit_sha = artifacts.head_sha(repo)
+                    raise StageArchiveError("代码未发生变化，无法视为一次修复")
                 result.branch = f"stage/{spec.name}"
             result.commit_sha = commit_sha
             # 代码产物内容哈希：基于主线该 commit 的树对象（与基线/时间戳无关）
@@ -1171,7 +1310,13 @@ class Engine(AutonomousControls):
             return self._approve_owned(stage_name)
 
     def _approve_owned(self, stage_name: str) -> bool:
-        """恢复审批：校验当前产物哈希与申请时一致（评审 M6）。"""
+        """恢复审批：校验当前产物哈希与申请时一致（评审 M6）。
+
+        code/test 阶段的渲染输入可能包含实时读取的工作区内容（context_files
+        原文、返工文件清单、测试工作区哈希），执行本身就会改写它们；若在审批
+        时重算 inputs_hash 必然不相等，会导致审批永久被拒（P2-2）。这两类
+        阶段只比对申请时冻结的哈希与 attempt 归档记录 + evidence 校验。
+        """
         pending = self.state.pending_approvals.get(stage_name)
         if not pending:
             return False
@@ -1181,10 +1326,14 @@ class Engine(AutonomousControls):
         spec = self.config.stage(stage_name)
         record = {"n": st.current_attempt, "inputs_hash": st.inputs_hash,
                   "outputs_hash": st.outputs_hash, "commit_sha": st.commit_sha}
+        live_inputs_ok = spec.kind in ("code", "test")
+        if not live_inputs_ok:
+            live_inputs_ok = (self._inputs_hash(
+                spec, self.config.stage_index(stage_name)) == st.inputs_hash)
         if (directory is None or st.outputs_hash != pending["outputs_hash"]
                 or pending.get("n", st.current_attempt) != st.current_attempt
                 or pending.get("inputs_hash", st.inputs_hash) != st.inputs_hash
-                or self._inputs_hash(spec, self.config.stage_index(stage_name)) != st.inputs_hash
+                or not live_inputs_ok
                 or not validate(directory, record)):
             self.state.log_event("approval_rejected", stage_name, reason="产物已变更")
             self.state.save()
@@ -1299,6 +1448,11 @@ class Engine(AutonomousControls):
             st.error = None
             # 清未决审批，让该阶段可被重新执行（含 review_unparsed 的 awaiting）
             self.state.pending_approvals.pop(s.name, None)
+            # 上游重跑后旧审查反馈已过期；保留会让 coding 继续走返工分支、
+            # 看不到新的设计/需求产物（P3）。
+            self.state.feedback.pop(s.name, None)
+            self.state.control.get('consumed_feedback', {}).pop(s.name, None)
+            self.state.control.get('write_violations', {}).pop(s.name, None)
             # 重置审查轮次：rerun 是新一轮完整返工，不该继承历史轮次计数
             # （否则跨多次 rerun 累积，会刚返工一轮就误判"轮次耗尽"）
             self.state.review_rounds.pop(s.name, None)

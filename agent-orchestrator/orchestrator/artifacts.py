@@ -126,18 +126,30 @@ def git_available() -> bool:
     return resolve_git() is not None
 
 
-def ensure_repo(workdir: Path) -> None:
-    """确保 workdir 是一个 git 仓库（含初始提交）。"""
+def ensure_repo(workdir: Path, exclude: Path | None = None) -> None:
+    """确保 workdir 是一个 git 仓库（含初始提交）。
+
+    首次初始化时把工作区已有文件（跳过隐藏目录、缓存目录与 exclude）提交为
+    基线，而不是建空基线：否则既有源码会成为 untracked，coding worktree 合并
+    回主线时永久报 "untracked working tree files would be overwritten"。
+    提交仍走 `commit_files` 清单（非 git add -A 全仓）。
+    """
     workdir = Path(workdir)
     workdir.mkdir(parents=True, exist_ok=True)
     if not (workdir / ".git").exists():
         _git(["init", "-q"], workdir)
         _git(["config", "user.email", "orchestrator@local"], workdir)
         _git(["config", "user.name", "orchestrator"], workdir)
-    # 无任何提交时建一个空基线提交
+    # 无任何提交时建基线：有既有文件就提交清单，否则空提交。
     head = _git(["rev-parse", "--verify", "HEAD"], workdir, check=False)
     if head.returncode != 0:
-        _git(["commit", "-q", "--allow-empty", "-m", "baseline"], workdir)
+        existing = [p.relative_to(workdir).as_posix()
+                    for p in workspace_files(workdir, exclude=exclude)]
+        if existing:
+            commit_files(workdir, existing, "baseline: existing workspace")
+        head = _git(["rev-parse", "--verify", "HEAD"], workdir, check=False)
+        if head.returncode != 0:
+            _git(["commit", "-q", "--allow-empty", "-m", "baseline"], workdir)
 
 
 def head_sha(workdir: Path) -> str:
@@ -162,8 +174,13 @@ def add_worktree(repo: Path, base_sha: str, branch: str, dest: Path) -> Path:
     return dest
 
 
-def remove_worktree(repo: Path, dest: Path) -> None:
-    _git(["worktree", "remove", "--force", str(dest)], repo, check=False)
+def remove_worktree(repo: Path, dest: Path) -> bool:
+    """移除 worktree；失败时 prune 失效登记并返回 False（由调用方告警）。"""
+    proc = _git(["worktree", "remove", "--force", str(dest)], repo, check=False)
+    if proc.returncode != 0:
+        _git(["worktree", "prune"], repo, check=False)
+        return False
+    return True
 
 
 def merge_branch(repo: Path, branch: str) -> str:
@@ -177,39 +194,66 @@ def report_hashes(files: list[Path]) -> dict[str, str]:
 
 
 def unsafe_rel_paths(files: list[str]) -> list[str]:
-    """绝对路径、`..` 或路径分段里的 `.git`。这些不能交给 git add。"""
+    """绝对路径、`..` 或路径分段里的 `.git`（含尾随点/空格变体）。这些不能交给 git add。"""
     bad: list[str] = []
     for f in files:
         p = Path(f)
         parts = p.parts
         if (p.is_absolute()
-                or any(part == ".." or part.lower() == ".git" for part in parts)):
+                or any(_unsafe_part(part) for part in parts)):
             bad.append(f.replace("\\", "/"))
     return bad
 
 
+def _unsafe_part(part: str) -> bool:
+    """路径段是否越界/指向 .git；按 Windows 规范化（去尾随点/空格）判断。"""
+    from .safety import is_git_component, is_parent_component
+    return is_parent_component(part) or is_git_component(part)
+
+
+def _git_relative_parts(rel: str) -> tuple[str, ...] | None:
+    try:
+        return Path(rel).parts
+    except (TypeError, ValueError):
+        return None
+
+
 def remove_git_metadata_files(workdir: Path, rels: list[str]) -> None:
-    """删掉清单里落到本仓库 `.git` 下的文件（模型刚写入的 hook）。不跟随 `..`。"""
+    """删掉清单里落到本仓库 `.git` 下的文件（模型刚写入的 hook）。不跟随 `..`。
+
+    只处理 `.git` 目录**内部**的文件；清单精确为 `.git` 时是 worktree 的
+    gitdir 指针文件，删除会让工作区变成非 git 目录，必须保留。
+    """
     root = Path(workdir).resolve()
     for rel in rels:
-        p = Path(rel)
-        parts = p.parts
-        if p.is_absolute() or any(part == ".." for part in parts):
+        parts = _git_relative_parts(rel)
+        if not parts or Path(rel).is_absolute():
             continue
-        if not any(part.lower() == ".git" for part in parts):
+        if any(p == ".." for p in parts):
             continue
-        target = (root / p).resolve()
+        git_indexes = [i for i, p in enumerate(parts) if _is_git_dir_part(p)]
+        if not git_indexes:
+            continue
+        # 最后一个组件就是 `.git` 本身 => 指针文件/目录入口，不在此处删除。
+        if git_indexes[-1] == len(parts) - 1:
+            continue
+        target = (root / Path(rel)).resolve()
         try:
             rel_to_root = target.relative_to(root)
         except ValueError:
             continue
-        if ".git" not in [part.lower() for part in rel_to_root.parts]:
+        if not any(_is_git_dir_part(part) for part in rel_to_root.parts):
             continue
         if target.is_file():
             try:
                 target.unlink()
             except OSError:
                 pass
+
+
+def _is_git_dir_part(part: str) -> bool:
+    from .safety import is_git_component
+    return is_git_component(part)
 
 
 def commit_files(workdir: Path, files: list[str], message: str) -> str | None:
@@ -224,7 +268,9 @@ def commit_files(workdir: Path, files: list[str], message: str) -> str | None:
     if bad:
         raise GitError(f"拒绝提交越界或 .git 路径: {bad[:5]}")
     _git(["add", "--", *files], workdir)
-    staged = _git(["diff", "--cached", "--name-only"], workdir).stdout.strip()
+    # 只检查清单内文件是否真的有暂存改动；索引里其它无关暂存不能让
+    # “声明文件无改动”也走到 commit（否则 git commit --only 会报错）。
+    staged = _git(["diff", "--cached", "--name-only", "--", *files], workdir).stdout.strip()
     if not staged:
         return None
     _git(["commit", "-q", "--only", "-m", message, "--", *files], workdir)
@@ -303,11 +349,24 @@ def workspace_files(workdir: Path, exclude: Path | None = None):
                 yield target
 
 
-def workspace_hash(workdir: Path, exclude: Path | None = None) -> str:
+def workspace_file_hashes(workdir: Path, exclude: Path | None = None,
+                          ignore: set[str] | None = None) -> dict[str, str]:
+    """工作区文件内容哈希（相对路径 -> sha256）；ignore 为要排除的相对路径。"""
+    ignored = {p.replace("\\", "/") for p in (ignore or set())}
+    result: dict[str, str] = {}
+    for path in workspace_files(workdir, exclude):
+        rel = path.relative_to(Path(workdir).resolve()).as_posix()
+        if rel in ignored:
+            continue
+        result[rel] = sha256_file(path)
+    return result
+
+
+def workspace_hash(workdir: Path, exclude: Path | None = None,
+                   ignore: set[str] | None = None) -> str:
     from .state import sha256_text
-    files = [(p.relative_to(workdir).as_posix(), sha256_file(p))
-             for p in workspace_files(workdir, exclude)]
-    return sha256_text(repr(sorted(files)))
+    files = sorted(workspace_file_hashes(workdir, exclude=exclude, ignore=ignore).items())
+    return sha256_text(repr(files))
 
 
 def existing_code_context(workdir: Path, max_file_bytes: int = 12000,
@@ -376,6 +435,13 @@ def cumulative_diff(workdir: Path, commit_sha: str, max_lines: int = 600,
     审查阶段必须看到完整实现，而非仅末次提交（commit~1..commit）。
     否则返工轮次里审查员只看到增量测试改动，会误判"实现代码缺失"。
     """
+    return cumulative_diff_info(workdir, commit_sha, max_lines=max_lines,
+                                base_sha=base_sha)[0]
+
+
+def cumulative_diff_info(workdir: Path, commit_sha: str, max_lines: int = 600,
+                         base_sha: str | None = None) -> tuple[str, int, bool]:
+    """同 cumulative_diff，另返回 (文本, diff 总行数, 是否被截断)。"""
     base = base_sha or baseline_sha(workdir)
     if base and base != commit_sha:
         listing = _git(["diff", "--stat", base, commit_sha], workdir, check=False).stdout
@@ -385,30 +451,81 @@ def cumulative_diff(workdir: Path, commit_sha: str, max_lines: int = 600,
         proc = _git(["show", "--format=", commit_sha], workdir, check=False)
     body = proc.stdout or ""
     lines = body.splitlines()
-    if len(lines) > max_lines:
+    truncated = len(lines) > max_lines
+    if truncated:
         lines = lines[:max_lines] + [
-            f"...（diff 截断，共 {len(body.splitlines())} 行；完整代码见工作区文件）"]
+            f"...（diff 截断，共 {len(body.splitlines())} 行）"]
     head = f"变更文件清单（相对项目基线，累积全量）:\n{listing.strip()}\n" if listing.strip() else ""
-    return head + "\n".join(lines)
+    return head + "\n".join(lines), len(body.splitlines()), truncated
+
+
+def changed_files_at(workdir: Path, commit_sha: str, base_sha: str | None = None) -> list[str]:
+    """相对基线在该 commit 中变更的文件（含新增/修改/删除）。"""
+    base = base_sha or baseline_sha(workdir)
+    if base and base != commit_sha:
+        out = _git(["diff", "--name-only", "-z", base, commit_sha], workdir, check=False).stdout
+    else:
+        out = _git(["ls-tree", "-r", "-z", "--name-only", commit_sha], workdir, check=False).stdout
+    return [name for name in out.split("\0") if name]
+
+
+def review_file_context(workdir: Path, commit_sha: str, paths: list[str],
+                        per_file_bytes: int = 24000, total_bytes: int = 180000,
+                        max_files: int = 60) -> tuple[str, list[str]]:
+    """审查上下文：按 commit 读取变更文件全文，返回 (文本, 未纳入文件清单)。
+
+    当累积 diff 被截断时使用，避免默认 API 通道（无法读取工作区文件）的
+    审查模型只看到前半段实现。返回的未纳入清单非空即表示覆盖不完整，调用方
+    不得把通过结论直接当作完成。
+    """
+    parts: list[str] = []
+    missing: list[str] = []
+    used = 0
+    included = 0
+    for rel in paths:
+        if included >= max_files or used >= total_bytes:
+            missing.append(rel)
+            continue
+        proc = _git(["show", f"{commit_sha}:{rel}"], workdir, check=False)
+        if proc.returncode != 0:
+            # 该 commit 中已删除/不可读：由 diff 表达，不算覆盖缺失。
+            continue
+        raw = proc.stdout
+        if "\0" in raw:
+            missing.append(rel + "（二进制，未注入）")
+            continue
+        data = raw.encode("utf-8", errors="replace")
+        if len(data) > per_file_bytes:
+            missing.append(rel + "（超过单文件上限，未完整注入）")
+            continue
+        if used + len(data) > total_bytes:
+            missing.append(rel)
+            continue
+        text = raw
+        parts.append(f"### 实现文件: {rel}\n```\n{text}\n```")
+        used += len(data)
+        included += 1
+    return "\n\n".join(parts), missing
 
 
 def tree_content_hash(workdir: Path, commit_sha: str) -> str:
     """基于 commit 树对象的内容哈希（评审 B3/S1）。
 
-    用 git ls-tree -r 列出所有 blob 的路径+对象哈希，排序后再哈希。
-    只反映文件内容，与提交时间戳/基线无关 => 重跑内容相同则哈希相同。
+    用 git ls-tree -r -z 列出所有条目的 (mode,type,object) 并排序后哈希，
+    路径不做 quotePath 转义；只反映树内容（含 submodule gitlink），与提交
+    时间戳/基线、git 的 core.quotePath 配置无关 => 重跑内容相同则哈希相同。
     """
-    out = _git(["ls-tree", "-r", commit_sha], workdir).stdout
+    out = _git(["ls-tree", "-r", "-z", "--full-tree", commit_sha], workdir,
+               check=False).stdout
     entries = []
-    for line in out.splitlines():
-        # 格式: <mode> blob <sha>\t<path>
-        if "\t" not in line:
+    for entry in out.split("\0"):
+        if not entry or "\t" not in entry:
             continue
-        meta, path = line.split("\t", 1)
+        meta, path = entry.split("\t", 1)
         parts = meta.split()
-        if len(parts) >= 3 and parts[1] == "blob":
-            entries.append((path, parts[2]))
+        if len(parts) >= 3:
+            entries.append((path, f"{parts[0]} {parts[1]} {parts[2]}"))
     entries.sort()
     import hashlib
-    payload = "\n".join(f"{p}:{h}" for p, h in entries)
+    payload = "\n".join(f"{p}:{m}" for p, m in entries)
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()

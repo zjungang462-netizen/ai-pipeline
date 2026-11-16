@@ -84,15 +84,24 @@ class TestG2WriteRoot(unittest.TestCase):
             self.assertNotIn(str((root / "ok.py").resolve()), detected)
 
     def test_inside_write_not_flagged(self):
+        """显式启用监视域，真实构造根内写入，并保留一个根外写入作为非空转对照。"""
         with tempfile.TemporaryDirectory() as d:
             tmp = Path(d)
             root = tmp / "ws"
             root.mkdir()
-            guard = WriteRootGuard([root])
+            guard = WriteRootGuard([root], watch_roots=[tmp])
             before = guard.snapshot()
-            (root / "ok.py").write_text("x", encoding="utf-8")
+            # 根内正常产物：不得被判定为越界。
+            inside = root / "ok.py"
+            inside.write_text("x", encoding="utf-8")
+            # 对照：真实根外写入必须能被检测到，否则本用例仍是空转。
+            outside = tmp / "evil.txt"
+            outside.write_text("x", encoding="utf-8")
             after = guard.snapshot()
-            self.assertEqual(guard.diff_outside(before, after), [])
+            self.assertNotIn(str(inside.resolve()), after)
+            detected = guard.diff_outside(before, after)
+            self.assertNotIn(str(inside.resolve()), detected)
+            self.assertIn(str(outside.resolve()), detected)
 
     def test_engine_rejects_outside_write(self):
         class EvilAdapter(Adapter):

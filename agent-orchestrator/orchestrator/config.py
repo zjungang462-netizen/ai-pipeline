@@ -5,6 +5,7 @@ import tomllib
 import math
 import re
 import hashlib
+import json
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -27,6 +28,25 @@ KNOWN_ADAPTER_TYPES = {
     "cli_doubao",
     "cli_agy",
 }
+
+# 配置表允许的键集合：未知键直接报错，避免拼写错误让安全/预算字段静默失效。
+_ROOT_KEYS = {
+    "task_workdir", "state_dir", "serial", "allow_yolo", "watch_root",
+    "watch_enforce", "git_exe", "tune_proposal_id", "adapters", "stages",
+    "run_budget", "autonomy", "autotune",
+}
+_STAGE_KEYS = {
+    "name", "kind", "adapter", "prompt", "timeout_s", "approval",
+    "max_attempts", "max_tokens", "max_duration_s", "config_keys",
+    "feedback_to", "max_rounds", "test_cmd", "context_files", "precheck_cmd",
+}
+_BUDGET_KEYS = {"max_tokens", "max_duration_s"}
+
+
+def _reject_unknown(raw: dict, allowed: set[str], label: str) -> None:
+    unknown = sorted(set(raw) - allowed)
+    if unknown:
+        raise ConfigError(f"{label} 包含未知字段: {unknown}（允许: {sorted(allowed)}）")
 
 
 @dataclass
@@ -78,7 +98,7 @@ class Config:
     run_budget: RunBudget = field(default_factory=RunBudget)
     base_dir: Path = field(default_factory=Path.cwd)
     git_exe: str = ""                          # 可选：git 可执行文件绝对路径（G1）
-    watch_root: str = ""                       # 可选：越界监视域（G2）；空=工作区父目录
+    watch_root: str = ""                       # 可选：越界监视域（G2）；空=不扫描（默认关闭）
     # 目录快照默认只告警（启发式，父目录无关保存不该判阶段失败）。
     # 设 true 才把根外变更当失败；硬隔离请用容器/系统级作业对象。
     watch_enforce: bool = False
@@ -130,6 +150,11 @@ def _numeric(value, label: str, *, integer=False, minimum=0):
 def parse_config(raw: dict[str, Any], base_dir: Path | None = None) -> Config:
     base_dir = Path(base_dir) if base_dir else Path.cwd()
     _require(isinstance(raw, dict), "配置根必须是表")
+    # 未知键必须明确拒绝：拼错 approval/watch_enforce/max_tokens 等安全或
+    # 预算字段时，静默按默认值运行会让门禁/限额无声失效（P2-10）。
+    _reject_unknown(raw, _ROOT_KEYS, "配置根")
+    for key in ("autonomy", "autotune", "adapters", "run_budget"):
+        _require(isinstance(raw.get(key, {}), dict), f"{key} 必须是表")
     autonomy = _policy(raw.get("autonomy", {}), Autonomy)
     autotune = _policy(raw.get("autotune", {}), AutoTune)
     _require(not autotune.auto_apply or (autotune.enabled and autonomy.enabled),
@@ -174,6 +199,7 @@ def parse_config(raw: dict[str, Any], base_dir: Path | None = None) -> Config:
     seen: set[str] = set()
     for i, s in enumerate(stages_raw):
         _require(isinstance(s, dict), f"第 {i} 个阶段必须是表")
+        _reject_unknown(s, _STAGE_KEYS, f"第 {i} 个阶段")
         name = s.get("name")
         _require(isinstance(name, str) and name, f"第 {i} 个阶段缺少 name")
         _require(bool(re.fullmatch(r"[\w.-]+", name)) and ".." not in name
@@ -213,7 +239,14 @@ def parse_config(raw: dict[str, Any], base_dir: Path | None = None) -> Config:
             if s.get(key) is not None:
                 _numeric(s[key], f"阶段 {name} {key}", integer=key == "max_tokens")
         _require(type(s.get("approval", False)) is bool, f"阶段 {name} approval 必须是布尔值")
-        _require(isinstance(s.get("config_keys", {}), dict), f"阶段 {name} config_keys 必须是表")
+        config_keys_raw = s.get("config_keys", {})
+        _require(isinstance(config_keys_raw, dict), f"阶段 {name} config_keys 必须是表")
+        try:
+            json.dumps(config_keys_raw, ensure_ascii=False, sort_keys=True)
+        except (TypeError, ValueError) as error:
+            raise ConfigError(
+                f"阶段 {name} config_keys 必须可 JSON 序列化（TOML datetime 等值不支持）: {error}"
+            ) from error
         stages.append(StageSpec(
             name=name,
             adapter=adapter,
@@ -253,6 +286,7 @@ def parse_config(raw: dict[str, Any], base_dir: Path | None = None) -> Config:
 
     budget_raw = raw.get("run_budget", {})
     _require(isinstance(budget_raw, dict), "[run_budget] 必须是表")
+    _reject_unknown(budget_raw, _BUDGET_KEYS, "[run_budget]")
     for key in ("max_tokens", "max_duration_s"):
         if budget_raw.get(key) is not None:
             _numeric(budget_raw[key], f"run_budget.{key}", integer=key == "max_tokens")
