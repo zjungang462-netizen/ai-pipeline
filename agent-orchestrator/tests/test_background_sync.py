@@ -45,8 +45,21 @@ class BackgroundSyncTests(unittest.TestCase):
         with self.s.store.connect() as db:
             return db.execute('SELECT COUNT(*) FROM projection_offsets').fetchone()[0]
 
+    def seed_many(self, numbers, *, managed_last=False):
+        """仅批量准备夹具时复用连接；观察阶段仍使用产品默认持久化设置。"""
+        numbers=list(numbers)
+        with self.s.store.connect() as db:
+            original_sync=db.execute('PRAGMA synchronous').fetchone()[0]
+        with self.s.store.session():
+            with self.s.store.connect() as db:
+                db.execute('PRAGMA synchronous=NORMAL')
+            result=[self.seed(i,managed=(managed_last and i==numbers[-1])) for i in numbers]
+        with self.s.store.connect() as db:
+            self.assertEqual(db.execute('PRAGMA synchronous').fetchone()[0],original_sync)
+        return result
+
     def test_full_sync_projects_more_than_one_hundred_with_equal_timestamps(self):
-        for i in range(137):self.seed(i)
+        self.seed_many(range(137))
         stats = self.s.sync()
         self.assertEqual(stats['runs_checked'],137)
         self.assertEqual(self.count_offsets(),137)
@@ -54,7 +67,7 @@ class BackgroundSyncTests(unittest.TestCase):
             self.assertEqual(db.execute("SELECT COUNT(*) FROM event_log WHERE kind='engine_event'").fetchone()[0],137)
 
     def test_incremental_tick_is_bounded_and_sweeps_all_records(self):
-        for i in range(137):self.seed(i)
+        self.seed_many(range(137))
         with mock.patch.object(self.s,'launch',side_effect=AssertionError('历史不应执行模型或任务')):
             for _ in range(3):
                 stats = self.s.sync(recover=True, incremental=True)
@@ -63,7 +76,7 @@ class BackgroundSyncTests(unittest.TestCase):
         self.assertEqual(self.count_offsets(),137)
 
     def test_warm_sync_avoids_job_reads_and_repeated_registration_writes(self):
-        for i in range(8):self.seed(i)
+        self.seed_many(range(8))
         self.s.sync()
         statements = []
         with self.s.store.session():
@@ -76,7 +89,7 @@ class BackgroundSyncTests(unittest.TestCase):
         self.assertFalse([s for s in statements if s.lstrip().split()[0] in ('INSERT','UPDATE','DELETE','REPLACE')])
 
     def test_old_state_change_and_new_directory_are_eventually_discovered(self):
-        entries=[self.seed(i) for i in range(137)]
+        entries=self.seed_many(range(137))
         self.s.sync()
         key,path=entries[0]
         state=json.loads((path/'state.json').read_text(encoding='utf8'))
@@ -93,7 +106,7 @@ class BackgroundSyncTests(unittest.TestCase):
     def test_old_managed_run_commands_and_topics_recover_beyond_first_page(self):
         # 受管运行必须取首页之外的最后一条，才能证明旧实现（只投影最近 100 条）
         # 真的漏掉它；用 r-0000 会在旧实现首页内，用例失去鉴别力。
-        entries=[self.seed(i, managed=(i==136)) for i in range(137)]
+        entries=self.seed_many(range(137),managed_last=True)
         key,path=entries[136]
         atomic_write_json(path/'job.json',{'status':'paused'})
         command=self.s.store.enqueue(key,'resume',{},'recover-command-001')
@@ -118,7 +131,7 @@ class BackgroundSyncTests(unittest.TestCase):
         self.assertEqual(self.s.store.last_cursor(key),cursor)
 
     def test_incremental_bad_record_does_not_starve_later_records(self):
-        entries=[self.seed(i) for i in range(3)]
+        entries=self.seed_many(range(3))
         original=background_sync.project
         def fail(store,run,cache):
             if run['id']==entries[0][0]:raise OSError('transient state update')
@@ -131,7 +144,7 @@ class BackgroundSyncTests(unittest.TestCase):
         self.assertEqual(self.count_offsets(),3)
 
     def test_directory_handles_close_and_closed_sync_stops_scanning(self):
-        for i in range(51):self.seed(i)
+        self.seed_many(range(51))
         self.s.sync(incremental=True)
         self.assertTrue(self.s._background_sync.scans)
         self.s.closed.set()
@@ -153,7 +166,7 @@ class BackgroundSyncTests(unittest.TestCase):
     def test_import_and_projection_caches_are_bounded(self):
         self.s._background_sync.IMPORT_CACHE_LIMIT=3
         self.s._background_sync.PROJECTION_CACHE_LIMIT=2
-        for i in range(7):self.seed(i)
+        self.seed_many(range(7))
         self.s.sync()
         self.assertEqual(len(self.s._background_sync.imports),3)
         self.assertEqual(len(self.s._projection_cache),2)
@@ -162,7 +175,7 @@ class BackgroundSyncTests(unittest.TestCase):
 
     def test_small_full_state_cache_does_not_force_unchanged_history_rereads(self):
         self.s._background_sync.PROJECTION_CACHE_LIMIT=2
-        for i in range(7):self.seed(i)
+        self.seed_many(range(7))
         self.s.sync()
         self.assertEqual(len(self.s._projection_cache),2)
         with mock.patch('pathlib.Path.read_text',side_effect=AssertionError('只读签名足以跳过未变化投影')):
@@ -170,7 +183,7 @@ class BackgroundSyncTests(unittest.TestCase):
         self.assertEqual(stats['projections_unchanged'],7)
 
     def test_projects_share_directory_budget_without_starving_small_project(self):
-        for i in range(61):self.seed(i)
+        self.seed_many(range(61))
         other=self.root/'other.toml'
         other.write_text(self.cfg.read_text(encoding='utf8').replace('state_dir="state"',
                          'state_dir="other-state"'),encoding='utf8')
@@ -182,7 +195,7 @@ class BackgroundSyncTests(unittest.TestCase):
         self.assertEqual(self.s.store.run(project+':discovered')['project_id'],project)
 
     def test_inserted_id_before_cursor_is_seen_after_wraparound(self):
-        for i in range(1,62):self.seed(i)
+        self.seed_many(range(1,62))
         self.s.sync(incremental=True)
         key,_=self.seed(0)
         for _ in range(3):self.s.sync(incremental=True)
@@ -212,7 +225,7 @@ class BackgroundSyncTests(unittest.TestCase):
         self.assertTrue({p['name']:p for p in self.s.list_projects()}['c']['unavailable'])
 
     def test_malformed_state_does_not_abort_incremental_sync(self):
-        entries=[self.seed(i) for i in range(3)]
+        entries=self.seed_many(range(3))
         (entries[0][1]/'state.json').write_text(json.dumps({'stages':[]}),encoding='utf8')
         stats=self.s.sync(incremental=True)
         self.assertGreaterEqual(stats['errors'],1)
