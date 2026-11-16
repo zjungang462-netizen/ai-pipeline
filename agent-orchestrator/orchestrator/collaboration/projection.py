@@ -56,12 +56,28 @@ def _signature(root):
     return repr(stamps)
 
 
+def _check_state_shape(state, job):
+    """畸形但 JSON 合法的状态不能按 dict 形状访问，摘要与投影统一在这里拒绝。"""
+    if not isinstance(state, dict):
+        raise ValueError('运行状态形状非法: state 根必须为对象')
+    if not isinstance(job, dict):
+        raise ValueError('运行状态形状非法: job 根必须为对象')
+    for label, value, expected in (('stages', state.get('stages', {}), dict),
+                                   ('events', state.get('events', []), list),
+                                   ('control', state.get('control', {}), dict)):
+        if not isinstance(value, expected):
+            raise ValueError(f'运行状态形状非法: {label} 必须为'
+                             + ('对象' if expected is dict else '数组')
+                             + f'（实际 {type(value).__name__}）')
+
+
 def _state_pair(root, signature):
     """摘要与完整投影共用双文件一致性检查，读摘要不提交投影游标。"""
     for _ in range(4):
         state, job = read_json(root / 'state.json'), read_json(root / 'job.json')
         after = _signature(root)
         if after == signature:
+            _check_state_shape(state, job)
             return signature, state, job
         signature = after
     raise OSError('运行状态正在连续提交，请重试快照')
@@ -83,7 +99,11 @@ class SummaryCache:
             if saved is not None and saved[0] == signature:
                 self.rows.move_to_end(key)
                 return saved[1], saved[2]
-        signature, state, job = _state_pair(root, signature)
+        try:
+            signature, state, job = _state_pair(root, signature)
+        except ValueError:
+            # 畸形状态不应让 /api/runs 整页失败：摘要降级为空标题/unknown，进入房间时仍会明确报错。
+            return '', 'unknown'
         task = state.get('task') or job.get('task', '')
         status = lifecycle(state, job)
         with self.lock:

@@ -33,9 +33,12 @@ class Application:
         def loop():
             while not self.closed.wait(.75):
                 try:
-                    self.service.sync(recover=True)
-                except (ValueError, OSError):
-                    pass
+                    self.service.sync(recover=True, incremental=True)
+                except Exception as error:
+                    # 单轮投影失败（含畸形状态/坏配置/数据库瞬时错误）不得结束线程；
+                    # 保留最后错误供诊断，并在页面上不做成“同步成功”。
+                    reason = self.service.redact(str(error) or error.__class__.__name__)
+                    self.service.last_sync_error = reason[:500]
         self.projection_thread = threading.Thread(target=loop, daemon=True)
         self.projection_thread.start()
 
@@ -47,6 +50,7 @@ class Application:
             thread.join(10)
             if thread.is_alive():
                 raise RuntimeError('工作台投影线程尚未退出，不能确认资源已释放')
+        self.service._background_sync.close()
         with self.requests:
             if not self.requests.wait_for(lambda: self.active_requests == 0, timeout=10):
                 raise RuntimeError('工作台请求会话尚未退出，不能确认资源已释放')
@@ -161,7 +165,7 @@ class Handler(BaseHTTPRequestHandler):
             service, store = self.app.service, self.app.service.store
             parts = path.strip('/').split('/')
             if path == '/api/projects' and method == 'GET':
-                return self.respond({'projects': store.projects()})
+                return self.respond({'projects': service.list_projects()})
             if path == '/api/runs':
                 if method == 'GET':
                     for name in ('limit', 'before', 'cursor', 'q', 'project_id', 'status'):
@@ -178,7 +182,8 @@ class Handler(BaseHTTPRequestHandler):
                                                   raw_q, raw_project_id, raw_status)
                     return self.respond(page)
                 if method == 'POST':
-                    value = service.create_run(body['project_id'], body['task'], self.idem(), body.get('parent_id'))
+                    value = service.create_run(body['project_id'], body['task'], self.idem(),
+                                               body.get('parent_id'), body.get('expected_config_hash'))
                     return self.respond(value, 202)
             if len(parts) == 3 and parts[:2] == ['api', 'commands'] and method == 'GET':
                 return self.respond(store.command(parts[2]))

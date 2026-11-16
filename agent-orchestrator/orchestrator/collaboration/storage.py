@@ -133,6 +133,15 @@ class Store:
                               (before or time.time() + 1, min(100, max(1, limit)))).fetchall()
         return [dict(r) for r in rows]
 
+    def sync_runs(self, after=None, limit=50):
+        """内部同步轮巡按唯一主键分页，不受 UI 首页上限或时间戳并列影响。"""
+        with self.connect() as db:
+            if after is None:
+                rows = db.execute('SELECT * FROM runs ORDER BY id LIMIT ?', (limit,)).fetchall()
+            else:
+                rows = db.execute('SELECT * FROM runs WHERE id>? ORDER BY id LIMIT ?', (after, limit)).fetchall()
+        return [dict(row) for row in rows]
+
     def enqueue(self, run, kind, payload, idem):
         if not isinstance(idem, str) or not 8 <= len(idem) <= 160:
             raise ValueError('操作必须提供 8 到 160 字符的幂等标识')

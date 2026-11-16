@@ -15,6 +15,7 @@ from ..config import load_config
 from ..state import RunState, atomic_write_json
 from .storage import Store, Conflict, identifier
 from .projection import project, directory, lifecycle, artifact_list, read_json, stage_target, SummaryCache
+from .execution_scope import execution_scope
 
 
 class Service:
@@ -28,10 +29,19 @@ class Service:
         self._projection_cache = {}
         self._summary_cache = SummaryCache()
         self.closed = threading.Event()
+        self._sync_lock = threading.RLock()
+        from .background_sync import BackgroundSync
+        self._background_sync = BackgroundSync(self)
+        self.last_sync_stats = {}
+        self.last_sync_error = ''
         for path in configs:
-            cfg = load_config(path)
-            self.store.register_project(cfg.source_path)
-        self.sync(recover=True)
+            # 只登记路径，不在启动阶段解析配置：单个配置损坏/被删除时服务仍须可用。
+            self.store.register_project(path)
+        try:
+            self.sync(recover=True)
+        except Exception as error:
+            # 单个坏配置/畸形运行目录不应阻止工作台启动；房间仍可打开，错误留给诊断。
+            self.last_sync_error = self.redact(str(error) or error.__class__.__name__)
 
     def config(self, path):
         key = str(path)
@@ -60,46 +70,28 @@ class Service:
             return item
         return scrub(value)
 
-    def sync(self, recover=False):
-        with self.store.session():
-            return self._sync(recover)
+    def list_projects(self):
+        """创建前展示真实工作目录和阶段能力，不实例化模型执行器。
 
-    def _sync(self, recover=False):
+        单个登记配置损坏/被删除时只把该条目标记为 unavailable，不影响其他项目。
+        """
+        result = []
         for entry in self.store.projects():
-            if self.closed.is_set():return
-            cfg = self.config(entry['config'])
-            root = cfg.state_dir / 'runs'
-            if root.is_dir():
-                for path in root.iterdir():
-                    if self.closed.is_set():return
-                    if path.is_dir() and (path / 'state.json').is_file():
-                        try:
-                            RunState(cfg.state_dir, path.name)
-                        except ValueError:
-                            continue
-                        key = self.store.register_run(entry['id'], path.name, entry['config'], cfg.state_dir)
-                        job = read_json(path / 'job.json')
-                        candidate = Path(job.get('config', entry['config'])).resolve()
-                        if candidate.parent == cfg.base_dir and candidate.suffix == '.toml' and candidate.is_file():
-                            pinned = self.config(candidate)
-                            if pinned.source_hash == job.get('config_hash'):
-                                self.store.pin_import_config(key, candidate)
-        for run in self.store.runs():
-            if self.closed.is_set():return
-            state, job = project(self.store, run, self._projection_cache)
-            if recover and run['managed'] and (lifecycle(state, job) in ('running', 'pending', 'recovering')
-                                               or self.store.commands(run['id'])):
-                self.launch(run['id'])
-            if recover:
-                for topic in self.store.threads(run['id']):
-                    if topic['status'] in ('queued', 'running'):
-                        self.launch_discussion(topic['id'])
-            # state 先提交、收据尚未投影时，补齐命令而不重复执行。
-            for command_id, receipt in state.get('control', {}).get('receipts', {}).items():
-                try:
-                    self.store.finish(command_id, receipt['status'], receipt['result'])
-                except KeyError:
-                    pass
+            try:
+                cfg = self.config(entry['config'])
+                result.append({**entry, 'execution_scope': execution_scope(cfg),
+                               'config_hash': cfg.source_hash})
+            except Exception as error:
+                result.append({**entry, 'execution_scope': None, 'config_hash': None,
+                               'unavailable': (str(error) or error.__class__.__name__)[:200]})
+        return self.redact(result)
+
+    def sync(self, recover=False, incremental=False):
+        with self._sync_lock:
+            stats = self._background_sync.sync(recover, incremental)
+            self.last_sync_stats = dict(stats)
+            self.last_sync_error = ''
+            return stats
 
     def snapshot(self, key):
         run = self.store.run(key)
@@ -142,6 +134,8 @@ class Service:
         data['capabilities']['discussion'] = bool(state.get('stages')) and any(a.type == 'openai_compat' for a in cfg.adapters.values())
         data['config_integrity'] = ('not_recorded' if not job.get('config_hash') else
                                     'valid' if cfg.source_hash == job['config_hash'] else 'changed')
+        data['execution_scope'] = execution_scope(cfg)
+        data['execution_scope']['matches_run_config'] = data['config_integrity'] == 'valid'
         if data['config_integrity'] == 'changed':
             for action in ('approve', 'resume', 'rerun', 'derive', 'discussion'):
                 data['capabilities'][action] = False
@@ -456,17 +450,26 @@ class Service:
 
         return self.redact({'runs': result, 'has_more': has_more, 'next_cursor': next_cursor})
 
-    def create_run(self, project_id, task, idem, parent=None):
+    def create_run(self, project_id, task, idem, parent=None, expected_config_hash=None):
         if not isinstance(task, str) or not task.strip() or len(task) > 64000:
             raise ValueError('任务必须为 1 到 64000 字符')
+        if expected_config_hash is not None and not isinstance(expected_config_hash, str):
+            raise ValueError('expected_config_hash 必须为字符串')
         entry = self.store.project(project_id)
         cfg = load_config(entry['config'])
+        # 页面确认过的执行范围必须与创建时配置一致，防止会话中改配置后按新范围执行。
+        if expected_config_hash is not None and expected_config_hash != cfg.source_hash:
+            raise Conflict('配置已变化，请刷新后重试')
         if not cfg.run_budget.max_tokens or not cfg.run_budget.max_duration_s:
             raise ValueError('配置必须显式限制 token 和时长')
         if parent:
             original = self.store.run(parent)
             if original['project_id'] != project_id:
                 raise ValueError('后续任务必须属于同一项目')
+            if expected_config_hash is not None:
+                original_cfg = load_config(original['config'])
+                if expected_config_hash != original_cfg.source_hash:
+                    raise Conflict('配置已变化，请刷新后重试')
             if self.snapshot(parent)['lifecycle'] in ('pending', 'running', 'recovering'):
                 raise ValueError('请先暂停或结束旧运行，再从固定状态创建后续任务')
         # 确定性 run_id 使创建任务的网络重试不会创建另一份运行。
