@@ -18,8 +18,20 @@ from pathlib import Path
 
 ROOT=Path(__file__).resolve().parents[1]
 sys.path.insert(0,str(ROOT))
-from scripts.failure_evidence import (EvidenceResultMixin, Scrubber,
+from scripts.failure_evidence import (EvidenceResultMixin, Scrubber, RedactedLog,
                                       environment_secrets)
+
+# 固定、可审计的快速集合；完整入口继续发现全部测试。
+QUICK_TESTS = ('test_stage1', 'test_budget', 'test_api_adapter', 'test_cli_adapters',
+               'test_cli_entry', 'test_execution_scope', 'test_fix_ninth.ConfigValidation',
+               'test_phase2_operations', 'test_phase2_gates')
+
+
+def collect_tests(quick=False):
+    if quick:
+        sys.path.insert(0, str(ROOT/'tests'))
+        return unittest.defaultTestLoader.loadTestsFromNames(QUICK_TESTS)
+    return unittest.defaultTestLoader.discover(str(ROOT/'tests'))
 
 
 def digest_files():
@@ -48,7 +60,7 @@ def redact_verification(proof, secrets=()):
     return proof
 
 
-def smoke(output):
+def smoke(output, redact_logs=False):
     from orchestrator.config import load_config
     from orchestrator.dashboard.server import create_server
     result={'python':platform.python_version(),'utf8_mode':sys.flags.utf8_mode,
@@ -84,7 +96,10 @@ def smoke(output):
     for number,(args,expected) in enumerate(commands,1):
         run=subprocess.run([sys.executable,'-X','utf8','-m','orchestrator.cli',*args],cwd=ROOT,env=env,
                            capture_output=True,text=True,encoding='utf8',errors='replace',timeout=120)
-        (output/f'cli-{number}.log').write_text(run.stdout+'\n'+run.stderr,encoding='utf8')
+        log = run.stdout+'\n'+run.stderr
+        if redact_logs:
+            log = Scrubber(environment_secrets()).text(log)
+        (output/f'cli-{number}.log').write_text(log,encoding='utf8')
         result['cli'].append({'command':args[0],'expected_exit':expected,'actual_exit':run.returncode})
         if run.returncode!=expected:raise RuntimeError('CLI 冒烟失败: '+args[0])
     config=load_config(ROOT/'workbench.example.toml')
@@ -114,10 +129,12 @@ def smoke(output):
     return result
 
 
-def main():
+def main(argv=None):
     parser=argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--output',required=True)
-    args=parser.parse_args()
+    parser.add_argument('--quick', action='store_true', help='冒烟与核心快速集合，目标总耗时不超过 120 秒')
+    parser.add_argument('--redact-logs', action='store_true', help='对回归日志与 CLI 冒烟日志脱敏')
+    args=parser.parse_args(argv)
     output=Path(args.output).resolve()
     if output.is_relative_to(ROOT):raise ValueError('验证输出目录必须位于项目之外')
     output.mkdir(parents=True,exist_ok=True)
@@ -125,7 +142,7 @@ def main():
     before=digest_files()
     (output/'source-before.json').write_text(json.dumps(before,ensure_ascii=False,indent=2),encoding='utf8')
     started=time.monotonic()
-    info=smoke(output)
+    info=smoke(output, redact_logs=args.redact_logs)
     (output/'smoke.json').write_text(json.dumps(info,ensure_ascii=False,indent=2),encoding='utf8')
     print(json.dumps({'smoke':'passed','examples':len(info['examples']),'git':info['git_version'],
                       'node':info['node_version']},ensure_ascii=True),flush=True)
@@ -139,24 +156,35 @@ def main():
         def stopTest(self,test):
             durations.append({'test':test.id(),'duration_s':round(time.monotonic()-self.started,3)})
             super().stopTest(test);self.stream.flush()
-    suite=unittest.defaultTestLoader.discover(str(ROOT/'tests'))
+    suite=collect_tests(args.quick)
     print(json.dumps({'tests_collected':suite.countTestCases()}),flush=True)
-    with (output/'full-regression.log').open('w',encoding='utf8') as log:
-        with contextlib.redirect_stdout(log),contextlib.redirect_stderr(log):
-            result=unittest.TextTestRunner(stream=log,verbosity=2,resultclass=Result).run(suite)
+    log_name='quick-regression.log' if args.quick else 'full-regression.log'
+    with (output/log_name).open('w',encoding='utf8') as raw_log:
+        log=RedactedLog(raw_log) if args.redact_logs else raw_log
+        try:
+            with contextlib.redirect_stdout(log),contextlib.redirect_stderr(log):
+                result=unittest.TextTestRunner(stream=log,verbosity=2,resultclass=Result).run(suite)
+        finally:
+            if args.redact_logs:log.finish()
     info['failure_evidence']=getattr(result,'_test_evidence_failures',[])
     after=digest_files()
     (output/'source-after.json').write_text(json.dumps(after,ensure_ascii=False,indent=2),encoding='utf8')
     (output/'test-durations.json').write_text(json.dumps(durations,ensure_ascii=False,indent=2),encoding='utf8')
-    proof={'tests_run':result.testsRun,'failures':[{'test':t.id(),'traceback':s} for t,s in result.failures],
+    proof={'mode':'quick' if args.quick else 'full', 'log_file':log_name,
+           'tests_run':result.testsRun,'failures':[{'test':t.id(),'traceback':s} for t,s in result.failures],
            'errors':[{'test':t.id(),'traceback':s} for t,s in result.errors],
            'skipped':[{'test':t.id(),'reason':s} for t,s in result.skipped],
            'source_unchanged':before==after,'duration_s':round(time.monotonic()-started,3),
            'runtime':info,'source_files':len(before),'no_model_calls_requested':True}
     redact_verification(proof)
     proof['redaction']={'verification_json':'known_credentials_and_token_patterns',
-                        'full_regression_log':'raw_not_redacted'}
+                        'full_regression_log':'known_credentials_and_token_patterns' if args.redact_logs else 'raw_not_redacted',
+                        'cli_logs':'known_credentials_and_token_patterns' if args.redact_logs else 'raw_not_redacted'}
     proof['exit_code']=0 if result.wasSuccessful() and before==after and not result.skipped else 1
+    if args.quick:
+        proof['quick_budget_s']=120
+        proof['quick_within_budget']=proof['duration_s']<=120
+        if not proof['quick_within_budget']:proof['exit_code']=1
     (output/'verification.json').write_text(json.dumps(proof,ensure_ascii=False,indent=2),encoding='utf8')
     print(json.dumps({k:v for k,v in proof.items() if k!='runtime'},ensure_ascii=True),flush=True)
     return proof['exit_code']

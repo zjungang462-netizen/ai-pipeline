@@ -1,5 +1,7 @@
 # 干净目录运行与验收
 
+2026-11-17 阶段二开发源码的全量离线验收为 **514 项通过，零失败/错误/跳过**。下文 `delivery-2026-11-16-round9` 的 479 项与 SHA 清单描述上次冻结发布包；本阶段的新命令需使用最新源码，未改写旧包或标签。
+
 ## 环境
 
 - Python 3.11 或更高版本；运行代码使用标准库，无需 pip 安装。
@@ -58,6 +60,36 @@ Windows 上测试会真实创建临时文件、Git 仓库和进程树，耗时�
 ## 模型示例
 
 `config.example.toml` / `pipeline.example.toml` 使用环境变量 `DEEPSEEK_API_KEY`；它们包含设计审批。`unattended.example.toml` 显式定义预授权文件和预算。`cli-mixed.example.toml` 需要已验证版本的 Codex 与反重力及本机登录；`dsh-test.example.toml` 需要 dsh 及显式允许的 `DEEPSEEK_API_KEY`。先复制模板、配置工作目录和工具路径，再按 README 启动；不要把真实凭据写入 TOML 或提交仓库。`demo/run_api_demo.py` 退出码与 CLI 对齐：全部阶段完成 0、等待审批 11、失败/超时/中断等未完成 1。
+
+## 配置诊断与状态维护（阶段二）
+
+```powershell
+python -m orchestrator.cli doctor workbench.example.toml --json
+python -m orchestrator.cli clean --state-dir .workbench/demo-state --dry-run --older-than 30
+```
+
+`doctor` 退出 0 表示无错误，1 表示诊断有错误；目录尚不存在但可创建等情况只告警。它复用配置加载器的全部字段与约束，集中列出未知字段和拼写建议，并检查本机路径、提示词文件、命令入口、适配器构造与凭据环境变量、预算/autonomy 关系和 watch 设置。不创建工作区、不执行测试/模型/登录命令、不联网；权限检查是静态访问检查，不能代替运行时 ACL 或工具连通性验证。配置存在结构错误时先修复校验错误再重跑，以继续后续路径检查。
+
+`clean` 默认只输出 JSON 预览，包括候选路径、字节数、保留理由和错误；`--apply` 才实际删除。`--older-than` 单位为天，必须为正数。保留当前/最新 attempt、成功/decision/审批证据、恢复候选、待审批或活动运行、含链接/junction 的目录及无法可靠解析的运行状态；不删除 `state.json`、`metrics.json` 或有效 worktree。只有整棵目录都已过期才清理失败 attempt 或隔离目录，删除前获取运行所有权锁并重新检查状态、目录指纹及绝对路径边界。目录变化或锁繁忙时保留并报错；可重新预览后处理。
+
+可附加 `--repo <任务仓库>` 检查失效 worktree 登记；只有 Git 将淘汰的全部登记都指向该状态根内且目录已消失时，才允许 `git worktree prune`。外部登记、仍存在的目录或不可识别的 Git 输出会拒绝自动处理。`--test-failures <诊断目录>` 可一并预览/清理诊断包，`--max-evidence-mib 100` 指定占用上限（至少 2 MiB）。实际历史目录先 dry-run 核对，不要把共享目录当作专属状态根。
+
+## 快速与提交前门禁（阶段二）
+
+```powershell
+python scripts/verify_delivery.py --quick --redact-logs --output ../quick-verification
+python scripts/precommit.py --output ../precommit-verification
+```
+
+`--quick` 保留完整示例/CLI/HTTP 冒烟，执行固定核心集合，覆盖配置、引擎状态、预算、适配器、工作台执行范围及新增运维门禁；目标总耗时不超过 120 秒，超时预算、失败、错误或跳过均返回非零。`verification.json` 写入 `mode=quick` 和预算结果，不能替代 `mode=full` 的完整验收；quick 的日志名为 `quick-regression.log`，完整验收仍为 `full-regression.log`。
+
+`precommit.py` 先对暂存区与工作树做 `git diff --check`，验证受 Git 管理/未忽略的流水线 TOML，再扫描新增或改动文本中的常见令牌、含凭据 URL、私钥头和直接写入的凭据。暂存区与工作树分别读取，防止已暂存凭据被工作树的干净版本掩盖。只输出位置和类别，不回显凭据；大于 2 MiB 的文本拒绝跳过扫描，二进制不扫描。受控夹具应使用明确的运行时构造，不提交可被误用的真实凭据；扫描不是任意秘密的识别保证。静态检查通过后调用同一个官方 `--quick --redact-logs` 入口；`--checks-only` 仅用于静态诊断，不代表完整提交前门禁通过。脚本不自动安装 Git hook。
+
+## 日志脱敏与诊断保留（阶段二）
+
+完整验收也支持 `--redact-logs`，默认关闭。开启后对回归日志流和 CLI 冒烟日志替换已知环境凭据、可识别令牌及含凭据 URL；跨 write/flush 边界保留未完成片段，超过 64 Ki 字符的单行整体省略，防止无限行缓存。结构化 `verification.json` 无论开关都保持原有脱敏规则。脱敏不改变测试状态或退出码，也不保证识别任意未知秘密。
+
+失败诊断包默认保留 30 天、目录总量目标 100 MiB，每次采集完成后在目录锁下淘汰过期/最旧包，保留本次新包。只管理含 `evidence.json` 的诊断目录，手动文件、链接和带受保护标记的目录不自动删除；它们可能导致无法达到总量目标，此时在预览中报告。保留规则也适用于 `ORCHESTRATOR_TEST_EVIDENCE` 指定目录和验收的 `failure-evidence/`。主回归日志不在自动淘汰范围内：本机保留 30 天，归档结构化验收 JSON 与源码/包指纹后再按实际需要人工删除原日志。正式交付的成功与审批证据不受诊断保留策略影响。
 
 ## 升级与回滚注意事项
 

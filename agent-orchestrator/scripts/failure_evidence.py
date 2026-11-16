@@ -79,6 +79,76 @@ class Scrubber:
         return self.text(str(value))[:1000]
 
 
+class RedactedLog:
+    """有界流式脱敏；flush 不泄漏尚未凑齐的凭据或令牌。"""
+    MAX_LINE = 64 * 1024
+
+    def __init__(self, stream, secrets=()):
+        self.stream = stream
+        self.scrub = Scrubber([*environment_secrets(), *secrets])
+        self.values = sorted(set(self.scrub.values + [json.dumps(v, ensure_ascii=True)[1:-1]
+                                                     for v in self.scrub.values]), key=len, reverse=True)
+        self.hold = max((len(v)-1 for v in self.values), default=0)
+        self.pending = ''
+        self.line = ''
+        self.dropping = False
+        self.finished = False
+
+    def _lines(self, text, final=False):
+        for part in text.splitlines(keepends=True):
+            if not self.dropping:
+                self.line += part
+                if len(self.line) > self.MAX_LINE:
+                    self.line = ''
+                    self.dropping = True
+                    self.stream.write('[REDACTED: oversize log line]\n')
+            if part.endswith(('\n', '\r')):
+                if not self.dropping:
+                    self.stream.write(self.scrub.text(self.line))
+                self.line = ''
+                self.dropping = False
+        if final and self.line:
+            self.stream.write(self.scrub.text(self.line))
+            self.line = ''
+
+    def _drain(self, final=False):
+        cut = len(self.pending) if final else max(0, len(self.pending)-self.hold)
+        # 若切点落在某个已知值中间，延迟整段到下次 write。
+        while cut and not final:
+            before = cut
+            for value in self.values:
+                start = self.pending.find(value, max(0, cut-len(value)+1))
+                if 0 <= start < cut < start+len(value):
+                    cut = start
+            if before == cut:
+                break
+        text, self.pending = self.pending[:cut], self.pending[cut:]
+        for value in self.values:
+            text = text.replace(value, '[REDACTED]')
+        self._lines(text, final=final)
+
+    def write(self, text):
+        if self.finished:
+            raise ValueError('脱敏日志已结束')
+        # 限制一次大 write 造成的额外缓存，长行整体省略。
+        for start in range(0, len(text), 4096):
+            self.pending += text[start:start+4096]
+            self._drain()
+        return len(text)
+
+    def flush(self):
+        self.stream.flush()
+
+    def finish(self):
+        if not self.finished:
+            self._drain(final=True)
+            self.flush()
+            self.finished = True
+
+    def isatty(self):
+        return False
+
+
 def _select(name, value):
     if not isinstance(value,dict):raise ValueError('诊断元数据必须是对象')
     if name=='state.json':
@@ -227,9 +297,6 @@ def capture(test_id, roots, output=None, secrets=(), failure='', metadata=None):
              'issues':issues[:80],'entries_checked':checked,
              'limits':{'files':MAX_FILES,'entries':MAX_ENTRIES,'bundle_bytes':MAX_BUNDLE_BYTES},
              'not_authoritative_execution_evidence':True,'redaction_scope':'known credentials and recognizable token/url patterns'}
-    target.mkdir(parents=True,exist_ok=True)
-    folder=target/(hashlib.sha256(test_id.encode('utf8')).hexdigest()[:12]+'-'+uuid.uuid4().hex[:12])
-    folder.mkdir()
     raw=json.dumps(payload,ensure_ascii=True,indent=2).encode('utf8')
     while len(raw)>MAX_BUNDLE_BYTES and payload['records']:
         payload['records'].pop()
@@ -237,7 +304,22 @@ def capture(test_id, roots, output=None, secrets=(), failure='', metadata=None):
         payload['issues']=[{'reason':'bundle_size_limit'}]
         raw=json.dumps(payload,ensure_ascii=True,indent=2).encode('utf8')
     if len(raw)>MAX_BUNDLE_BYTES:raise ValueError('诊断包超过上限')
-    (folder/'evidence.json').write_bytes(raw)
+    from orchestrator.maintenance import boundary, prune_evidence
+    from orchestrator.state import StageLock
+    boundary(target/'.retention.lock', target)
+    target.mkdir(parents=True,exist_ok=True)
+    with StageLock(target/'.retention.lock'):
+        folder=target/(hashlib.sha256(test_id.encode('utf8')).hexdigest()[:12]+'-'+uuid.uuid4().hex[:12])
+        folder.mkdir()
+        (folder/'evidence.json').write_bytes(raw)
+        try:
+            prune_evidence(target, keep=(folder,))
+        except (OSError, ValueError):
+            # 保留策略不能吞掉本次失败现场；清理错误独立记入诊断包。
+            payload['issues'].append({'reason':'retention_cleanup_failed'})
+            raw=json.dumps(payload,ensure_ascii=True,indent=2).encode('utf8')
+            if len(raw)<=MAX_BUNDLE_BYTES:
+                (folder/'evidence.json').write_bytes(raw)
     return folder/'evidence.json'
 
 

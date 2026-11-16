@@ -43,6 +43,13 @@ _STAGE_KEYS = {
 _BUDGET_KEYS = {"max_tokens", "max_duration_s"}
 
 
+def config_key_sets() -> dict[str, set[str]]:
+    """诊断复用加载器的字段集合；不维护第二套配置 schema。"""
+    return {"root": set(_ROOT_KEYS), "stages": set(_STAGE_KEYS),
+            "run_budget": set(_BUDGET_KEYS), "autonomy": set(vars(Autonomy())),
+            "autotune": set(vars(AutoTune()))}
+
+
 def _reject_unknown(raw: dict, allowed: set[str], label: str) -> None:
     unknown = sorted(set(raw) - allowed)
     if unknown:

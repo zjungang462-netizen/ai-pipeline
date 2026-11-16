@@ -8,6 +8,8 @@
 
 ## 当前交付基线：2026-11-16
 
+2026-11-17 阶段二开发已增加 `doctor`、默认 dry-run 的状态清理、`verify_delivery --quick`、提交前检查和可选日志脱敏；当前源码全量验收为 **514 项通过**。这些命令需使用最新源码，下述已发布标签与 479 项源码包保持原样。操作与证据保留规则见 [DELIVERY.md](DELIVERY.md)。
+
 本次交付标签为 `delivery-2026-11-16-round9`，纳入后台同步、CLI 可靠性、执行范围展示及第九轮审查修复。完整离线回归为 **479 项通过，0 失败、0 错误、0 跳过**；发布验收以源码包附带的 `delivery-metadata/verification.json` 为准，提交与逐文件 SHA-256 见包内 `SNAPSHOT.json`，压缩包 SHA-256 见包旁的 `.sha256` 文件。Python 运行依赖为标准库；完整开发测试还需要 Git 与 Node.js。版本内容与适用边界见 [RELEASE_NOTES.md](RELEASE_NOTES.md)，干净目录启动、升级注意事项与回归步骤见 [DELIVERY.md](DELIVERY.md)。以下分节保留各轮历史验证数量，不能将历史样例结果视为所有业务任务的成功率保证。
 
 ### 本次发布内容（第九轮审查修复后）

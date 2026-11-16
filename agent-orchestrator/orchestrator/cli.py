@@ -192,9 +192,47 @@ def cmd_dashboard(args) -> int:
     return 0
 
 
+def cmd_doctor(args) -> int:
+    from .doctor import diagnose
+    report = diagnose(args.config)
+    if args.json:
+        print(json.dumps(report, ensure_ascii=False, indent=2))
+    else:
+        for check in report['checks']:
+            print(f"[{check['level']}] {check['field']}: {check['message']}"
+                  + (f"；{check['hint']}" if check['hint'] else ''))
+        print(report['scope'])
+    return 0 if report['ok'] else 1
+
+
+def cmd_clean(args) -> int:
+    from .maintenance import clean_state
+    report = clean_state(args.state_dir, apply=args.apply, older_than=args.older_than,
+                         test_failures=args.test_failures, repo=args.repo,
+                         max_evidence_bytes=int(args.max_evidence_mib*1024*1024))
+    print(json.dumps(report, ensure_ascii=False, indent=2))
+    return 0 if report['ok'] else 1
+
+
 def main(argv=None) -> int:
     p = argparse.ArgumentParser(prog="orchestrator", description="多智能体开发流水线编排器")
     sub = p.add_subparsers(dest="cmd", required=True)
+
+    sp = sub.add_parser('doctor', help='只读诊断配置、路径、工具和预算；不调用模型')
+    sp.add_argument('config')
+    sp.add_argument('--json', action='store_true', help='输出结构化诊断')
+    sp.set_defaults(func=cmd_doctor)
+
+    sp = sub.add_parser('clean', help='预览过期状态清理；仅 --apply 实际执行')
+    sp.add_argument('--state-dir', required=True)
+    mode = sp.add_mutually_exclusive_group()
+    mode.add_argument('--dry-run', action='store_true', help='只预览（默认）')
+    mode.add_argument('--apply', action='store_true', help='复核并执行清理')
+    sp.add_argument('--older-than', type=float, default=30, metavar='DAYS')
+    sp.add_argument('--test-failures', help='同时管理指定诊断包目录')
+    sp.add_argument('--max-evidence-mib', type=int, default=100)
+    sp.add_argument('--repo', help='检查并清理该仓库在状态根内的失效 worktree 登记')
+    sp.set_defaults(func=cmd_clean)
 
     def add_common(sp, need_task=False):
         sp.add_argument("config", help="TOML 配置文件路径")
