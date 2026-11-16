@@ -4,9 +4,29 @@
 
 核心是**轻量编排引擎 + 可插拔适配器**，而非再包一层 LLM 框架。每个工具一个适配器，按配置把角色映射到工具，发挥各自所长。
 
+工作台创建任务时需明确选择项目配置，并显示实际目录与执行阶段。任务描述中写入另一个路径不会自动切换工作目录，也不会为固定测试配置增加设计或开发阶段。只有固定测试的配置显示为“固定测试流程”，完成后标注“固定测试已通过”；它只证明已配置的命令通过，不能当作业务功能已实现。历史配置未绑定或已变化时，界面不会用当前配置推断原运行的交付范围。
+
 ## 当前交付基线：2026-11-16
 
-当前源码完整离线回归 **388 项通过，0 失败、0 错误、0 跳过**，包含 CLI 协议、Windows 隔离配置、恢复计量、输出缓存、历史筛选和暂停终态交接。Python 运行依赖为标准库；完整开发测试还需要 Git 与 Node.js。版本内容与适用边界见 [RELEASE_NOTES.md](RELEASE_NOTES.md)，干净目录启动、示例与回归步骤见 [DELIVERY.md](DELIVERY.md)。以下分节保留各轮历史验证数量，不能将历史样例结果视为所有业务任务的成功率保证。
+已提交交付基线 `e2a4535` 的干净目录离线回归为 **388 项通过，0 失败、0 错误、0 跳过**，包含 CLI 协议、Windows 隔离配置、恢复计量、输出缓存、历史筛选和暂停终态交接。Python 运行依赖为标准库；完整开发测试还需要 Git 与 Node.js。版本内容与适用边界见 [RELEASE_NOTES.md](RELEASE_NOTES.md)，干净目录启动、示例与回归步骤见 [DELIVERY.md](DELIVERY.md)。以下分节保留各轮历史验证数量，不能将历史样例结果视为所有业务任务的成功率保证。
+
+### 工作树现状（第九轮审查修复后）
+
+当前工作树在已提交基线之上还有未提交改动（后台同步、挂起启动与失败诊断、执行范围展示、第九轮审查修复）。本轮修复后离线测试收集 **479 项**，完整回归入口仍为 `scripts/verify_delivery.py`；具体结果、源码指纹与耗时以该入口输出的 `verification.json` 为准，不能把历史分节的旧数字当作当前工作树结论。本轮修复的适用边界见 `../review-2026-11-16/修复复验报告.md`。
+
+第九轮修复后的关键行为变化：
+
+- **路径安全**：`.git` 及其 Windows 等价变体（`.git.`、`.git `、`.git...`）在读取（审查点名文件）与写入（API 适配器/清单提交）两侧统一拒绝；解析后再次检查相对路径分段。
+- **审查覆盖**：累积 diff 超过 600 行时，按 commit 注入变更文件全文；仍无法完整注入时 pass 不自动采纳（人工模式转待审批，无人值守判失败）。审查现有代码库模式的输入指纹纳入工作区内容哈希，源码变化后不再沿用旧 verdict（含 autonomy 逻辑哈希）。
+- **续跑一致性**：测试命令写出的工作区产物记入 `state.test_artifacts` 并从测试阶段指纹中排除，避免每次 resume 重跑测试；已消费的审查反馈保留参与返工 attempt 的指纹，review 通过后 resume 不再重跑 coding/review。
+- **审批**：code/test 阶段的审批不再实时重算可能被自身执行改写的 inputs_hash，只比对申请时冻结值、attempt 归档与 evidence；report/review 阶段仍拒绝输入变化后的审批。
+- **可写根外变更（watch_enforce=true）**：新文件移入 `<run>/violations/<stage>/` 隔离并留证，不再直接删除；改写既有根外文件与新增文件都会按 inputs_hash 持久记录，续跑保持失败且不再调用模型，需 `rerun-from` 显式覆盖。`watch_root` 落在可写根内会记 `watch_disabled` 事件并禁用该监视域。
+- **完成判据**：code 阶段零净变更判失败（与无人值守一致）；既有非 git 工作区首次初始化时把已有文件提交为基础基线，coding 合并不再因 untracked 冲突永久失败。
+- **配置**：未知顶层/阶段/run_budget 字段直接报错，避免 `approval`/`watch_enforce`/`max_tokens` 拼写错误静默失效；`config_keys` 必须可 JSON 序列化。
+- **锁**：过期锁回收先抢占 `.reclaim` sidecar 再核对接管，避免两个恢复者互删新锁；内容损坏的锁给 5 秒宽限期后回收。
+- **CLI 启动**：Windows 挂起进程恢复优先使用 `NtResumeProcess`（失败回退到线程枚举），启动开销不再计入 CLI 执行超时；挂起创建窗口与清理路径异常也会终止本次进程。
+- **工作台**：单个登记配置损坏/删除只把该条目标记为不可用，不再连坐 `/api/projects` 或阻止启动；后台投影线程对畸形状态/瞬时异常不退出；新建任务携带 `expected_config_hash`，会话中改配置后创建会被 409 拒绝并提示刷新。
+- **交付验收**：`verify_delivery` 源码指纹覆盖 `demo/`；`verification.json` 的失败/错误正文按已知凭据与可识别令牌脱敏（主回归日志保持原始内容，见 DELIVERY）。`demo/run_api_demo.py` 退出码与 CLI 对齐：完成 0、等待审批 11、失败/未完成 1。
 
 ## 全历史搜索与 dsh 测试角色
 
@@ -15,6 +35,10 @@
 `GET /api/runs` 新增 `q`（最多 200 字符）、`project_id`、`status`；关键词按 Unicode casefold 作字面子串匹配。`running` 包含 pending/running/recovering，`failed` 包含 failed/timeout/cancelled。游标绑定筛选条件，显式更换条件须重新从首页查询；只传游标可继承原范围，原 `before`、无筛选游标与响应结构保持兼容。
 
 历史列表仅从 `state.json` / `job.json` 读取标题与状态，不执行事件投影、不写投影游标，也不扫描尝试目录或加载报告正文。最多缓存 2048 条摘要，每次请求检查两份源文件签名，变化后重新读取并校验一致性；淘汰不影响查询结果。摘要缓存与房间投影缓存独立，打开任务房间和后台同步仍正常投影消息、事件及产物。首次查询不再为每条历史运行生成数据库写入；关键词、状态分组和稳定分页规则保持原有语义。
+
+后台同步采用独立轮巡游标，每轮最多检查 50 个目录和 50 条已登记运行，项目间轮换发现目录；已登记运行按唯一 ID 翻页，覆盖全部历史，不再限于最近 100 条。启动时和显式 `Service.sync()` 仍做完整同步；工作台定时调用 `sync(incremental=True)`。未变化的记录通过文件签名跳过重复登记、job 读取和投影，仍检查排队控制指令与会诊恢复。导入/投影轻量签名各最多 4096 条，完整状态缓存最多 512 条；淘汰后可重建。扫描在下一轮持续推进，目录变化、旧任务更新或游标之前的新记录最迟在后续完整轮巡中发现，不保证所有历史每 0.75 秒立即同步；打开房间仍读取当前状态。增量轮次中单条记录或单个项目配置的任意失败只计入 `errors` 并继续后续记录/项目，显式完整同步保留报错语义；投影线程对畸形状态文件或数据库瞬时错误不退出，最近错误保存在 `Service.last_sync_error`。关闭服务会释放目录扫描句柄。
+
+工作台项目列表逐项目容错：单个登记配置被删除或改坏时，`/api/projects` 仍返回 200，该条目带 `unavailable` 说明且前端不可选；健康项目继续返回 `execution_scope` 与 `config_hash`。创建任务必须携带页面确认过的 `expected_config_hash`，与会话中变化后的配置不一致时返回 409 并要求刷新。
 
 dsh **0.2.2-rc.3** 已补齐原生 headless JSON 事件解析、唯一完成事件、逐步去重计量、权限与代理参数。`totalTokens` 已包含缓存，不重复相加。凭据通过 `extra_env=["DEEPSEEK_API_KEY"]` 显式传给子进程；默认不透传。示例见 `dsh-test.example.toml`。模型测试报告仍需独立真实命令核对，不能因模型执行完成就将测试判通过。
 
@@ -29,6 +53,10 @@ dsh **0.2.2-rc.3** 已补齐原生 headless JSON 事件解析、唯一完成事�
 CLI 现在将 stdout/stderr 实时写入每次尝试的 `live-stdout.log`、`live-stderr.log`，并生成原子 `cli-progress.json`。工作台展示反重力当前工具、相对文件、最后输出时间、已完成响应的计量下界及缓存读取。活动摘要通过 SSE 重放；它不能替代真实测试、审查结论或归档证据。已知子进程环境凭据会跨输出块脱敏；这不保证识别任意未知秘密。
 
 CLI 返回给适配器的 stdout/stderr 分别保留最后 `4*1024*1024` 个解码字符，使用有界分块缓存，避免每次读取都复制整个尾部。中文与 emoji 的截断仍按字符计算，UTF-8 跨块解码、超时返回及流式计量保持原有语义。实时日志的字节上限、脱敏与停止护栏独立生效；完整流中已经观察到的计量不会随返回尾部截断而丢失。
+
+Windows 的 CLI 与受管 worker 先以 `CREATE_SUSPENDED` 创建，再归入 Job，最后恢复初始线程，避免 `.cmd` 在归属建立前已启动后代、超时后留下占用管道的子进程。恢复优先使用 `OpenProcess(PROCESS_SUSPEND_RESUME)` + `ntdll.NtResumeProcess`，失败回退到 Toolhelp 线程枚举；CLI 超时预算只覆盖执行本身，不含 Job 绑定与恢复开销。从挂起创建到归入 Job 之间的任何异常都会终止本次进程；恢复失败会关闭 Job 并结束本次挂起进程，不改变文件/网络权限和调用预算。`execution.json` 另外保留原退出码与解析状态，便于区分执行超时、预算停止、非零退出及清理异常。
+
+离线验收提供失败前诊断留存：CLI 可靠性夹具或 `scripts/verify_delivery.py` 可在临时目录清理前保存脱敏状态、事件、退出码与日志尾部，采集失败不将原测试改成通过。默认不复制配置、提示词和源码树；分类使用明确错误类别/停止原因，证据不足标 unknown，多个原因可同时保留。已知环境凭据名（含 token/passphrase/`_key`/access key 等常见命名，值长度下限 4 字节）、测试显式注册的凭据、可识别令牌前缀与带凭据 URL 会被替换；源根绝对路径在构造脱敏器时注册，避免日志尾部残留路径片段。单个目录不可读或深层 JSON 只登记 issue，不中止整包采集。开关、目录和适用边界见 [DELIVERY.md](DELIVERY.md)。
 
 - **中断计量**：按响应标识去重；超时、取消和 worker 重启保留已报告下界，并继续保留未知部分预扣。同一次 pending 只结算一次；Codex 重复完成事件不会重复计费。这里的 tokens 是 CLI 报告和预算口径，不能直接视为账单。
 - **恢复候选**：清理失败的编码 worktree 前，将允许文件内的有限变更封存，绑定任务、配置、基线 commit、CLI 配置、提示词、失效轮次和白名单。校验内容与干净目标后才应用到新 worktree，并重新执行测试。封存失败则保留原 worktree、停止自动重试。已结算用量但尚未封存时崩溃，也能通过持久化工作区记录找回现场。
@@ -165,7 +193,7 @@ python -m orchestrator.cli unattended unattended.example.toml --run-id auto-demo
 - 元数据即使是语法合法的 JSON，也必须有正确的对象结构；非法 manifest/success/decision/approval 不得让恢复路径泄漏 AttributeError。
 - API 保留 `# file:` 完整文件协议，增加 `# patch:` + JSON `edits` 精确替换：目标必须是工作区内不超过 2 MiB 的现有文件，最多 32 项替换，原文必须唯一匹配。支持有围栏代码块和无散文的显式补丁流。产物协议失败仍保留已返回的 API 用量。
 - test 与模型阶段均检查预算和审批；时长预算累计到阶段与 run。测试优先运行在上游 commit 的独立 worktree，无上游代码时才使用任务目录并计算文件指纹。worktree 创建失败不回退到用户工作区。
-- 父目录快照默认关闭。只有显式 watch_root 才扫描；默认仅告警，watch_enforce=true 才据此失败。API 读写均校验实际路径边界。
+- 父目录快照默认关闭。只有显式 watch_root 才扫描；默认仅告警，watch_enforce=true 才据此失败。enforce 模式不会删除无归属文件：本次新写出的根外文件移入 `<run>/violations/<stage>/` 隔离留证；新增/改写/删除根外文件都会按 inputs_hash 持久记录，续跑保持失败且不再调用模型，修正后需 `rerun-from` 显式覆盖。watch_root 落在可写根内部时会记 `watch_disabled` 事件并禁用该监视域。API 读写均校验实际路径边界。
 - Git 文件清单使用 NUL 分隔，支持中文；提交只包含声明文件，保留无关暂存内容。CLI 恢复执行前会补齐版本探测；真实 CLI stdin/格式仍需真机验证。
 - 测试输出流式保留有界尾部，完整测试记录注入审查；上下文目录遍历提前剪掉依赖和缓存，每次 attempt 复用同一份已参与指纹的提示词。
 
@@ -195,7 +223,9 @@ python -m orchestrator.cli approve-tune --state-dir .orchestrator --output pipel
 - **续跑可靠**：完成判据 = `(inputs_hash, outputs_hash)` 双元组；attempt 目录隔离 + 原子切 current；崩溃中断可恢复；已成功 attempt 指纹匹配则**采纳不重跑**；未决审批续跑时**不重跑、不覆盖**。
 - **产物即 commit**：代码阶段在独立 git worktree 执行（基于上游 commit 拉分支），**按变更清单提交**（非 `git add -A` 全仓），合并回主线；报告类产物落盘 + 哈希。可 diff、可复现。
 - **完成判据按类型收紧**：code 阶段必须有文件变更/commit，report 阶段必须有报告文件；只打印文字不算完成。
-- **安全约束**：可写根白名单（执行前校验 workdir + 执行后扫描根外改动）、子进程 env 白名单（API Key 不透传给 CLI）、`--yolo` 须显式开启、审批校验产物哈希、锁占用中止整轮。
+- **安全约束**：可写根白名单（执行前校验 workdir + 执行后扫描根外改动）、子进程 env 白名单（API Key 不透传给 CLI）、`--yolo` 须显式开启、审批校验产物哈希、锁占用中止整轮、`.git` 及其 Windows 等价变体在读写两侧统一拒绝。
+- **审查完整性**：累积 diff 被截断时按 commit 注入变更文件全文；仍无法完整注入时 pass 转为待人工确认（无人值守判失败）；审查现有代码库的指纹覆盖工作区内容哈希。
+- **配置严格性**：顶层/阶段/run_budget 未知字段直接报错，`config_keys` 必须可 JSON 序列化。
 - **版本绑定解析**：CLI 解析按工具名前缀白名单匹配，不识别的版本 => `parse_unknown` 禁止判完成。
 - **预算上限**：阶段级与 run 级 token **和时长**预算，超限即 rejected；429/5xx 归为限流并指数退避。
 
@@ -222,6 +252,8 @@ python demo/run_api_demo.py "做一个命令行待办事项工具"
 $env:ARK_API_KEY = "你的方舟Key"
 python demo/run_api_demo.py "做一个命令行待办事项工具" ark
 ```
+
+演示脚本退出码与 CLI 对齐：全部阶段完成 0，存在等待审批 11，失败/超时/中断等未完成 1；脚本化调用可按退出码判断，而不是把"未完成"当成功。
 
 ### 3. 完整流水线（配置文件驱动）
 
@@ -309,7 +341,7 @@ orchestrator/
   adapters/      # base/fake/openai_compat/cli_*/factory/registry
 prompts/         # 阶段提示词模板（review 要求写 verdict.json）
 demo/            # 纯 API 端到端演示
-tests/           # 388 个离线测试 + fixtures（含真实/合成样本说明）
+tests/           # 479 个离线测试 + fixtures（含真实/合成样本说明）
 config.example.toml
 pipeline.example.toml   # 推荐流水线：含真测试命令 + 结论文件审查
 ```
@@ -320,12 +352,12 @@ pipeline.example.toml   # 推荐流水线：含真测试命令 + 结论文件审
 python -m unittest discover -s tests -v
 ```
 
-覆盖：配置校验、双哈希/stale、attempts 隔离/中断扫描、租约锁、五阶段离线跑通、三种 kill 点续跑一致、空跑拒绝、重试、审批哈希校验、API mock（正常/401/超时/解析失败）、CLI 版本绑定解析、中文+ANSI+超长输出、env 白名单、可写根越界、worktree 传递与含空格中文路径、CLI 入口冒烟、预算超限，以及四个阻断项回归（锁占用中止、审批续跑不覆盖、纯文字拒判完成、已成功 attempt 采纳不重跑）。
+覆盖：配置校验（含未知字段拒绝/JSON 化 config_keys）、双哈希/stale、attempts 隔离/中断扫描、租约锁（死进程/损坏锁/回收竞态）、五阶段离线跑通、三种 kill 点续跑一致、空跑与零净变更拒绝、重试、审批哈希校验（含 code/test 阶段写自身输入）、API mock（正常/401/超时/解析失败）、CLI 版本绑定解析、中文+ANSI+超长输出、env 白名单、可写根越界与 watch 隔离/持久失败、worktree 传递与含空格中文路径、CLI 入口冒烟、预算超限、审查覆盖不完整转人工确认、测试产物不触发重跑、既有非 git 工作区基线、挂起启动性能与清理，以及四个阻断项回归（锁占用中止、审批续跑不覆盖、纯文字拒判完成、已成功 attempt 采纳不重跑）。
 
 **需真实环境联调**（离线测试不覆盖，不假装已验证）：
 - 真实 Key 冒烟（百炼/方舟）。
 - 各 CLI 安装与登录（豆包扫码/agy 登录）。
-- **CLI fixture 目前是手写合成样本**（见 `tests/fixtures/README.md`），真实工具输出格式须真机抓包替换后核对；qwen 真实版本为 0.26.x，合成样本标 0.5 仅为占位。
+- **CLI fixture 的真实性按文件区分**（见 `tests/fixtures/README.md` 与 `cli-capture-provenance.json`）：`codex_0.167.jsonl`、`qwen_0.5.json` 是手写合成样本，只用于旧解析回归；Codex 0.169.0、反重力 1.5.9、dsh 0.2.2-rc.3 的样本为真实抓包（dsh 原始副本未保留独立字节，已在 provenance 注明）。qwen 真实版本为 0.26.x，合成样本标 0.5 仅为占位；qwen/豆包/Qoder 仍需真机抓包核对。
 
 ## 设计依据
 
@@ -357,6 +389,7 @@ L2 审查反馈环（`审查报告-L2反馈环.md` 实测三条通过）后，�
 第五轮（DeepSeek 真实模型全链实测）修复：
 - **API 适配器 review 类型**：此前只判 `kind=="report"`，`review` 掉进代码分支被误当代码提取 → 判空跑。已改为 `kind in ("report","review")`。
 - **M0 审查上下文**：审查阶段此前只拿 `commit~1..commit` 末次提交 diff，返工轮里看不到完整实现，误判"实现代码缺失"。改为**相对项目基线的累积全量 diff + 变更文件清单**（`cumulative_diff`）；其他阶段仍用末次摘要。
+- **第九轮补充**：累积 diff 超过 600 行时按 commit 注入变更文件全文（有单文件/总量/文件数上限）；仍无法完整注入时，pass 结论不自动采纳——人工模式转待审批，无人值守判失败。审查现有代码库模式把工作区内容哈希纳入 inputs_hash，源码变化后旧 verdict 不再被采纳。
 
 **真实模型验证结论**（DeepSeek `deepseek-chat`，全链五阶段）：
 - L1 上下文接力生效：设计报告引用需求阶段的 FR/NFR/歧义点编号。
@@ -377,6 +410,7 @@ prompt = "prompts/review_existing.md"   # 无 feedback_to：只出报告不自�
 ```
 
 - 无上游 coding 阶段时，审查阶段直接读工作区源码（`existing_code_context`，跳过缓存/状态/依赖目录，单文件与总量都有上限）。
+- 审查输入指纹包含工作区内容哈希（含 autonomy 逻辑哈希）：源码变化后 `resume` 会重新审查，不再沿用旧 verdict。注意：单文件 12KB、总量 120KB 的注入上限意味着超大代码库的人工"审查全部源码"仍只是部分覆盖；工作区哈希只保证变化会触发重审，不改变该覆盖上限。
 - **纯 review 流程不会给被审项目建 git 仓库**，不改动被审代码。
 - 实跑：`python -m orchestrator.cli run selfreview.toml --task "审查要点..." --run-id self-1`
 
@@ -432,8 +466,16 @@ max_rounds = 2
 ### 3. 隔离：产物正确性 vs 不受信写入
 - **产物正确性**：git worktree + 按清单提交 + 关闭 hook。为了可 diff、可续跑。
 - **不受信写入**：只约束 API 适配器——只能按解析出的相对路径写，拒绝 `..`/绝对路径/盘符/ADS/`.git`。
-- **目录快照降级为告警**：默认 `watch_enforce = false`，根外变更只记 `watch_warning` 事件，不判阶段失败（父目录一次无关保存不该让阶段挂）。设 `true` 才当失败。
+- **目录快照降级为告警**：默认 `watch_enforce = false`，根外变更只记 `watch_warning` 事件，不判阶段失败（父目录一次无关保存不该让阶段挂）。设 `true` 才当失败：新写出的根外文件移入 `<run>/violations/<stage>/` 隔离留证，新增/改写/删除记录按 inputs_hash 持久化，续跑保持失败且不再调用模型，需 `rerun-from` 显式覆盖；`watch_root` 在可写根内部会告警并禁用。
 - CLI 适配器本身能跑命令，目录快照挡不住，**不假装挡住**。需要硬隔离请用容器或系统级作业对象。
+
+### 既有工作区与配置严格性
+
+- `task_workdir` 已有源码但没有 git 仓库时，首次初始化会把非隐藏/非缓存文件按清单提交为基线（不是空基线），coding worktree 合并不会再因 untracked 文件永久失败；纯 review 流程仍不建仓库。
+- 配置顶层、`[[stages]]`、`[run_budget]` 出现未知字段会直接报错（防止 `approval`/`watch_enforce`/`max_tokens` 拼写错误静默失效）；`config_keys` 值必须可 JSON 序列化。
+- code 阶段成功后若相对基线没有任何实际内容变化（净零变更），判为本轮失败而不是空跑成功；无人值守与人工模式一致。
+- 过期锁回收使用 `.reclaim` sidecar 原子接管；损坏锁 5 秒宽限期后回收；活进程锁仍阻塞。
+- 审查返工产生的反馈在 review 通过后保留用于指纹稳定（`control.consumed_feedback`），`rerun-from` 会清除并恢复普通提示词。
 
 ### 4. 反馈环收窄
 - 返工轮的编码提示词**只含问题条目 + 被点名文件的内容**，不再重贴需求全文和累积 diff。
