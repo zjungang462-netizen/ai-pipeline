@@ -18,8 +18,27 @@ ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
 from orchestrator.config import parse_config
+from orchestrator.contracts import StageStatus
 from orchestrator.engine import Engine
 from orchestrator.adapters.factory import build_all
+
+# 与 CLI _print_results 对齐：完成 0、待审批 11、失败/中断/未完成一律非零（1）。
+EXIT_OK = 0
+EXIT_FAILED = 1
+EXIT_AWAITING_APPROVAL = 11
+
+
+def result_exit_code(results):
+    """演示入口退出码：不得把失败或等待审批当成功。"""
+    states = list(results.values())
+    if not states:
+        return EXIT_FAILED
+    if any(state not in (StageStatus.DONE.value, StageStatus.AWAITING_APPROVAL.value)
+           for state in states):
+        return EXIT_FAILED
+    if any(state == StageStatus.AWAITING_APPROVAL.value for state in states):
+        return EXIT_AWAITING_APPROVAL
+    return EXIT_OK
 
 
 def build_demo_config(base_dir: Path, provider: str = "dashscope"):
@@ -84,9 +103,14 @@ def main():
     for name, status in results.items():
         print(f"  {name}: {status}")
     print(f"\n状态与产物目录: {cfg.state_dir / 'runs' / run_id}")
-    if any(s == "awaiting_approval" for s in results.values()):
-        print("有阶段等待审批，可用 cli.py approve 继续（第 4 阶段提供）。")
-    return 0
+    exit_code = result_exit_code(results)
+    if exit_code == EXIT_OK:
+        print("演示完成：所有阶段均为 done。")
+    elif exit_code == EXIT_AWAITING_APPROVAL:
+        print("演示未完成：有阶段等待审批，可用 cli.py approve 继续（第 4 阶段提供）。")
+    else:
+        print("演示未完成：存在失败/中断/未完成阶段，请查看状态目录中的诊断信息。")
+    return exit_code
 
 
 if __name__ == "__main__":

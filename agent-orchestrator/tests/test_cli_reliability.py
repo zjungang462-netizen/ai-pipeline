@@ -20,9 +20,10 @@ from orchestrator.engine import Engine,BudgetExceeded
 from orchestrator import artifacts,recovery
 from orchestrator.cli_accounting import recover_pending_usage
 from orchestrator.state import sha256_file
+from scripts.failure_evidence import EvidenceTestCase
 
 
-class CLIReliability(unittest.TestCase):
+class CLIReliability(EvidenceTestCase):
     def setUp(self):
         self.tmp=tempfile.TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)
@@ -35,6 +36,8 @@ class CLIReliability(unittest.TestCase):
                           attempt_dir=self.root/'attempt',timeout_s=3,call_id='coding/1')
 
     def fixture_config(self,mode='normal',attempts=2,budget=6000):
+        self.evidence_metadata={'fixture_mode':mode,'run_budget_tokens':budget,
+            'run_budget_duration_s':90,'cli_timeout_s':4,'test_timeout_s':10,'attempt_limit':attempts}
         fixture=Path(__file__).parent/'fixtures/cli_fault_fixture.py'
         if os.name=='nt':
             executable=self.root/'fake-agy.cmd'
@@ -115,6 +118,7 @@ class CLIReliability(unittest.TestCase):
         # 覆盖进程启动和首条完整响应的等待，不能把活动必须可见偷换成 2.5 秒启动 SLA。
         ctx.timeout_s=20
         env['CLI_FIXTURE_API_KEY']='sk-live-test-private-key-1234567890'
+        self.register_evidence_secrets(env['CLI_FIXTURE_API_KEY'])
         result=[]
         def run():
             with mock.patch.dict(os.environ,env):result.append(adapter.run('do fixture',self.workspace,ctx))
@@ -204,6 +208,25 @@ class CLIReliability(unittest.TestCase):
         with mock.patch.dict(os.environ,env):self.assertEqual(resumed.run()['coding'],'failed')
         self.assertEqual((data/'calls.txt').read_text(encoding='utf8'),'2')
         self.assertIn('重试次数',resumed.state.stage('coding').error)
+
+    def test_crash_trace_records_exit_code_and_unknown_usage_without_endless_retry(self):
+        # P3-4：真实 Engine + crash 夹具，锁定 execution.json 的失败证据字段与重试上限。
+        cfg,data,env=self.fixture_config('crash',attempts=2)
+        engine=Engine(cfg,build_all(cfg.adapters,{}),'crash','same task')
+        with mock.patch.dict(os.environ,env):self.assertEqual(engine.run()['coding'],'failed')
+        self.assertEqual((data/'calls.txt').read_text(encoding='utf8'),'2')
+        for number in ('1','2'):
+            trace=json.loads((engine.state.attempts_dir('coding')/number/'execution.json').read_text(encoding='utf8'))
+            self.assertFalse(trace['ok'])
+            self.assertEqual(trace['exit_code'],7)
+            self.assertIs(trace['parse_unknown'],False)
+            self.assertEqual(trace['error_kind'],'crash')
+            self.assertIs(trace['usage']['usage_unknown'],True)
+            self.assertEqual(trace['usage']['known_tokens'],30)
+        # 失败 attempt 的 CLI 重试计数持久化：续跑不得重新调用模型、不得无限重试。
+        resumed=Engine(cfg,build_all(cfg.adapters,{}),'crash','same task')
+        with mock.patch.dict(os.environ,env):self.assertEqual(resumed.run()['coding'],'failed')
+        self.assertEqual((data/'calls.txt').read_text(encoding='utf8'),'2')
 
     def test_timeout_attempt_exhaustion_survives_restart_with_usage_and_deadline(self):
         cfg,data,env=self.fixture_config('timeout_always')

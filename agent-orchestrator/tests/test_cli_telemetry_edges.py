@@ -11,9 +11,10 @@ from orchestrator.adapters.cli_codex import CodexAdapter
 from orchestrator.cli_telemetry import CLITrace, MAX_LINE
 from orchestrator.config import ConfigError, parse_config
 from orchestrator.contracts import RunContext
+from scripts.failure_evidence import EvidenceTestCase
 
 
-class CLITelemetryEdges(unittest.TestCase):
+class CLITelemetryEdges(EvidenceTestCase):
     def setUp(self):
         directory = tempfile.TemporaryDirectory()
         self.addCleanup(directory.cleanup)
@@ -58,6 +59,32 @@ class CLITelemetryEdges(unittest.TestCase):
         self.addCleanup(trace.finish, 'exited')
         trace.feed('stdout', 'x' * MAX_LINE + '\n')
         self.assertFalse(trace.snapshot()['truncated'])
+        self.assertEqual(trace.tick(), '')
+
+    def read_event(self, trace, index, path, **parameters):
+        trace.feed('stdout', json.dumps({'event': 'step_update', 'step_update': {
+            'conversation_id': 'c', 'step_index': index, 'step_type': 'tool',
+            'tool_name': 'read_file', 'state': 'ACTIVE',
+            'tool_info': {'parameters': {'Path': path, **parameters}}}}) + '\n')
+
+    def test_same_file_with_different_offsets_accumulates_repeated_reads(self):
+        # P3-3：offset/limit 不参与读类签名，同一文件分段读取也须累计。
+        context = self.context()
+        context.max_repeated_reads = 2
+        trace = CLITrace(context)
+        self.addCleanup(trace.finish, 'exited')
+        path = str(self.root / 'module.py')
+        for index, (offset, limit) in enumerate(((0, 10), (10, 10), (20, 10))):
+            self.read_event(trace, index, path, offset=offset, limit=limit)
+        self.assertEqual(trace.tick(), 'repeated_read_limit')
+
+    def test_different_files_do_not_accumulate_repeated_reads(self):
+        context = self.context()
+        context.max_repeated_reads = 2
+        trace = CLITrace(context)
+        self.addCleanup(trace.finish, 'exited')
+        for index in range(4):
+            self.read_event(trace, index, str(self.root / f'file{index}.py'))
         self.assertEqual(trace.tick(), '')
 
     def test_failed_call_keeps_usage_observed_before_stdout_tail(self):

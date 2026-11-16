@@ -35,6 +35,7 @@ Thumbs.db
 /agent-orchestrator/.orchestrator/
 /agent-orchestrator/.workbench/
 /agent-orchestrator/.dsh-test-state/
+/agent-orchestrator/.test-failures/
 /agent-orchestrator/.*_state/
 /agent-orchestrator/workspace/
 /agent-orchestrator/*_workspace/

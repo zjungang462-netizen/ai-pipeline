@@ -11,6 +11,7 @@ import os
 import codecs
 import signal
 import subprocess
+import sys
 import threading
 import time
 from pathlib import Path
@@ -40,47 +41,65 @@ def _merge_observed_usage(usage, observed):
 def run_cli_process(command, *, cwd, env, input, capture_output=True, text=True,
                     encoding='utf-8', errors='replace', timeout=None, trace=None):
     """超时时停止本次 CLI 的进程树，避免后台工具继续改写已经回收的 worktree。"""
-    from ..process_tree import attach, close, terminate
+    from ..process_tree import attach, close, terminate, creation_flags
     process = subprocess.Popen(command, cwd=cwd, env=env, stdin=subprocess.PIPE,
                                stdout=subprocess.PIPE, stderr=subprocess.PIPE, start_new_session=os.name != 'nt',
-                               creationflags=subprocess.CREATE_NEW_PROCESS_GROUP if os.name == 'nt' else 0)
-    output_limit=4*1024*1024
-    buffers={name:TextTail(output_limit) for name in ('stdout','stderr')}
-    failures=[]
-    def drain(pipe,name):
-        decoder=codecs.getincrementaldecoder(encoding)(errors=errors)
+                               creationflags=creation_flags())
+
+    def discard_suspended():
+        """P3-6：Popen 之后、attach 之前出现异常时，不能留下挂起的孤儿进程。"""
         try:
-            while chunk:=pipe.read1(4096):
-                value=decoder.decode(chunk)
-                buffers[name].append(value)
-                if trace:trace.feed(name,value)
-            value=decoder.decode(b'',final=True)
-            if value:
-                buffers[name].append(value)
-                if trace:trace.feed(name,value)
-        except Exception as error:
-            failures.append(error)
-        finally:pipe.close()
-    def send():
+            process.kill()
+        except BaseException:
+            pass
         try:
-            value=input if isinstance(input,bytes) else (input or '').encode(encoding)
-            process.stdin.write(value)
-            process.stdin.flush()
-        except (BrokenPipeError,OSError):pass
-        finally:process.stdin.close()
-    readers=[threading.Thread(target=drain,args=(process.stdout,'stdout'),daemon=True),
-             threading.Thread(target=drain,args=(process.stderr,'stderr'),daemon=True)]
-    writer=threading.Thread(target=send,daemon=True)
+            process.wait(timeout=10)
+        except BaseException:
+            pass
+        try:
+            close(process)
+        except BaseException:
+            pass
+
+    try:
+        process.__dict__['_pipeline_start_suspended']=os.name=='nt'
+        output_limit=4*1024*1024
+        buffers={name:TextTail(output_limit) for name in ('stdout','stderr')}
+        failures=[]
+        def drain(pipe,name):
+            decoder=codecs.getincrementaldecoder(encoding)(errors=errors)
+            try:
+                while chunk:=pipe.read1(4096):
+                    value=decoder.decode(chunk)
+                    buffers[name].append(value)
+                    if trace:trace.feed(name,value)
+                value=decoder.decode(b'',final=True)
+                if value:
+                    buffers[name].append(value)
+                    if trace:trace.feed(name,value)
+            except Exception as error:
+                failures.append(error)
+            finally:pipe.close()
+        def send():
+            try:
+                value=input if isinstance(input,bytes) else (input or '').encode(encoding)
+                process.stdin.write(value)
+                process.stdin.flush()
+            except (BrokenPipeError,OSError):pass
+            finally:process.stdin.close()
+        readers=[threading.Thread(target=drain,args=(process.stdout,'stdout'),daemon=True),
+                 threading.Thread(target=drain,args=(process.stderr,'stderr'),daemon=True)]
+        writer=threading.Thread(target=send,daemon=True)
+        attach(process)
+    except BaseException:
+        # 从 Popen 到 attach 的任何异常都不能留下仍挂起的创建窗口孤儿。
+        discard_suspended()
+        raise
+    # P2-4：超时预算只覆盖 CLI 执行本身，不含 Job 绑定与挂起恢复的启动开销。
     start=time.monotonic()
     stopped=''
     status='exited'
     try:
-        try:
-            attach(process)
-        except OSError:
-            process.kill()
-            process.communicate()
-            raise
         for thread in readers:thread.start()
         writer.start()
         while True:
@@ -112,17 +131,48 @@ def run_cli_process(command, *, cwd, env, input, capture_output=True, text=True,
         return subprocess.CompletedProcess(command,process.returncode,
             stdout if text else stdout.encode(encoding),stderr if text else stderr.encode(encoding))
     finally:
-        if process.poll() is None:
-            if not terminate(process):
+        # P3-7：终止/等待失败也必须执行 close(process) 与 trace.finish；
+        # 清理异常作为附注保留在主异常上，不能吞掉真正的失败原因。
+        primary=sys.exc_info()[1]
+        cleanup_errors=[]
+        def stop_and_wait():
+            if process.poll() is not None:
+                return
+            try:
+                grouped=terminate(process)
+            except BaseException as error:
+                cleanup_errors.append(error)
+                grouped=False
+            if not grouped:
                 if os.name!='nt':
                     try:os.killpg(process.pid,signal.SIGKILL)
                     except ProcessLookupError:pass
                 else:process.kill()
             process.wait(timeout=10)
-        close(process)
-        for thread in [*readers,writer]:
-            if thread.ident is not None:thread.join(2)
-        if trace:trace.finish(status,stopped)
+        try:
+            stop_and_wait()
+        except BaseException as error:
+            cleanup_errors.append(error)
+        finally:
+            try:
+                close(process)
+            except BaseException as error:
+                cleanup_errors.append(error)
+            finally:
+                for thread in [*readers,writer]:
+                    if thread.ident is not None:
+                        try:thread.join(2)
+                        except BaseException as error:cleanup_errors.append(error)
+                if trace:
+                    try:trace.finish(status,stopped)
+                    except BaseException as error:cleanup_errors.append(error)
+        if cleanup_errors:
+            if primary is None:
+                raise cleanup_errors[0]
+            for error in cleanup_errors:
+                add_note=getattr(primary,'add_note',None)
+                if add_note:
+                    add_note(f'清理阶段异常：{type(error).__name__}: {error}')
 
 
 class CLIAdapter(Adapter):

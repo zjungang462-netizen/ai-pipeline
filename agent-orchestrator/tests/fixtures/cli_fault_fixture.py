@@ -40,6 +40,10 @@ elif mode=='normal':
 elif mode=='auth':
     print('auth failed',file=sys.stderr,flush=True)
     raise SystemExit(1)
+elif mode=='crash':
+    usage(1)
+    print('injected process failure',file=sys.stderr,flush=True)
+    raise SystemExit(7)
 elif mode=='tool_loop':
     usage(1)
     for i in range(10):

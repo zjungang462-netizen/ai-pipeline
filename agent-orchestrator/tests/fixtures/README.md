@@ -10,6 +10,7 @@
 | `agy_1.5.9_real.jsonl` | 2026-11-15 本机反重力 CLI 1.5.9 实际执行 | 真实 stream-json，脱敏会话标识与 cwd |
 | `codex_0.169_policy_stderr.txt` | 2026-11-16 本机 Codex CLI 0.169.0 只读探针 | 真实策略拒绝日志，命令与本机路径已脱敏；命令未实际执行 |
 | `codex_0.169_tools_real.jsonl` | 2026-11-16 本机 Codex CLI 0.169.0，保留 Windows 沙箱后端 | 真实两次只读调用，保留命令生命周期、退出码与输出，脱敏会话/shell/工作区路径 |
+| `dsh_0.2.2-rc.3_real.jsonl` | 2026-11-16 本机 dsh 0.2.2-rc.3 headless JSON 探针（`DSH_PROBE_OK_20261116`） | 真实 headless 事件流，脱敏 sessionId/cwd；原始抓包未保留独立副本 |
 
 新增真实样本的来源指纹和脱敏字段见 `cli-capture-provenance.json`。原始证据保留在上级 `live-validation-2026-11-15/cli-mixed/probes/`，离线回归不调用模型。完整混合链路已实际完成 Codex 设计→反重力编辑→六项真实测试→Codex 审查；具体模型及用量口径见该目录实施报告。
 

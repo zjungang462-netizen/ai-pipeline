@@ -18,14 +18,34 @@ from pathlib import Path
 
 ROOT=Path(__file__).resolve().parents[1]
 sys.path.insert(0,str(ROOT))
+from scripts.failure_evidence import (EvidenceResultMixin, Scrubber,
+                                      environment_secrets)
 
 
 def digest_files():
-    files=[p for directory in ('orchestrator','tests','prompts','scripts')
+    # demo/ 属于交付声明范围，源码指纹必须覆盖，否则演示入口改动无法被前后比对发现。
+    files=[p for directory in ('orchestrator','tests','prompts','scripts','demo')
            for p in (ROOT/directory).rglob('*') if p.is_file() and '__pycache__' not in p.parts]
     files+=list(ROOT.glob('*.example.toml'))
     files+=[p for p in (ROOT/'README.md',ROOT/'RELEASE_NOTES.md',ROOT/'DELIVERY.md',ROOT/'.gitattributes') if p.exists()]
     return {p.relative_to(ROOT).as_posix():hashlib.sha256(p.read_bytes()).hexdigest() for p in sorted(files)}
+
+
+def redact_verification(proof, secrets=()):
+    """verification.json 中失败/错误正文按已知环境凭据与可识别令牌/URL 规则脱敏。
+
+    只替换最终报告里的 traceback/reason 文本，不触碰测试结果、跳过标记或退出码；
+    主回归日志由 unittest stream 直接写入，保持原始内容（脱敏落差由 DELIVERY 说明）。
+    """
+    scrub=Scrubber([*environment_secrets(),*secrets])
+    for key in ('failures','errors'):
+        for item in proof.get(key) or []:
+            if isinstance(item,dict) and isinstance(item.get('traceback'),str):
+                item['traceback']=scrub.text(item['traceback'])
+    for item in proof.get('skipped') or []:
+        if isinstance(item,dict) and isinstance(item.get('reason'),str):
+            item['reason']=scrub.text(item['reason'])
+    return proof
 
 
 def smoke(output):
@@ -110,7 +130,8 @@ def main():
     print(json.dumps({'smoke':'passed','examples':len(info['examples']),'git':info['git_version'],
                       'node':info['node_version']},ensure_ascii=True),flush=True)
     durations=[]
-    class Result(unittest.TextTestResult):
+    class Result(EvidenceResultMixin,unittest.TextTestResult):
+        evidence_output=output/'failure-evidence'
         def startTest(self,test):
             self.started=time.monotonic()
             super().startTest(test)
@@ -123,6 +144,7 @@ def main():
     with (output/'full-regression.log').open('w',encoding='utf8') as log:
         with contextlib.redirect_stdout(log),contextlib.redirect_stderr(log):
             result=unittest.TextTestRunner(stream=log,verbosity=2,resultclass=Result).run(suite)
+    info['failure_evidence']=getattr(result,'_test_evidence_failures',[])
     after=digest_files()
     (output/'source-after.json').write_text(json.dumps(after,ensure_ascii=False,indent=2),encoding='utf8')
     (output/'test-durations.json').write_text(json.dumps(durations,ensure_ascii=False,indent=2),encoding='utf8')
@@ -131,6 +153,9 @@ def main():
            'skipped':[{'test':t.id(),'reason':s} for t,s in result.skipped],
            'source_unchanged':before==after,'duration_s':round(time.monotonic()-started,3),
            'runtime':info,'source_files':len(before),'no_model_calls_requested':True}
+    redact_verification(proof)
+    proof['redaction']={'verification_json':'known_credentials_and_token_patterns',
+                        'full_regression_log':'raw_not_redacted'}
     proof['exit_code']=0 if result.wasSuccessful() and before==after and not result.skipped else 1
     (output/'verification.json').write_text(json.dumps(proof,ensure_ascii=False,indent=2),encoding='utf8')
     print(json.dumps({k:v for k,v in proof.items() if k!='runtime'},ensure_ascii=True),flush=True)

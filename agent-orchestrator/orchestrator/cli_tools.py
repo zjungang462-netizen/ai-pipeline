@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import os
 import shlex
 from dataclasses import dataclass, field
 from pathlib import PurePosixPath, PureWindowsPath
@@ -11,6 +12,7 @@ READ_TOOLS = frozenset(('read', 'read_file', 'view_file', 'sed_file'))
 WRITE_TOOLS = frozenset(('edit', 'write', 'apply_patch', 'edit_file', 'write_file',
                          'write_to_file', 'replace_file_content', 'multi_replace_file_content'))
 PATH_KEYS = ('Path', 'FilePath', 'TargetFile', 'path', 'file_path')
+GET_CONTENT_LINE_OPTIONS = frozenset(('-totalcount', '-first', '-tail'))
 
 
 @dataclass(frozen=True)
@@ -28,7 +30,28 @@ def file_parameter(parameters):
     return next((parameters[k] for k in PATH_KEYS if isinstance(parameters.get(k), str)), '')
 
 
+def _normalized_read_path(path):
+    """读类活动只按文件路径去重：统一分隔符/冗余段，Windows 再折叠大小写。"""
+    value = path.strip()
+    if not value:
+        return ''
+    if os.name == 'nt':
+        return os.path.normcase(os.path.normpath(value.replace('/', '\\')))
+    return os.path.normpath(value)
+
+
 def read_signature(name, parameters):
+    """读类工具的去重签名 = 工具名 + 规范化文件路径。
+
+    offset/limit/行范围/读取模式等参数不参与签名，因此同一文件被分多次、按不同
+    偏移读取也能累计到同一个计数上；没有可识别路径参数时退回完整参数签名，
+    避免把无法定位的读取错误合并。
+    """
+    parameters = parameters if isinstance(parameters, dict) else {}
+    path = file_parameter(parameters)
+    if path:
+        return json.dumps({'name': name, 'path': _normalized_read_path(path)},
+                          sort_keys=True, ensure_ascii=False)
     return json.dumps({'name': name, 'parameters': parameters}, sort_keys=True, ensure_ascii=False)
 
 
@@ -39,6 +62,48 @@ def _tokens(command):
                 else token for token in shlex.split(command, posix=False)]
     except ValueError:
         return []
+
+
+def _plain_file(word):
+    return (isinstance(word, str) and bool(word) and not word.startswith('-')
+            and not any(c in word for c in '*?[]'))
+
+
+def _read_filename(name, arguments):
+    """仅在"单文件、确定只读"的保守形态下返回被读取文件名，否则返回空。"""
+    if name in ('get-content', 'gc'):
+        words = list(arguments)
+        if words and words[0].lower() in ('-literalpath', '-path'):
+            words = words[1:]
+        # Get-Content [-LiteralPath|-Path] <file> [-TotalCount|-First|-Tail N]；
+        # 行数限定只影响本次输出，被读文件相同，仍可累计重复读取。
+        if len(words) == 1 and _plain_file(words[0]):
+            return words[0]
+        if (len(words) == 3 and _plain_file(words[0])
+                and words[1].lower() in GET_CONTENT_LINE_OPTIONS and words[2].isdigit()):
+            return words[0]
+        return ''
+    if name in ('cat', 'type'):
+        words = list(arguments)
+        if name == 'cat' and words[:1] == ['--']:
+            words = words[1:]
+        return words[0] if len(words) == 1 and _plain_file(words[0]) else ''
+    if name in ('head', 'tail'):
+        # head/tail [-n N] <file>
+        words = list(arguments)
+        if len(words) == 1 and _plain_file(words[0]):
+            return words[0]
+        if (len(words) == 3 and words[0] == '-n' and words[1].isdigit()
+                and _plain_file(words[2])):
+            return words[2]
+        return ''
+    if name == 'sed':
+        # sed -n <脚本> <file>：脚本含空格时由 token 规则合并成单个词；只认 -n 只读形态。
+        words = list(arguments)
+        if len(words) == 3 and words[0] == '-n' and words[1] and _plain_file(words[2]):
+            return words[2]
+        return ''
+    return ''
 
 
 def simple_read(command):
@@ -63,18 +128,8 @@ def simple_read(command):
                                                '(', ')', '{', '}', '@', '#')):
         return '', ''
     name, arguments = words[0].lower(), words[1:]
-    if name in ('get-content', 'gc'):
-        if arguments and arguments[0].lower() in ('-literalpath', '-path'):
-            arguments = arguments[1:]
-    elif name == 'cat':
-        if arguments[:1] == ['--']:
-            arguments = arguments[1:]
-    else:
-        return '', ''
-    if len(arguments) != 1 or not arguments[0] or arguments[0].startswith('-'):
-        return '', ''
-    filename = arguments[0]
-    if any(c in filename for c in ('*', '?', '[', ']')):
+    filename = _read_filename(name, arguments)
+    if not filename:
         return '', ''
     return filename, read_signature(name, {'path': filename})
 
@@ -132,8 +187,9 @@ def codex_activity(event, thread=''):
             parameters = {}
         if state == 'DONE' and item.get('error') is not None:
             state = 'ERROR'
-        return ToolActivity(key, 'mcp:' + server + '/' + tool, state, parameters,
+        qualified = 'mcp:' + server + '/' + tool
+        return ToolActivity(key, qualified, state, parameters,
                             file_parameter(parameters),
-                            read_signature(tool, {'server': server, 'arguments': parameters}) if tool in READ_TOOLS else '',
+                            read_signature(qualified, parameters) if tool in READ_TOOLS else '',
                             tool in WRITE_TOOLS)
     return None

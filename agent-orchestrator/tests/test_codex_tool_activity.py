@@ -175,6 +175,21 @@ class CodexToolActivity(unittest.TestCase):
         self.assertEqual(self.trace.snapshot()['file'], '')
         self.assertEqual(self.trace.tick(), '')
 
+    def test_same_file_with_different_line_ranges_accumulates_repeated_reads(self):
+        # P3-3：同一文件换行范围/行数读取仍计入同一去重签名，达到阈值即停止。
+        path = str(self.root / 'src/check.py')
+        for index in range(3):
+            self.emit(command(f'range-{index}', 'item.completed', 'completed', 0,
+                              'Get-Content -LiteralPath "' + path + f'" -TotalCount {index + 1}'))
+        self.assertEqual(self.trace.tick(), 'repeated_read_limit')
+
+    def test_different_files_do_not_accumulate_repeated_reads(self):
+        for index in range(4):
+            path = str(self.root / f'src/file{index}.py')
+            self.emit(command(f'file-{index}', 'item.completed', 'completed', 0,
+                              'type "' + path + '"'))
+        self.assertEqual(self.trace.tick(), '')
+
     def test_real_policy_log_matches_its_provenance_and_stops(self):
         path = FIXTURES/'codex_0.169_policy_stderr.txt'
         provenance = json.loads((FIXTURES/'cli-capture-provenance.json').read_text(encoding='utf8'))
@@ -225,13 +240,37 @@ class ReadCommandRecognition(unittest.TestCase):
                 self.assertEqual(filename, path)
                 self.assertTrue(signature)
 
+    def test_additional_read_forms_are_recognized_conservatively(self):
+        # P3-3：行数限定/别名命令只影响本次输出，被读文件仍可定位。
+        for body, path in (
+            (r'Get-Content -Path C:\workspace\file.py -TotalCount 5', r'C:\workspace\file.py'),
+            (r'Get-Content C:\workspace\file.py -First 10', r'C:\workspace\file.py'),
+            (r'Get-Content -LiteralPath C:\workspace\file.py -Tail 2', r'C:\workspace\file.py'),
+            (r'gc -Path C:\workspace\file.py', r'C:\workspace\file.py'),
+            (r'type C:\workspace\file.py', r'C:\workspace\file.py'),
+            ('type "src/中文 文件.py"', 'src/中文 文件.py'),
+            ('head -n 20 src/check.py', 'src/check.py'),
+            ('tail -n 20 src/check.py', 'src/check.py'),
+            ('head src/check.py', 'src/check.py'),
+            ('sed -n 1,20p src/check.py', 'src/check.py'),
+            ('sed -n "1,20 p" src/check.py', 'src/check.py'),
+            ('pwsh -NoProfile -Command "Get-Content C:/ws/file.py -TotalCount 1"', 'C:/ws/file.py')):
+            with self.subTest(body=body):
+                filename, signature = simple_read(body)
+                self.assertEqual(filename, path)
+                self.assertTrue(signature)
+
     def test_complex_or_ambiguous_commands_are_not_assumed_read_only(self):
         for body in ('cat file.py; echo changed > file.py', 'cat file.py | python -',
                      'echo Get-Content file.py', 'Get-Content $file', 'cat `whoami`',
                      'cat file.py && touch changed', 'cat *.py', 'cat -',
                      'Get-Content -LiteralPath a.py b.py', "cat 'unterminated",
                      'Get-Content @(Remove-Item("a.py"))', 'Get-Content @paths',
-                     'cat #comment', 'pwsh -EncodedCommand Y2F0', 'bash -c cat file.py', None, []):
+                     'cat #comment', 'pwsh -EncodedCommand Y2F0', 'bash -c cat file.py', None, [],
+                     'sed -i s/a/b/ file.py', 'sed file.py', 'head -n 5 a.py b.py',
+                     'head -n abc a.py', 'Get-Content -TotalCount 5 file.py',
+                     'Get-Content file.py -TotalCount abc', 'type a.py > b.py',
+                     'type a*.py', 'head < a.py', 'tail -f a.py | cat'):
             with self.subTest(body=body):
                 self.assertEqual(simple_read(body), ('', ''))
 

@@ -8,10 +8,11 @@ from pathlib import Path
 from orchestrator.adapters.cli_agy import AgyAdapter
 from orchestrator.cli_telemetry import CLITrace
 from orchestrator.contracts import RunContext,ErrorKind
+from scripts.failure_evidence import EvidenceTestCase
 
 PROMPT='Authentication required. Please visit the URL to log in:'
 
-class CLIAuthStop(unittest.TestCase):
+class CLIAuthStop(EvidenceTestCase):
     def setUp(self):
         temporary=tempfile.TemporaryDirectory();self.addCleanup(temporary.cleanup)
         self.root=Path(temporary.name)

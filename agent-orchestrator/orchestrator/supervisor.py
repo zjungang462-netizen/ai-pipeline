@@ -89,21 +89,29 @@ def supervise(config_path: Path, run_id: str, task: str, max_restarts: int = 2,
                 job.update(status='timeout', reason='supervisor_wall_budget')
                 break
             with (directory / 'worker.log').open('ab') as log:
+                from .process_tree import creation_flags
                 process = subprocess.Popen([sys.executable, '-X', 'utf8', '-m',
                                             'orchestrator.worker', str(jobfile)],
                                            cwd=Path(__file__).resolve().parents[1],
                                            env=environment, stdout=log, stderr=subprocess.STDOUT,
                                            start_new_session=os.name != 'nt',
-                                           creationflags=subprocess.CREATE_NEW_PROCESS_GROUP if os.name == 'nt' else 0)
-                if store:
-                    from .process_tree import attach
-                    try:
-                        attach(process)
-                    except OSError as error:
-                        _terminate(process)
-                        job.update(status='failed', reason='无法建立进程树归属: ' + str(error))
-                        atomic_write_json(jobfile, job)
-                        return job
+                                           creationflags=creation_flags() if store else
+                                           (subprocess.CREATE_NEW_PROCESS_GROUP if os.name == 'nt' else 0))
+                try:
+                    if store:
+                        process.__dict__['_pipeline_start_suspended']=os.name=='nt'
+                        from .process_tree import attach
+                        try:
+                            attach(process)
+                        except OSError as error:
+                            _terminate(process)
+                            job.update(status='failed', reason='无法建立进程树归属: ' + str(error))
+                            atomic_write_json(jobfile, job)
+                            return job
+                except BaseException:
+                    # P3-6：Popen 到 attach 之间出现异常时，不能留下仍挂起的 worker。
+                    _discard_created_process(process)
+                    raise
                 job.update(status='running', worker_pid=process.pid if isinstance(process.pid, int) else None)
                 atomic_write_json(jobfile, job)
                 try:
@@ -180,6 +188,23 @@ def _finish_controlled_job(job,jobfile,state,store):
     if job['status'] in ('done','failed','timeout','cancelled'):
         for command in store.commands(job['run_key']):
             store.finish(command['id'],'rejected',{'reason':'运行已经结束，此操作未生效'})
+
+
+def _discard_created_process(process):
+    """P3-6：Popen 之后、attach 之前出现异常时，确保挂起的 worker 不会成为孤儿。"""
+    try:
+        process.kill()
+    except BaseException:
+        pass
+    try:
+        process.wait(timeout=10)
+    except BaseException:
+        pass
+    try:
+        from .process_tree import close
+        close(process)
+    except BaseException:
+        pass
 
 
 def _terminate(process):

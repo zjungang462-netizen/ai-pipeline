@@ -43,5 +43,17 @@
     ],
     "source_sha256": "06eca835d7d0f9229dcdf567907a3ee2a722888baf5d670de23abb445788d264",
     "fixture_sha256": "fab9fd090ce4d310ba813c159179103b8edd7f644a6ae25165bd4d6e645e0b59"
+  },
+  "dsh_0.2.2-rc.3_real.jsonl": {
+    "source": "真实本机 dsh 0.2.2-rc.3 headless JSON 探针输出（DSH_PROBE_OK_20261116）",
+    "version": "0.2.2-rc.3",
+    "captured_at": "2026-11-16",
+    "redacted_fields": [
+      "sessionId（置为 session-real-probe）",
+      "cwd（置为 C:/fixture）"
+    ],
+    "source_sha256": null,
+    "fixture_sha256": "06eecb7f224bc04ea7f3c2a5adfe7e312dcfce35f50a153cf033d068c48fd057",
+    "note": "原始抓包未保留独立副本；此 fixture 即脱敏后的字节。"
   }
 }
