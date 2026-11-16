@@ -235,7 +235,8 @@ class ReviewPolicy:
                 hashes.append(st.outputs_hash)
         return hashes
 
-    def _inputs_hash(self, spec: StageSpec, index: int, prompt_override: str | None = None) -> str:
+    def _inputs_hash(self, spec: StageSpec, index: int, prompt_override: str | None = None,
+                     workspace_hash_override: str | None = None) -> str:
         # 渲染结果计入 inputs_hash（评审 B1）：上游产物变了 => 指纹变 => 下游 stale。
         config_keys = dict(spec.config_keys)
         adapter = self.config.adapters.get(spec.adapter)
@@ -277,9 +278,12 @@ class ReviewPolicy:
                 # 测试命令会写工作区（junit/coverage/快照等）。这些产物属于
                 # 本次测试的输出而不是被测输入；若计入指纹，续跑时 hash 会
                 # 随产物变化而改变，导致每次 resume 都重跑测试（P2-1）。
-                config_keys["__workspace__"] = artifacts.workspace_hash(
-                    self.config.task_workdir, exclude=self.config.state_dir,
-                    ignore=set(self.state.test_artifacts.get(spec.name, [])))
+                config_keys["__workspace__"] = (workspace_hash_override
+                    if workspace_hash_override is not None else artifacts.workspace_hash(
+                        self.config.task_workdir, exclude=self.config.state_dir,
+                        ignore_hashes=self.state.test_artifact_hashes.get(spec.name, {})))
+                # 旧版仅按路径忽略的结果不能直接沿用。
+                config_keys["__test_input_protocol__"] = 2
         logical = None
         if self.config.autonomy.enabled and spec.kind != 'test':
             policy=asdict(self.config.autonomy)

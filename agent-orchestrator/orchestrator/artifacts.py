@@ -363,10 +363,21 @@ def workspace_file_hashes(workdir: Path, exclude: Path | None = None,
 
 
 def workspace_hash(workdir: Path, exclude: Path | None = None,
-                   ignore: set[str] | None = None) -> str:
+                   ignore: set[str] | None = None,
+                   ignore_hashes: dict[str, str] | None = None) -> str:
     from .state import sha256_text
-    files = sorted(workspace_file_hashes(workdir, exclude=exclude, ignore=ignore).items())
-    return sha256_text(repr(files))
+    files = workspace_file_hashes(workdir, exclude=exclude, ignore=ignore)
+    missing = []
+    for rel, expected in (ignore_hashes or {}).items():
+        if rel not in files:
+            missing.append(rel)
+        elif files[rel] == expected:
+            del files[rel]
+    # 输出丢失也必须使缓存失效；仅删除路径会与“首次执行前尚无输出”同哈希。
+    values = sorted(files.items())
+    if missing:
+        return sha256_text(repr((values, sorted(missing))))
+    return sha256_text(repr(values))
 
 
 def existing_code_context(workdir: Path, max_file_bytes: int = 12000,

@@ -12,24 +12,30 @@ class StageArchiveError(RuntimeError):
 
 
 class ArchiveOperations:
-    def _record_test_artifacts(self, spec: StageSpec, before: dict[str, str]) -> None:
-        """把测试命令新建/改写的文件记入 state.test_artifacts（有上限）。"""
+    def _record_test_artifacts(self, spec: StageSpec, before: dict[str, str],
+                               *, successful: bool) -> list[str]:
+        """仅新文件和已绑定的输出可作为产物；返回被改写/删除的既有输入。"""
         after = artifacts.workspace_file_hashes(
             self.config.task_workdir, exclude=self.config.state_dir)
-        changed = sorted({rel for rel, digest in after.items()
-                          if before.get(rel) != digest})
-        known = set(self.state.test_artifacts.get(spec.name, []))
-        merged = sorted(known | set(changed))
+        known = self.state.test_artifact_hashes.get(spec.name, {})
+        changed_inputs = sorted(rel for rel, digest in before.items()
+                                if rel not in known and after.get(rel) != digest)
+        # 失败测试产生的内容不能改写可信输出绑定，否则旧 pass 可能重新命中。
+        if not successful or changed_inputs:
+            return changed_inputs
+        candidates = sorted(rel for rel in after if rel not in before or rel in known)
         limit = 500
-        if len(merged) > limit:
-            merged = merged[:limit]
+        if len(candidates) > limit:
             self.state.log_event("test_artifacts_truncated", spec.name,
-                                 total=len(known | set(changed)))
-        self.state.test_artifacts[spec.name] = merged
-        if changed:
-            self.state.log_event("test_artifacts", spec.name, files=changed[:20],
-                                 count=len(changed))
+                                 total=len(candidates))
+        recorded = {rel: after[rel] for rel in candidates[:limit]}
+        self.state.test_artifact_hashes[spec.name] = recorded
+        self.state.test_artifacts[spec.name] = list(recorded)
+        if recorded:
+            self.state.log_event("test_artifacts", spec.name, files=list(recorded)[:20],
+                                 count=len(recorded))
         self.state.save()
+        return changed_inputs
 
     def _stage_base_sha(self, index: int, kind: str = "code") -> str | None:
         """代码阶段的基线 = 最近上游代码阶段的 commit（评审 B3：基于上游 commit）。

@@ -302,6 +302,8 @@ class RunState:
         # 测试阶段产出的工作区文件（相对路径）。这些是测试输出而非被测输入：
         # 计入 inputs_hash 会让每次 resume 都因新产物判为 stale（P2-1）。
         self.test_artifacts: dict[str, list[str]] = {}
+        # 仅有路径不足以信任输出：内容变化或丢失时必须重新执行测试。
+        self.test_artifact_hashes: dict[str, dict[str, str]] = {}
 
     # ---- 持久化 ----
     def load(self) -> bool:
@@ -321,6 +323,7 @@ class RunState:
         self.revision = data.get('revision', 0)
         self.control = data.get('control', {})
         self.test_artifacts = data.get('test_artifacts', {})
+        self.test_artifact_hashes = data.get('test_artifact_hashes', {})
         return True
 
     def save(self) -> None:
@@ -339,6 +342,7 @@ class RunState:
             "stage_usage": self.stage_usage,
             "autonomy": self.autonomy,
             "test_artifacts": self.test_artifacts,
+            "test_artifact_hashes": self.test_artifact_hashes,
             'revision': self.revision,
             'control': self.control,
         })

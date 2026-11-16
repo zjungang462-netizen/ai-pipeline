@@ -2,37 +2,29 @@
 from __future__ import annotations
 
 from .safety import WriteRootGuard
+from .state import atomic_write_json
 
 from .contracts import ErrorKind, Result, RunContext, StageSpec, StageStatus
 from pathlib import Path
-import shutil
 import uuid
 
 
 class GuardControls:
-    def _quarantine_new_outside(self, spec: StageSpec, before: dict,
-                                outside: list[str]) -> list[str]:
-        """把本次新写出的根外文件移入运行目录隔离区（可恢复，不直接删除）。
-
-        改写过的既有根外文件留在原地并由持久化越界记录阻止续跑重试。
-        返回实际移动的原始路径列表。
-        """
-        target = self.state.run_dir / "violations" / spec.name
-        moved: list[str] = []
-        for path in outside:
-            if path in before:
-                continue
-            source = Path(path)
-            try:
-                if not source.is_file():
-                    continue
-                target.mkdir(parents=True, exist_ok=True)
-                destination = target / f"{uuid.uuid4().hex[:8]}-{source.name}"
-                shutil.move(str(source), str(destination))
-                moved.append(path)
-            except OSError:
-                continue
-        return moved
+    def _record_outside_evidence(self, spec: StageSpec, before: dict,
+                                 after: dict, outside: list[str]) -> str | None:
+        """留存有界快照元数据；不再读写无法归属的根外文件。"""
+        target = self.state.run_dir / "violations" / spec.name / f"{uuid.uuid4().hex}.json"
+        changes = [{'path': path, 'before': before.get(path), 'after': after.get(path)}
+                   for path in outside[:100]]
+        try:
+            atomic_write_json(target, {'source_files_preserved': True,
+                                      'observed_count': len(outside),
+                                      'truncated': len(outside) > len(changes),
+                                      'changes': changes})
+        except OSError as error:
+            self.state.log_event('watch_evidence_error', spec.name, reason=str(error))
+            return None
+        return target.relative_to(self.state.run_dir).as_posix()
 
     def _write_violation_stands(self, spec: StageSpec, inputs_hash: str) -> str:
         """同一输入上已记录的根外写入 => 保持失败，不再调用模型。"""

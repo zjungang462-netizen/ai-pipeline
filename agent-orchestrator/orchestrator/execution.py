@@ -58,8 +58,8 @@ class StageExecutor:
                                  if self.state.stage(s.name).commit_sha), None)
             worktree = None
             setup_started = time.monotonic()
-            # 无上游 commit 时测试直接跑在任务工作区：记录测试自身写出的文件，
-            # 下次指纹计算忽略它们，避免 resume 因新产物永不收敛（P2-1）。
+            # 无上游 commit 时记录新输出及其内容；既有输入被改写须拒收，
+            # 不能把测试/其它进程改写的源码自动降格为可忽略的输出。
             before_workspace = None
             if not (upstream_sha and self._git_ready):
                 before_workspace = artifacts.workspace_file_hashes(
@@ -72,7 +72,24 @@ class StageExecutor:
                     workdir = worktree
                 record = run_test_cmd(spec.test_cmd, workdir, timeout_s=timeout)
                 if before_workspace is not None:
-                    self._record_test_artifacts(spec, before_workspace)
+                    changed_inputs = self._record_test_artifacts(spec, before_workspace,
+                                                                 successful=record['ok'])
+                    if changed_inputs:
+                        message = '被测输入在测试期间发生变化：' + ', '.join(changed_inputs[:20])
+                        record['ok'] = False
+                        record['error'] = message
+                        record['output'] = record.get('output', '') + '\n' + message
+                        record['failure_ids'] = list(record.get('failure_ids', [])) + ['test_inputs_modified']
+                        self.state.log_event('test_inputs_modified', spec.name,
+                                             files=changed_inputs[:20], count=len(changed_inputs))
+                    elif record['ok']:
+                        # 已执行的测试验证了当前输入；用新输出哈希规范化缓存，
+                        # 避免产物被外部修改后验证成功还要额外重跑一轮。
+                        outputs = self.state.test_artifact_hashes.get(spec.name, {})
+                        frozen = sorted((rel, digest) for rel, digest in before_workspace.items()
+                                        if rel not in outputs)
+                        inputs_hash = self._inputs_hash(
+                            spec, index, workspace_hash_override=sha256_text(repr(frozen)))
             except artifacts.GitError as error:
                 message = '隔离测试工作区创建失败，未执行测试：' + str(error)
                 record = {'ok': False, 'exit_code': -1, 'cmd': list(spec.test_cmd),
@@ -292,15 +309,15 @@ class StageExecutor:
                 self.state.save()
                 outside = []
             elif outside:
-                # 不删除无归属文件：新文件移入本运行的隔离目录留证，已有文件
-                # 只记录。越界记录按 inputs_hash 持久化，续跑不能把同一输入
-                # 的违规“洗白”成通过（P2-6）。
-                moved = self._quarantine_new_outside(spec, before_snap, outside)
+                # 无法按目录快照归属写入者；只保存变化元数据，不移动、删除
+                # 或复制无关进程的原文件，继续保守失败并持久化违规记录。
+                evidence = self._record_outside_evidence(spec, before_snap, after_snap, outside)
                 self.state.control.setdefault('write_violations', {})[spec.name] = {
                     'inputs_hash': inputs_hash, 'files': outside[:20],
-                    'quarantined': moved[:20], 'at': time.time()}
+                    'evidence': evidence, 'source_files_preserved': True, 'at': time.time()}
                 self.state.log_event("watch_enforce", spec.name,
-                                     files=outside[:10], quarantined=moved[:10])
+                                     files=outside[:10], evidence=evidence,
+                                     source_files_preserved=True)
                 self.state.save()
                 result.ok = False
                 result.error_kind = ErrorKind.REJECTED

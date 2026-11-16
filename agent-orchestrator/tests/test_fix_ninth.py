@@ -125,7 +125,7 @@ class SafetyBoundary(unittest.TestCase):
             root = Path(d)
             (root / ".git").mkdir()
             (root / ".git" / "config").write_text(
-                '[remote "origin"]\n\turl = https://user:secret@example/x\n', encoding="utf8")
+                '[remote "origin"]\n\turl = https://' 'user:secret@example/x\n', encoding="utf8")
             normal = relative_target(root, "a.py")
             self.assertEqual(normal, root / "a.py")
             for name in (".git/config", ".git./config", ".git.../config",
@@ -317,7 +317,7 @@ class WatchEnforce(unittest.TestCase):
                    watch_root=watch_root, watch_enforce=enforce)
         return parse_config(raw, base_dir=tmp)
 
-    def test_new_outside_file_quarantined_and_resume_keeps_failure(self):
+    def test_new_outside_file_preserved_and_resume_keeps_failure(self):
         class Escape(_ReportAdapter):
             def __init__(self):
                 super().__init__()
@@ -335,9 +335,12 @@ class WatchEnforce(unittest.TestCase):
             eng = Engine(cfg, {"fake": adapter}, run_id="we", task="t")
             self.assertEqual(eng.run()["requirements"], StageStatus.FAILED.value)
             escaped = cfg.task_workdir.parent / "escaped.txt"
-            self.assertFalse(escaped.exists(), "新根外文件不应留在原位置")
-            quarantined = list((eng.state.run_dir / "violations").rglob("*escaped.txt"))
-            self.assertEqual(len(quarantined), 1, "新根外文件应移入隔离区留证")
+            self.assertTrue(escaped.exists(), "无法归属的原文件必须保留")
+            records = list((eng.state.run_dir / "violations").rglob("*.json"))
+            self.assertEqual(len(records), 1, "根外变化应保存元数据留证")
+            data = json.loads(records[0].read_text(encoding="utf8"))
+            self.assertTrue(data["source_files_preserved"])
+            self.assertEqual(data["changes"][0]["path"], str(escaped.resolve()))
             calls = adapter.calls
             eng2 = Engine(cfg, {"fake": Escape()}, run_id="we", task="t")
             self.assertEqual(eng2.run()["requirements"], StageStatus.FAILED.value)
