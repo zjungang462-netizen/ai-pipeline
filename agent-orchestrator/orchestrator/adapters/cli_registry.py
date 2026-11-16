@@ -33,4 +33,11 @@ def build(cfg: AdapterConfig, kind: str = "report") -> Adapter:
     }
     if cls is QwenAdapter and o.get("model"):
         kwargs["model"] = o["model"]
+    if cls is CodexAdapter:
+        kwargs.update(model=o.get('model'), isolate_config=o.get('isolate_config', False),
+                      reasoning_effort=o.get('reasoning_effort'))
+    if cls is AgyAdapter:
+        kwargs.update(model=o.get('model'), proxy_url=o.get('proxy_url'))
+    if cls is DshAdapter:
+        kwargs.update(permission_mode=o.get('permission_mode','read-only'),proxy_url=o.get('proxy_url'))
     return cls(**kwargs)

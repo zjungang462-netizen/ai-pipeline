@@ -51,8 +51,8 @@ class TestCLIEntry(unittest.TestCase):
             tmp = Path(d)
             cfg = write_config(tmp, approval=True)
             rc = main(["run", str(cfg), "--task", "demo", "--run-id", "t2"])
-            self.assertEqual(rc, 0)
-            # design 等待审批
+            # design 等待审批 => 未完成，退出码 11（与 worker 对齐）
+            self.assertEqual(rc, 11)
             rc = main(["approve", str(cfg), "--run-id", "t2", "--stage", "design"])
             self.assertEqual(rc, 0)
 

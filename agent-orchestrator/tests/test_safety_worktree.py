@@ -45,7 +45,7 @@ class TestWorktree(unittest.TestCase):
             repo = Path(d) / "repo"
             artifacts.ensure_repo(repo)
             (repo / "a.py").write_text("v1", encoding="utf-8")
-            sha = artifacts.commit_all(repo, "上游提交")
+            sha = artifacts.commit_files(repo, ["a.py"], "上游提交")
             # 未提交改动
             (repo / "b.py").write_text("未提交", encoding="utf-8")
             # 下游 worktree 基于上游 commit
@@ -60,7 +60,7 @@ class TestWorktree(unittest.TestCase):
             repo = Path(d) / "项目 仓库"
             artifacts.ensure_repo(repo)
             (repo / "源.py").write_text("内容", encoding="utf-8")
-            sha = artifacts.commit_all(repo, "中文提交")
+            sha = artifacts.commit_files(repo, ["源.py"], "中文提交")
             wt = Path(d) / "下游 工作树"
             artifacts.add_worktree(repo, sha, "分支x", wt)
             self.assertTrue((wt / "源.py").is_file())

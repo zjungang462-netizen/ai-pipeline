@@ -47,19 +47,49 @@ class AutonomousControls:
         return '\n\n'.join(parts)
 
     def _recover_pending_calls(self):
-        pending = self.state.autonomy.pop('pending_calls', {})
-        for identifier, record in pending.items():
-            # 发送前已经扣留预算；进程中断后不退回未知用量。
-            self.state.usage_total['unknown_calls'] = self.state.usage_total.get('unknown_calls', 0) + 1
-            elapsed = min(max(0, time.time() - record['started_at']), record['timeout_s'])
-            self.state.usage_total['duration_s'] += elapsed
-            stage = self.state.stage_usage.setdefault(record['stage'], {'tokens': 0, 'duration_s': 0.0})
-            stage['duration_s'] += elapsed
+        from .cli_accounting import recover_pending_usage
+        pending = recover_pending_usage(self.state)
+        for identifier, record in pending:
             self.state.stage(record['stage']).status = StageStatus.INTERRUPTED
-            self.state.log_event('inflight_reserved', record['stage'], call=identifier,
-                                 reserved_tokens=record['tokens'])
-        if pending:
+            if record.get('channel','').startswith('cli_') and record.get('base_commit'):
+                self.state.control.setdefault('cli_worktrees',{}).setdefault(identifier,dict(record,status='active'))
+        # 独立日志覆盖“用量已结算、候选尚未封存”之间的崩溃窗口。
+        for identifier, record in list(self.state.control.get('cli_worktrees',{}).items()):
+            if record.get('status') not in ('active','archived'):continue
+            stage,number=identifier.rsplit('/',1)
+            tree=self.state.stage_dir(stage)/'worktree'/number
+            if not tree.is_dir():
+                record['status']='closed'
+                continue
+            spec=self.config.stage(stage)
+            if self._finish_cli_worktree(spec,tree,record['base_commit'],int(number),
+                                         self.state.attempts_dir(stage)/number,'worker_interrupted',
+                                         archived=record['status']=='archived'):
+                self._cleanup_worktree(tree)
+        self.state.save()
+
+    def _finish_cli_worktree(self,spec,tree,base,number,directory,reason,archived=False):
+        """清理前持久化候选；封存失败保留唯一现场，并停止自动重试。"""
+        if not tree:return True
+        identifier=f'{spec.name}/{number}'
+        record=self.state.control.setdefault('cli_worktrees',{}).setdefault(identifier,
+                    {'stage':spec.name,'base_commit':base})
+        try:
+            if not archived:
+                from .recovery import capture
+                capture(self,spec,tree,base,number,directory,reason)
+            record['status']='archived' if archived else 'closed'
             self.state.save()
+            return True
+        except (ValueError,RuntimeError,OSError) as error:
+            record.update(status='retained',reason=str(error))
+            self.state.control.setdefault('recoveries',{})[spec.name]={'status':'rejected','reason':str(error)}
+            st=self.state.stage(spec.name)
+            st.status=StageStatus.FAILED
+            st.error='恢复点封存失败，隔离工作区已保留：'+str(error)
+            self.state.log_event('recovery_retained',spec.name,n=number,reason=str(error),worktree=str(tree))
+            self.state.save()
+            return False
 
     def _bootstrap_declared_files(self):
         paths = self.config.autonomy.baseline_paths
@@ -85,6 +115,8 @@ class AutonomousControls:
     def _call_limits(self, spec, adapter, prompt):
         """按字节保守估算输入，并给输出设置剩余额度内的实际 API 上限。"""
         estimate = max(1, math.ceil(len(prompt.encode('utf8')) / 2))
+        if getattr(adapter,'channel','').startswith('cli_'):
+            estimate += self.config.autonomy.cli_input_overhead_tokens
         cap = min(getattr(adapter, 'max_tokens', None) or self.config.autonomy.output_tokens,
                   self.config.autonomy.output_tokens)
         for used, maximum in ((self.state.usage_total, self.config.run_budget.max_tokens),
@@ -99,12 +131,23 @@ class AutonomousControls:
     def _reserve_call(self, spec, number, context):
         identifier = f'{spec.name}/{number}'
         self.state.log_event('model_call_started', spec.name, n=number)
-        if not self.config.autonomy.enabled:
+        cli=getattr(self.adapters.get(spec.adapter),'channel','').startswith('cli_')
+        if not self.config.autonomy.enabled and not cli:
             return None
+        if cli:
+            cycle=str(self.state.invalidate_nonce.get(spec.name,0))
+            tracker=self.state.autonomy.setdefault('cli_attempts',{}).setdefault(spec.name,{'total':0,'cycles':{}})
+            tracker['total']+=1
+            tracker['cycles'][cycle]=tracker['cycles'].get(cycle,0)+1
         reservation = context.token_reservation
+        self.state.usage_total.setdefault('reported_tokens',max(0,self.state.usage_total['tokens']-self.state.usage_total.get('reserved_tokens',0)))
         pending = self.state.autonomy.setdefault('pending_calls', {})
         pending[identifier] = {'stage': spec.name, 'tokens': reservation,
-                               'started_at': time.time(), 'timeout_s': context.timeout_s}
+                               'started_at': time.time(), 'timeout_s': context.timeout_s,
+                               'channel':getattr(self.adapters.get(spec.adapter),'channel',''),
+                               'base_commit':context.base_commit}
+        if cli and spec.kind=='code' and context.base_commit:
+            self.state.control.setdefault('cli_worktrees',{})[identifier]=dict(pending[identifier],status='active')
         self.state.usage_total['tokens'] += reservation
         self.state.usage_total['reserved_tokens'] = self.state.usage_total.get('reserved_tokens', 0) + reservation
         used = self.state.stage_usage.setdefault(spec.name, {'tokens': 0, 'duration_s': 0.0})
@@ -122,7 +165,12 @@ class AutonomousControls:
             self.state.stage_usage.setdefault(stage, {'tokens': 0, 'duration_s': 0.0})['tokens'] -= reservation
             self.state.usage_total['reported_tokens'] = self.state.usage_total.get('reported_tokens', 0) + (result.usage.get('tokens') or 0)
         else:
+            from .cli_telemetry import counter
+            known=counter(result.usage.get('known_tokens',result.usage.get('tokens',0)))
+            result.usage['known_tokens']=known
             self.state.usage_total['unknown_calls'] = self.state.usage_total.get('unknown_calls', 0) + 1
+            self.state.usage_total['reported_tokens']=self.state.usage_total.get('reported_tokens',0)+known
+            self.state.usage_total['partial_reported_tokens']=self.state.usage_total.get('partial_reported_tokens',0)+known
             # 留存预扣，后续 account_usage 不再把未知请求当作免费。
             result.usage['reserved_tokens'] = reservation
         return unknown
@@ -133,19 +181,25 @@ class AutonomousControls:
         atomic_write_json(directory / 'execution.json', {
             'prompt_hash': sha256_text(prompt), 'ok': result.ok,
             'error_kind': result.error_kind.value, 'usage': result.usage,
-            'tool_version': result.tool_version,
+            'tool_version': result.tool_version, 'channel': result.channel,
         })
 
     def _recovery_hint(self, spec, error):
         if not self.config.autonomy.enabled:
             return
-        hint = (f'上次调用失败：{str(error)[:1500]}\n'
+        cli=getattr(self.adapters.get(spec.adapter),'channel','').startswith('cli_')
+        if cli and spec.kind=='code':
+            hint=(f'上次 CLI 调用失败：{str(error)[:1200]}\n'
+                  '先复用已验证的恢复文件，直接编辑允许文件，不要只打印补丁。限制本轮文件批量，避免重新探索整个仓库。'
+                  '文件工具的结束行必须大于等于开始行，不确定行范围时只读取目标全文一次。不要重复无效工具参数。')
+        else:
+            hint = (f'上次调用失败：{str(error)[:1500]}\n'
                 '请仅返回机器可解析的最小结果。代码优先使用 # patch: 路径后接 edits JSON，'
                 'old 必须唯一匹配当前原文，不要省略文件或夹带散文。'
                 if spec.kind == 'code' else
                 f'上次结论无法解析：{str(error)[:1000]}。请只返回 '
                 '{"verdict":"pass或fail","issues":[{"file":"相对路径","problem":"问题","expected":"期望"}]}，'
-                'pass 时 issues 为空，不要输出分析过程。')
+                    'pass 时 issues 为空，不要输出分析过程。')
         self.state.autonomy.setdefault('recovery_hints', {})[spec.name] = hint
         self.state.log_event('recovery_hint', spec.name, reason=str(error)[:1000])
         self.state.save()

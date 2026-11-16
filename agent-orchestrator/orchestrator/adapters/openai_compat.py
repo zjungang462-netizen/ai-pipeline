@@ -219,6 +219,16 @@ class OpenAICompatAdapter(Adapter):
                 blocks.append(header.strip() + "\n" + json.dumps(value, ensure_ascii=False))
                 remaining = body[end:].strip()
         written: list[str] = []
+        from ..safety import relative_target, WriteRootViolation
+        # 回退名称不应覆盖同一响应后续显式指定的合法文件。
+        explicit_targets: set[Path] = set()
+        for block in blocks:
+            first = block.splitlines()[0].strip() if block.splitlines() else ''
+            if first.startswith(('# file:', '# patch:')):
+                try:
+                    explicit_targets.add(relative_target(workdir, first.split(':', 1)[1].strip()))
+                except WriteRootViolation:
+                    pass
         for i, block in enumerate(blocks):
             lines = block.splitlines()
             fname = None
@@ -234,28 +244,18 @@ class OpenAICompatAdapter(Adapter):
             default_name = f"{stage}_{i + 1}.py"
             if not fname:
                 fname = default_name
-            # 防路径遍历（自审查 M1）：拒绝 ..、绝对路径、Windows 盘符、ADS 冒号；
-            # 并在 resolve 后用 relative_to 做最终边界校验。
-            fname = fname.replace("\\", "/").strip()
-            parts = [p for p in fname.split("/") if p and p != "."]
-            unsafe = (
-                not fname
-                or fname.startswith("/")
-                or ".." in parts
-                or any(p.lower() == ".git" for p in parts)
-                or ":" in fname                      # 盘符 C:/ 与 NTFS ADS a:b
-                or Path(fname).is_absolute()
-            )
-            if unsafe:
-                fname = default_name
-            dest = (workdir / fname).resolve()
             try:
-                dest.relative_to(workdir.resolve())
-            except ValueError:
-                dest = (workdir / default_name).resolve()
-            from ..safety import relative_target
-            # 回退文件名也必须重新校验，防止它本身就是根外链接。
-            dest = relative_target(workdir, dest.relative_to(workdir.resolve()).as_posix())
+                dest = relative_target(workdir, fname)
+            except WriteRootViolation:
+                # 保留既有非法名称回退语义；回退本身仍必须通过链接和边界校验。
+                dest = relative_target(workdir, default_name)
+                used = {Path(path) for path in written}
+                for suffix in range(65):
+                    if dest not in explicit_targets and dest not in used and not dest.exists():
+                        break
+                    dest = relative_target(workdir, f'{stage}_{i + 1}_{suffix + 1}.py')
+                else:
+                    raise ValueError('安全回退文件名已被占用')
             dest.parent.mkdir(parents=True, exist_ok=True)
             dest.write_text("\n".join(lines) + "\n", encoding="utf-8")
             written.append(str(dest))

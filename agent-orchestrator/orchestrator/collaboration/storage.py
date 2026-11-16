@@ -4,6 +4,7 @@ from __future__ import annotations
 import hashlib
 import json
 import sqlite3
+import threading
 import time
 import uuid
 from contextlib import contextmanager
@@ -25,6 +26,7 @@ def identifier(prefix):
 class Store:
     def __init__(self, path):
         self.path = Path(path).resolve()
+        self._local = threading.local()
         self.path.parent.mkdir(parents=True, exist_ok=True)
         with self.connect() as db:
             db.executescript('''
@@ -59,14 +61,26 @@ class Store:
             ''')
 
     @contextmanager
-    def connect(self):
+    def session(self):
+        """一次查询批次复用连接，退出后关闭，避免 Windows 重复打开 WAL。"""
+        if getattr(self._local, 'connection', None) is not None:
+            yield
+            return
         db = sqlite3.connect(str(self.path), timeout=10)
         db.row_factory = sqlite3.Row
+        self._local.connection = db
         try:
+            yield
+        finally:
+            self._local.connection = None
+            db.close()
+
+    @contextmanager
+    def connect(self):
+        with self.session():
+            db = self._local.connection
             with db:
                 yield db
-        finally:
-            db.close()
 
     def _event(self, db, event_id, run, kind, payload, created=None):
         db.execute('INSERT OR IGNORE INTO event_log(event_id,run_id,kind,payload,created) VALUES(?,?,?,?,?)',
@@ -108,6 +122,10 @@ class Store:
         if row is None:
             raise KeyError('运行不存在')
         return dict(row)
+
+    def pin_import_config(self, key, config):
+        with self.connect() as db:
+            db.execute('UPDATE runs SET config=? WHERE id=? AND managed=0', (str(Path(config).resolve()), key))
 
     def runs(self, limit=100, before=None):
         with self.connect() as db:
@@ -169,7 +187,7 @@ class Store:
                 return dict(old)
             key = key or identifier('msg')
             now = time.time()
-            db.execute('INSERT OR IGNORE INTO messages VALUES(?,?,?,?,?,?,?,?,?,?)',
+            db.execute('INSERT OR IGNORE INTO messages VALUES(?,?,?,?,?,?,?,?,?)',
                        (key, run, thread, source, role, body, encode(refs or []), now, idem))
             self._event(db, key, run, 'message', {'message_id': key, 'source': source, 'role': role,
                                                 'body': body, 'refs': refs or [], 'thread_id': thread}, now)
@@ -184,6 +202,12 @@ class Store:
     def last_cursor(self, run):
         with self.connect() as db:
             return db.execute('SELECT COALESCE(MAX(cursor),0) FROM event_log WHERE run_id=?', (run,)).fetchone()[0]
+
+    def history(self, run, before, limit=100):
+        with self.connect() as db:
+            rows = db.execute('SELECT * FROM event_log WHERE run_id=? AND cursor<? ORDER BY cursor DESC LIMIT ?',
+                              (run, before, min(200, max(1, limit)))).fetchall()
+        return [{**dict(r), 'payload': json.loads(r['payload'])} for r in reversed(rows)]
 
     def threads(self, run):
         with self.connect() as db:

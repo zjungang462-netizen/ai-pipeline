@@ -17,13 +17,23 @@ class WriteRootViolation(RuntimeError):
     """越界写入。"""
 
 
+_WINDOWS_RESERVED_NAMES = {'CON', 'PRN', 'AUX', 'NUL', 'CONIN$', 'CONOUT$'} | {
+    prefix + digit for prefix in ('COM', 'LPT') for digit in '123456789¹²³'}
+
+
+def windows_reserved_name(component: str) -> bool:
+    """按 Windows 设备名规则检查单个路径段，包含扩展名和尾随点/空格变体。"""
+    basename = component.rstrip(' .').split('.', 1)[0].rstrip(' ').upper()
+    return basename in _WINDOWS_RESERVED_NAMES
+
+
 def relative_target(root: Path, name: str) -> Path:
-    """解析不受信文件名；读写共用相同的实际路径边界。"""
+    """解析可移植的不受信路径；所有平台统一拒绝 Windows 保留设备名。"""
     rel = name.replace("\\", "/").strip()
     parts = rel.split("/")
-    if (not rel or rel.startswith("/") or ":" in rel
+    if (not rel or rel.startswith("/") or ":" in rel or '\0' in rel
             or PureWindowsPath(rel).drive
-            or any(p == ".." or p.lower() == ".git" for p in parts)):
+            or any(p == ".." or p.lower() == ".git" or windows_reserved_name(p) for p in parts)):
         raise WriteRootViolation(f"非法相对路径: {name}")
     target = (Path(root).resolve() / rel).resolve()
     if not target.is_relative_to(Path(root).resolve()):

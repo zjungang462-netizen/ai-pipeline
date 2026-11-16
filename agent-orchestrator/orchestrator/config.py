@@ -53,6 +53,10 @@ class Autonomy:
     repair_batch_size: int = 1
     output_tokens: int = 2048
     context_chars: int = 32000
+    cli_input_overhead_tokens: int = 32768
+    cli_idle_timeout_s: int = 120
+    cli_max_tool_errors: int = 3
+    cli_max_repeated_reads: int = 4
 
 
 @dataclass
@@ -315,6 +319,9 @@ def _policy(raw, cls):
         _require(values['max_repair_rounds'] <= 20, "max_repair_rounds 上限为 20")
         _require(values['output_tokens'] <= 16384, "output_tokens 上限为 16384")
         _require(values['context_chars'] <= 128000, "context_chars 上限为 128000")
+        _require(values['cli_idle_timeout_s'] <= 3600, "cli_idle_timeout_s 上限为 3600")
+        _require(values['cli_max_tool_errors'] <= 20, "cli_max_tool_errors 上限为 20")
+        _require(values['cli_max_repeated_reads'] <= 20, "cli_max_repeated_reads 上限为 20")
     else:
         _require(values['min_runs'] >= 5, "自动调优至少需要 5 条同配置记录")
         _require(values['max_batch_size'] <= 3, "自动修复文件批量上限为 3")

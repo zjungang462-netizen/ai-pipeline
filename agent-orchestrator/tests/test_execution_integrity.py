@@ -83,7 +83,7 @@ class ExecutionIntegrity(unittest.TestCase):
         cfg = self.config()
         engine = self.engine(cfg)
         engine.run()
-        (engine.state.current_attempt_dir("draft") / "injected.md").write_text("unverified context")
+        (engine.state.current_attempt_dir("draft") / "injected.md").write_text("unverified context", encoding="utf-8")
         adapter = FakeAdapter(kind="report")
         self.engine(cfg, adapter).run()
         self.assertEqual(adapter.calls, 1)
@@ -129,7 +129,7 @@ class ExecutionIntegrity(unittest.TestCase):
         engine = self.engine(cfg, Reviewer({"verdict": "fail", "issues": [
             {"file": "a.py", "problem": "bug", "expected": "fix"}]}))
         self.assertEqual(engine.run()["review"], "failed")
-        decision = json.loads((engine.state.current_attempt_dir("review") / "decision.json").read_text())
+        decision = json.loads((engine.state.current_attempt_dir("review") / "decision.json").read_text(encoding="utf-8"))
         self.assertEqual(decision["verdict"], "fail")
 
     def test_new_review_cannot_reuse_old_pass(self):
@@ -170,9 +170,9 @@ class ExecutionIntegrity(unittest.TestCase):
             "from pathlib import Path; assert Path('flag.txt').read_text()=='good'"])])
         cfg.task_workdir.mkdir()
         flag = cfg.task_workdir / "flag.txt"
-        flag.write_text("good")
+        flag.write_text("good", encoding="utf-8")
         self.assertEqual(self.engine(cfg).run()["testing"], "done")
-        flag.write_text("bad")
+        flag.write_text("bad", encoding="utf-8")
         self.assertEqual(self.engine(cfg).run()["testing"], "failed")
 
     def test_test_round_limit_is_not_cut_by_review_guard(self):
@@ -195,7 +195,7 @@ class ExecutionIntegrity(unittest.TestCase):
     def test_feedback_cannot_read_absolute_or_parent_paths(self):
         cfg = self.config()
         cfg.task_workdir.mkdir()
-        (self.base / "outside.txt").write_text("PRIVATE_MARKER")
+        (self.base / "outside.txt").write_text("PRIVATE_MARKER", encoding="utf-8")
         engine = self.engine(cfg)
         for name in ((self.base / "outside.txt").as_posix(), "../outside.txt", "C:/outside.txt"):
             self.assertNotIn("PRIVATE_MARKER", engine._rework_context(f"文件 `{name}` — bug"))
@@ -205,7 +205,7 @@ class ExecutionIntegrity(unittest.TestCase):
     def test_invalid_issue_location_awaits_human(self):
         file = self.base / "verdict.json"
         file.write_text(json.dumps({"verdict": "fail", "issues": [
-            {"file": "C:/outside.txt", "problem": "x"}]}))
+            {"file": "C:/outside.txt", "problem": "x"}]}), encoding="utf-8")
         with self.assertRaises(VerdictError):
             load_verdict(file, workdir=self.base)
 
@@ -327,9 +327,9 @@ class GitIntegrity(unittest.TestCase):
             repo = Path(directory) / "repo"
             artifacts.ensure_repo(repo)
             artifacts._git(["config", "core.quotepath", "true"], repo)
-            (repo / "unrelated.txt").write_text("user staged")
+            (repo / "unrelated.txt").write_text("user staged", encoding="utf-8")
             artifacts._git(["add", "--", "unrelated.txt"], repo)
-            (repo / "中文.py").write_text("print(1)")
+            (repo / "中文.py").write_text("print(1)", encoding="utf-8")
             changed = artifacts.changed_files_since(repo, artifacts.head_sha(repo))
             self.assertIn("中文.py", changed)
             commit = artifacts.commit_files(repo, ["中文.py"], "stage")

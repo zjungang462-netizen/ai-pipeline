@@ -1,0 +1,47 @@
+{
+  "codex_0.169_real.jsonl": {
+    "source": "真实本机 CLI 调用，非手写结构",
+    "version": "0.169.0",
+    "captured_at": "2026-11-15",
+    "redacted_fields": [
+      "thread_id",
+      "conversation_id",
+      "cwd"
+    ],
+    "source_sha256": "6aa8558d5b79691e6853e9dc578d55563d38bed4e070aae27e530c9f94cb3cdb",
+    "fixture_sha256": "dea8f7e521d48001e2731e8d6952590a84a0b6592292c3d85bc7afecceb6d542"
+  },
+  "agy_1.5.9_real.jsonl": {
+    "source": "真实本机 CLI 调用，非手写结构",
+    "version": "1.5.9",
+    "captured_at": "2026-11-15",
+    "redacted_fields": [
+      "thread_id",
+      "conversation_id",
+      "cwd"
+    ],
+    "source_sha256": "a1cf770174d4570ecade1dd0122b6c979f9d72ee3cf07c29d504f8f4e2da7cff",
+    "fixture_sha256": "39e9b7d382e4a372229e627b69138a6cfa2f9eee5e1e110f5d5dc9889a1e7eff"
+  },
+  "codex_0.169_policy_stderr.txt": {
+    "source": "真实本机 Codex CLI 只读探针；命令被策略拒绝，未实际执行",
+    "version": "0.169.0",
+    "captured_at": "2026-11-16",
+    "redacted_fields": [
+      "CreateProcess.message 中的命令及本机路径"
+    ],
+    "source_sha256": "107784cf9e5729608807a09978be9c4c77a5082281b57e6d3f69aa8f60cc7ad9",
+    "fixture_sha256": "4c4a2e524802ec47c271aa844b000acc578e07bdc6e5e08416d8eadb500e12cd"
+  },
+  "codex_0.169_tools_real.jsonl": {
+    "source": "真实本机 Codex CLI 只读沙箱执行，两次文件读取成功",
+    "version": "0.169.0",
+    "captured_at": "2026-11-16",
+    "redacted_fields": [
+      "thread_id",
+      "command 中的 PowerShell 路径和探针工作区路径"
+    ],
+    "source_sha256": "06eca835d7d0f9229dcdf567907a3ee2a722888baf5d670de23abb445788d264",
+    "fixture_sha256": "fab9fd090ce4d310ba813c159179103b8edd7f644a6ae25165bd4d6e645e0b59"
+  }
+}

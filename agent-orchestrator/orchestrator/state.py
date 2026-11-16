@@ -53,7 +53,15 @@ def atomic_write_json(path: Path, data: dict[str, Any]) -> None:
         json.dump(data, f, ensure_ascii=False, indent=2)
         f.flush()
         os.fsync(f.fileno())
-    os.replace(tmp, path)
+    # Windows 下读者/防护软件可能短暂持有目标文件；只重试尚未生效的原子替换。
+    for attempt in range(7):
+        try:
+            os.replace(tmp, path)
+            break
+        except PermissionError:
+            if attempt == 6:
+                raise
+            time.sleep(min(.01 * (2 ** attempt), .2))
 
 
 def _pid_alive(pid: object) -> bool:

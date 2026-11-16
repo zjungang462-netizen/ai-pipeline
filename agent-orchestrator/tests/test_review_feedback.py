@@ -24,7 +24,7 @@ class TestVerdictFile(unittest.TestCase):
             p = Path(d) / "review_verdict.json"
             import json as _j
             p.write_text(_j.dumps(payload), encoding="utf-8")
-            return load_verdict(p)
+            return load_verdict(p, workdir=(p).parent)
 
     def test_pass(self):
         self.assertTrue(self._load({"verdict": "pass", "issues": []}).passed)
@@ -40,7 +40,7 @@ class TestVerdictFile(unittest.TestCase):
         # 散文不再是结论来源：没有文件就抛错，交人工确认
         with tempfile.TemporaryDirectory() as d:
             with self.assertRaises(VerdictError):
-                load_verdict(Path(d) / "review_verdict.json")
+                load_verdict(Path(d) / "review_verdict.json", workdir=(Path(d) / "review_verdict.json").parent)
 
     def test_format_feedback_only_located(self):
         v = self._load({"verdict": "fail", "issues": [

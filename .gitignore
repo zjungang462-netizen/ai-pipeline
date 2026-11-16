@@ -33,6 +33,8 @@ Thumbs.db
 
 # 编排器运行状态和自动生成的任务工作区
 /agent-orchestrator/.orchestrator/
+/agent-orchestrator/.workbench/
+/agent-orchestrator/.dsh-test-state/
 /agent-orchestrator/.*_state/
 /agent-orchestrator/workspace/
 /agent-orchestrator/*_workspace/

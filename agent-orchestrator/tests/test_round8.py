@@ -288,12 +288,12 @@ class TestVerdictFileContract(unittest.TestCase):
             p = Path(d) / "review_verdict.json"
             p.write_text(payload if isinstance(payload, str)
                          else json.dumps(payload), encoding="utf-8")
-            return load_verdict(p)
+            return load_verdict(p, workdir=(p).parent)
 
     def test_missing_file_raises(self):
         with tempfile.TemporaryDirectory() as d:
             with self.assertRaises(VerdictError):
-                load_verdict(Path(d) / "review_verdict.json")
+                load_verdict(Path(d) / "review_verdict.json", workdir=(Path(d) / "review_verdict.json").parent)
 
     def test_invalid_json_raises(self):
         with self.assertRaises(VerdictError):
@@ -428,14 +428,14 @@ class TestPromptStdin(unittest.TestCase):
         ctx = RunContext(task="t", run_id="r", stage="coding",
                          workdir=Path("."), runs_dir=Path("."))
         with tempfile.TemporaryDirectory() as d, \
-                mock.patch("orchestrator.adapters.cli_base.subprocess.run") as run:
+                mock.patch("orchestrator.adapters.cli_base.run_cli_process") as run:
             run.return_value = subprocess.CompletedProcess(
                 args=[], returncode=0, stdout="", stderr="")
             adapter.run(secret, Path(d), ctx)
         argv = run.call_args.args[0]
         self.assertNotIn(secret, argv)
         self.assertEqual(run.call_args.kwargs["input"], secret)
-        self.assertIn("--", argv)
+        self.assertIn("-" if adapter.exe_name == 'codex' else "--", argv)
 
     def test_codex_doubao_dsh_keep_prompt_off_argv(self):
         self._assert_stdin(CodexAdapter("codex"))

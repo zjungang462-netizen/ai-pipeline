@@ -1,0 +1,7 @@
+{"type": "session", "sessionId": "session-real-probe", "cwd": "C:/fixture"}
+{"type": "status", "phase": "turn_start", "turn": 1}
+{"type": "status", "phase": "step_start", "turn": 1, "step": 1}
+{"type": "text", "text": "DSH_PROBE_OK_20261116"}
+{"type": "status", "phase": "step_end", "turn": 1, "step": 1, "usage": {"inputTokens": 6502, "outputTokens": 43, "cacheReadTokens": 0, "cacheWriteTokens": 0, "totalTokens": 6545}}
+{"type": "status", "phase": "turn_end", "turn": 1, "reason": {"kind": "completed"}}
+{"type": "final", "sessionId": "session-real-probe", "reason": {"kind": "completed"}, "text": "DSH_PROBE_OK_20261116"}

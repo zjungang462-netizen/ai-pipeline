@@ -20,6 +20,7 @@ class ErrorKind(str, Enum):
     RATE_LIMIT = "rate_limit"      # 429/5xx，可退避重试（评审 M6）
     REJECTED = "rejected"          # 预算超限 / 空跑 / 越界，主动拒绝
     INTERRUPTED = "interrupted"    # 进程被 kill，attempt 无 success.json
+    TOOL_LIMIT = 'tool_limit'      # 工具错误或重复读取达到有界阈值
 
 
 class StageStatus(str, Enum):
@@ -110,6 +111,12 @@ class RunContext:
     attempt_dir: Path | None = None
     output_tokens: int | None = None
     token_reservation: int = 0
+    call_id: str | None = None
+    base_commit: str | None = None
+    remaining_tokens: int | None = None
+    idle_timeout_s: float = 120
+    max_tool_errors: int = 3
+    max_repeated_reads: int = 4
 
 
 @dataclass

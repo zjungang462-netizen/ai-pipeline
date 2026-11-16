@@ -55,6 +55,7 @@ def write_metrics(engine, results: dict[str, str]) -> None:
     data['test_attempts'] = sum(e['kind'] == 'test_start' for e in state.events)
     data['failure_history'] = state.autonomy.get('failures', {})
     data['repair_batch_size'] = config.autonomy.repair_batch_size
+    data['human_interventions'] = len(state.control.get('discussion_holds', {}))
     # 单写者持有 run 锁，先写完整临时文件，再以不覆盖的链接发布。
     temporary = path.with_suffix(".json.tmp")
     with temporary.open("w", encoding="utf-8") as stream:

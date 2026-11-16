@@ -7,12 +7,122 @@
 """
 from __future__ import annotations
 
+import os
+import codecs
+import signal
 import subprocess
+import threading
+import time
 from pathlib import Path
 
 from ..contracts import ErrorKind, PreflightReport, Result, RunContext
 from ..safety import build_subprocess_env, preflight_cli, resolve_exe
 from .base import Adapter
+from ..cli_telemetry import CLITrace, counter, partial_usage
+from ..output_tail import TextTail
+
+
+def _merge_observed_usage(usage, observed):
+    """完整流、尾部重放和版本解析取较大下界，不能相加或互相冲掉。"""
+    merged = dict(usage)
+    if counter(observed.get('known_tokens')) > counter(usage.get('tokens')):
+        merged.update(observed)
+    for key in ('tokens', 'known_tokens', 'cli_reported_tokens',
+                'cache_read_tokens', 'completed_responses'):
+        if key in usage or key in observed:
+            merged[key] = max(counter(usage.get(key)), counter(observed.get(key)))
+    merged['known_tokens'] = max(counter(merged.get('known_tokens')), counter(merged.get('tokens')))
+    if usage.get('usage_unknown') or observed.get('usage_unknown'):
+        merged['usage_unknown'] = True
+    return merged
+
+
+def run_cli_process(command, *, cwd, env, input, capture_output=True, text=True,
+                    encoding='utf-8', errors='replace', timeout=None, trace=None):
+    """超时时停止本次 CLI 的进程树，避免后台工具继续改写已经回收的 worktree。"""
+    from ..process_tree import attach, close, terminate
+    process = subprocess.Popen(command, cwd=cwd, env=env, stdin=subprocess.PIPE,
+                               stdout=subprocess.PIPE, stderr=subprocess.PIPE, start_new_session=os.name != 'nt',
+                               creationflags=subprocess.CREATE_NEW_PROCESS_GROUP if os.name == 'nt' else 0)
+    output_limit=4*1024*1024
+    buffers={name:TextTail(output_limit) for name in ('stdout','stderr')}
+    failures=[]
+    def drain(pipe,name):
+        decoder=codecs.getincrementaldecoder(encoding)(errors=errors)
+        try:
+            while chunk:=pipe.read1(4096):
+                value=decoder.decode(chunk)
+                buffers[name].append(value)
+                if trace:trace.feed(name,value)
+            value=decoder.decode(b'',final=True)
+            if value:
+                buffers[name].append(value)
+                if trace:trace.feed(name,value)
+        except Exception as error:
+            failures.append(error)
+        finally:pipe.close()
+    def send():
+        try:
+            value=input if isinstance(input,bytes) else (input or '').encode(encoding)
+            process.stdin.write(value)
+            process.stdin.flush()
+        except (BrokenPipeError,OSError):pass
+        finally:process.stdin.close()
+    readers=[threading.Thread(target=drain,args=(process.stdout,'stdout'),daemon=True),
+             threading.Thread(target=drain,args=(process.stderr,'stderr'),daemon=True)]
+    writer=threading.Thread(target=send,daemon=True)
+    start=time.monotonic()
+    stopped=''
+    status='exited'
+    try:
+        try:
+            attach(process)
+        except OSError:
+            process.kill()
+            process.communicate()
+            raise
+        for thread in readers:thread.start()
+        writer.start()
+        while True:
+            if failures:raise OSError('CLI 实时日志记录失败：'+str(failures[0]))
+            if trace:
+                stopped=trace.tick()
+            if stopped or (timeout is not None and time.monotonic()-start>=timeout):
+                stopped=stopped or 'call_timeout'
+                status='stopped'
+                break
+            if process.poll() is not None and all(not t.is_alive() for t in readers):break
+            time.sleep(.05)
+        if stopped:
+            if not terminate(process):
+                if os.name == 'nt':
+                    process.kill()
+                else:
+                    try:os.killpg(process.pid, signal.SIGKILL)
+                    except ProcessLookupError:pass
+            process.wait(timeout=10)
+        for thread in [*readers,writer]:thread.join(5)
+        if any(t.is_alive() for t in readers):raise OSError('CLI 管道未关闭')
+        if failures:raise OSError('CLI 实时日志记录失败：'+str(failures[0]))
+        stdout,stderr=buffers['stdout'].getvalue(),buffers['stderr'].getvalue()
+        if stopped:
+            error=subprocess.TimeoutExpired(command,timeout,output=stdout,stderr=stderr)
+            error.stop_reason=stopped
+            raise error
+        return subprocess.CompletedProcess(command,process.returncode,
+            stdout if text else stdout.encode(encoding),stderr if text else stderr.encode(encoding))
+    finally:
+        if process.poll() is None:
+            if not terminate(process):
+                if os.name!='nt':
+                    try:os.killpg(process.pid,signal.SIGKILL)
+                    except ProcessLookupError:pass
+                else:process.kill()
+            process.wait(timeout=10)
+        close(process)
+        for thread in [*readers,writer]:
+            if thread.ident is not None:thread.join(2)
+        if trace:trace.finish(status,stopped)
 
 
 class CLIAdapter(Adapter):
@@ -46,7 +156,7 @@ class CLIAdapter(Adapter):
 
     # ---- 子进程 ----
     def _exec(self, args: list[str], workdir: Path, ctx: RunContext,
-              stdin_data: str | None = None) -> Result:
+              stdin_data: str | None = None, env_overrides: dict[str, str] | None = None) -> Result:
         exe = self._ensure_resolved()
         if not exe:
             return Result(ok=False, exit_code=-1, error_kind=ErrorKind.AUTH,
@@ -54,21 +164,52 @@ class CLIAdapter(Adapter):
                           stderr=f"未找到 {self.exe_name}（配置 exe 填绝对路径）")
         allow = list(self.credential_env) + list(self.extra_env)
         env = build_subprocess_env(extra_allow=allow)
+        env.update(env_overrides or {})
+        secrets=[v for k,v in env.items() if any(label in k.upper() for label in ('API_KEY','AUTH_TOKEN','ACCESS_TOKEN','CODEX_KEY'))]
+        trace=CLITrace(ctx,secrets,channel=self.channel)
+        def scrub(value):
+            value = _dec(value)
+            for key, secret in env.items():
+                if len(secret) >= 8 and any(label in key.upper() for label in ('API_KEY', 'AUTH_TOKEN', 'ACCESS_TOKEN', 'CODEX_KEY')):
+                    value = value.replace(secret, '[REDACTED]')
+            return value
         try:
-            proc = subprocess.run(
+            proc = run_cli_process(
                 [exe, *args], cwd=str(workdir), env=env,
                 input=stdin_data,
                 capture_output=True, text=True, encoding="utf-8",
                 errors="replace", timeout=ctx.timeout_s or self.timeout_s,
+                trace=trace,
             )
         except subprocess.TimeoutExpired as e:
-            return Result(ok=False, exit_code=-1, error_kind=ErrorKind.TIMEOUT,
+            usage=_merge_observed_usage(partial_usage(scrub(e.stdout)),trace.ledger.snapshot())
+            usage['usage_unknown']=True
+            reason=getattr(e,'stop_reason','call_timeout')
+            kind=ErrorKind.AUTH if reason=='authentication_required' else ErrorKind.REJECTED if reason in ('budget_limit','output_limit') else ErrorKind.TOOL_LIMIT if reason in ('tool_error_limit','repeated_read_limit') else ErrorKind.TIMEOUT
+            return Result(ok=False, exit_code=-1, error_kind=kind,
                           channel=self.channel, tool_version=self._version,
-                          stdout=_dec(e.stdout), stderr=_dec(e.stderr) or "超时")
+                          stdout=scrub(e.stdout), stderr=(scrub(e.stderr)+'\nCLI 停止：'+reason).strip(),
+                          usage=usage)
         except OSError as e:
+            usage={**trace.ledger.snapshot(),'usage_unknown':True}
             return Result(ok=False, exit_code=-1, error_kind=ErrorKind.CRASH,
-                          channel=self.channel, stderr=str(e))
-        return self._parse(proc, workdir, ctx)
+                          channel=self.channel, stderr=scrub(str(e)), usage=usage)
+        finally:
+            trace.finish('exited' if not trace.reason else 'stopped')
+        proc.stdout, proc.stderr = scrub(proc.stdout), scrub(proc.stderr)
+        result=self._parse(proc, workdir, ctx)
+        # 最后一个无换行事件在 finish 才解析，护栏结论仍须覆盖退出码 0。
+        if trace.reason:
+            result.ok=False
+            result.error_kind=(ErrorKind.TOOL_LIMIT if trace.reason in ('tool_error_limit','repeated_read_limit')
+                               else ErrorKind.AUTH if trace.reason=='authentication_required'
+                               else ErrorKind.REJECTED if trace.reason in ('budget_limit','output_limit')
+                               else ErrorKind.TIMEOUT)
+            result.stderr=(result.stderr+'\nCLI 停止：'+trace.reason).strip()
+        if 'tokens' not in result.usage or (not result.ok and not trace.ledger.complete):
+            result.usage=_merge_observed_usage(result.usage,partial_usage(proc.stdout))
+        result.usage=_merge_observed_usage(result.usage,trace.ledger.snapshot())
+        return result
 
     def _exec_prompt(self, args: list[str], prompt: str, workdir: Path,
                      ctx: RunContext) -> Result:
@@ -105,7 +246,7 @@ class CLIAdapter(Adapter):
         if result.ok and kind in ("report", "review") and not result.report_files:
             text = result.text or result.stdout or ""
             if text.strip():
-                report_dir = Path(ctx.runs_dir) / "reports"
+                report_dir = ctx.attempt_dir or Path(ctx.runs_dir) / "reports"
                 report_dir.mkdir(parents=True, exist_ok=True)
                 report = report_dir / f"{ctx.stage}_report.md"
                 report.write_text(text, encoding="utf-8")

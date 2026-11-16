@@ -144,16 +144,6 @@ def head_sha(workdir: Path) -> str:
     return _git(["rev-parse", "HEAD"], workdir).stdout.strip()
 
 
-def commit_all(workdir: Path, message: str) -> str | None:
-    """提交全部改动（含删除/重命名）。无改动返回 None。"""
-    _git(["add", "-A"], workdir)
-    status = _git(["status", "--porcelain"], workdir).stdout.strip()
-    if not status:
-        return None
-    _git(["commit", "-q", "-m", message], workdir)
-    return head_sha(workdir)
-
-
 def changed_files_since(workdir: Path, base_sha: str) -> list[str]:
     """相对基线的变更文件（含工作区未提交改动）。"""
     out = _git(["diff", "--name-only", "-z", base_sha], workdir).stdout
@@ -287,9 +277,11 @@ def diff_summary(workdir: Path, commit_sha: str, max_lines: int = 200) -> str:
     return "\n".join(lines)
 
 
-_SKIP_DIRS = {".git", "__pycache__", "node_modules", ".venv", "venv",
-              ".state", ".smoke_state", ".full_state", ".orchestrator",
-              ".demo_state", "attempts", "worktree", ".pytest_cache"}
+# 公开常量（N2）：工作区遍历时跳过的缓存/依赖/状态目录。
+# 引擎等模块直接引用此名，不再依赖私有成员。
+SKIP_DIRS = {".git", "__pycache__", "node_modules", ".venv", "venv",
+             ".state", ".smoke_state", ".full_state", ".orchestrator",
+             ".demo_state", "attempts", "worktree", ".pytest_cache"}
 _CODE_SUFFIX = {".py", ".js", ".ts", ".java", ".cs", ".go", ".rs", ".toml",
                 ".md", ".json", ".yaml", ".yml", ".sql", ".vue", ".sh"}
 
@@ -299,7 +291,7 @@ def workspace_files(workdir: Path, exclude: Path | None = None):
     root = Path(workdir).resolve()
     excluded = Path(exclude).resolve() if exclude else None
     for directory, names, files in os.walk(root):
-        names[:] = sorted(n for n in names if n not in _SKIP_DIRS
+        names[:] = sorted(n for n in names if n not in SKIP_DIRS
                           and not n.startswith(".")
                           and not (Path(directory) / n).is_symlink()
                           and (Path(directory) / n).resolve() != excluded)
@@ -377,13 +369,14 @@ def baseline_sha(workdir: Path) -> str | None:
     return result
 
 
-def cumulative_diff(workdir: Path, commit_sha: str, max_lines: int = 600) -> str:
+def cumulative_diff(workdir: Path, commit_sha: str, max_lines: int = 600,
+                    base_sha: str | None = None) -> str:
     """相对项目基线的累积全量 diff + 文件清单（修复 M0）。
 
     审查阶段必须看到完整实现，而非仅末次提交（commit~1..commit）。
     否则返工轮次里审查员只看到增量测试改动，会误判"实现代码缺失"。
     """
-    base = baseline_sha(workdir)
+    base = base_sha or baseline_sha(workdir)
     if base and base != commit_sha:
         listing = _git(["diff", "--stat", base, commit_sha], workdir, check=False).stdout
         proc = _git(["diff", base, commit_sha], workdir, check=False)

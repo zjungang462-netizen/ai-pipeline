@@ -60,6 +60,9 @@ def supervise(config_path: Path, run_id: str, task: str, max_restarts: int = 2,
                 return job
             if job.get('status') in ('failed', 'done') and any(c['kind'] == 'rerun' for c in queued):
                 job['status'] = 'pending'
+            elif job.get('status') in ('failed', 'done', 'timeout', 'cancelled'):
+                for command in queued:
+                    store.finish(command['id'], 'rejected', {'reason': '运行已经结束，此操作未生效'})
         config = load_config(job['config'])
         if config.source_hash != job['config_hash']:
             raise ConfigError('被固定的运行配置发生变化，停止自动恢复')
@@ -92,6 +95,15 @@ def supervise(config_path: Path, run_id: str, task: str, max_restarts: int = 2,
                                            env=environment, stdout=log, stderr=subprocess.STDOUT,
                                            start_new_session=os.name != 'nt',
                                            creationflags=subprocess.CREATE_NEW_PROCESS_GROUP if os.name == 'nt' else 0)
+                if store:
+                    from .process_tree import attach
+                    try:
+                        attach(process)
+                    except OSError as error:
+                        _terminate(process)
+                        job.update(status='failed', reason='无法建立进程树归属: ' + str(error))
+                        atomic_write_json(jobfile, job)
+                        return job
                 job.update(status='running', worker_pid=process.pid if isinstance(process.pid, int) else None)
                 atomic_write_json(jobfile, job)
                 try:
@@ -116,6 +128,10 @@ def supervise(config_path: Path, run_id: str, task: str, max_restarts: int = 2,
                     _terminate(process)
                     job.update(status='timeout', reason='supervisor_wall_budget')
                     break
+                finally:
+                    if store:
+                        from .process_tree import close
+                        close(process)
             job['exit_code'] = code
             if code == 0:
                 job['status'] = 'done'
@@ -130,23 +146,54 @@ def supervise(config_path: Path, run_id: str, task: str, max_restarts: int = 2,
             job['status'] = 'recovering'
             atomic_write_json(jobfile, job)
             time.sleep(min(1.0, max(0, remaining)))
-        job['finished_at'] = time.time()
-        atomic_write_json(jobfile, job)
+        if store:
+            from .collaboration.control import command_gate
+            with command_gate(directory):
+                _finish_controlled_job(job,jobfile,state,store)
+        else:
+            job['finished_at'] = time.time()
+            atomic_write_json(jobfile, job)
         return job
     finally:
         lock.release()
 
 
+def _finish_controlled_job(job,jobfile,state,store):
+    """终态发布前补查已准入指令；不得为处理暂停重新执行阶段。"""
+    queued=store.commands(job['run_key'])
+    cancel=next((c for c in queued if c['kind']=='cancel'),None)
+    if cancel:
+        _cancel_job(job,jobfile,state,store,cancel)
+        if job.get('status')=='cancelled':
+            for command in store.commands(job['run_key']):
+                store.finish(command['id'],'rejected',{'reason':'运行已取消，此操作未生效'})
+        return
+    if job['status']=='done' and any(c['kind']=='pause' for c in queued):
+        from .collaboration.control import Control
+        with StageLock(state.run_dir/'.run.lock'):
+            if not state.load():
+                raise RuntimeError('缺少 worker 结束状态，不能确认暂停')
+            if Control(store.path,job['run_key']).pause_after_worker(state):
+                job['status']='paused'
+    job['finished_at']=time.time()
+    atomic_write_json(jobfile,job)
+    if job['status'] in ('done','failed','timeout','cancelled'):
+        for command in store.commands(job['run_key']):
+            store.finish(command['id'],'rejected',{'reason':'运行已经结束，此操作未生效'})
+
+
 def _terminate(process):
     """只操作此 supervisor 创建的进程对象及其后代。"""
-    if os.name == 'nt':
+    from .process_tree import terminate
+    grouped = terminate(process)
+    if os.name == 'nt' and not grouped:
         try:
             subprocess.run(['taskkill', '/PID', str(process.pid), '/T', '/F'],
                            env=build_subprocess_env(), stdout=subprocess.DEVNULL,
                            stderr=subprocess.DEVNULL, timeout=5)
         except (OSError, subprocess.TimeoutExpired):
             pass
-    else:
+    elif os.name != 'nt':
         try:
             os.killpg(process.pid, signal.SIGKILL)
         except ProcessLookupError:
@@ -164,10 +211,8 @@ def _cancel_job(job, jobfile, state, store, command):
     try:
         state.load()
         # 发送前预扣的未知用量保留，不能因为取消而冲掉预算。
-        pending = state.autonomy.pop('pending_calls', {})
-        for record in pending.values():
-            state.usage_total['unknown_calls'] = state.usage_total.get('unknown_calls', 0) + 1
-            state.usage_total['duration_s'] += min(max(0, time.time() - record['started_at']), record['timeout_s'])
+        from .cli_accounting import recover_pending_usage
+        recover_pending_usage(state)
         state.control['cancelled'] = True
         from .contracts import StageStatus
         for stage in state.stages.values():

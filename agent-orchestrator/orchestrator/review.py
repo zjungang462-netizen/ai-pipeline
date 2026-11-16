@@ -86,7 +86,9 @@ def _parse_issue(item: object) -> Issue:
 
 
 def load_verdict(path: Path, workdir: Path | None = None) -> ReviewVerdict:
-    """严格读取结论文件。任何不合法都抛 VerdictError（=> 待人工确认）。"""
+    """严格读取结论；调用者必须显式给出任务根，缺省时拒绝猜测 cwd。"""
+    if workdir is None:
+        raise VerdictError('读取审查结论必须显式提供任务 workdir')
     path = Path(path)
     if not path.is_file():
         raise VerdictError(f"结论文件缺失: {path.name}（审查未给出可判定结论）")
@@ -109,7 +111,7 @@ def load_verdict(path: Path, workdir: Path | None = None) -> ReviewVerdict:
     for issue in issues:
         if issue.file:
             try:
-                relative_target(workdir or Path.cwd(), issue.file)
+                relative_target(workdir, issue.file)
             except WriteRootViolation as error:
                 raise VerdictError(str(error)) from error
     # 一致性：pass 却带问题 => 视为不合法，交人工（不替模型猜）

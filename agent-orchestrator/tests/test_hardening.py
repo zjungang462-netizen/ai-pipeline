@@ -213,7 +213,7 @@ class TestRound3Fixes(unittest.TestCase):
             p.write_text(_j.dumps({"verdict": "fail", "issues": [
                 {"file": "a.py", "problem": "空指针", "expected": "判空"}]}),
                 encoding="utf-8")
-            v = load_verdict(p)
+            v = load_verdict(p, workdir=(p).parent)
         self.assertFalse(v.passed)
         self.assertTrue(v.issues)
         self.assertIn("a.py", v.issue_texts()[0])
@@ -313,12 +313,12 @@ class TestSelfReviewFindings(unittest.TestCase):
         with tempfile.TemporaryDirectory() as d:
             missing = Path(d) / "review_verdict.json"
             with self.assertRaises(VerdictError):
-                load_verdict(missing)
+                load_verdict(missing, workdir=(missing).parent)
             # 即便正文写了"通过"，只要文件里的 verdict 不合法就不放行
             missing.write_text('{"verdict":"有条件通过","issues":[]}',
                                encoding="utf-8")
             with self.assertRaises(VerdictError):
-                load_verdict(missing)
+                load_verdict(missing, workdir=(missing).parent)
 
     def test_pass_with_issues_is_invalid(self):
         """verdict=pass 却带问题 => 结论不合法，交人工，不替模型猜。"""
@@ -330,11 +330,11 @@ class TestSelfReviewFindings(unittest.TestCase):
                 {"file": "a.py", "problem": "缺陷", "expected": "修复"}]}),
                 encoding="utf-8")
             with self.assertRaises(VerdictError):
-                load_verdict(p)
+                load_verdict(p, workdir=(p).parent)
             # 干净的 pass 才通过
             p.write_text(_j.dumps({"verdict": "pass", "issues": []}),
                          encoding="utf-8")
-            self.assertTrue(load_verdict(p).passed)
+            self.assertTrue(load_verdict(p, workdir=(p).parent).passed)
 
     def test_b4_parse_unknown_never_meaningful(self):
         r = Result(ok=True, exit_code=0, text="x", parse_unknown=True,

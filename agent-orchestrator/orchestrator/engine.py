@@ -9,6 +9,7 @@
 from __future__ import annotations
 
 import json
+import os
 import time
 import threading
 import re
@@ -99,7 +100,33 @@ class Engine(AutonomousControls):
                 self.state.task = self.task
             else:
                 self.task = self.state.task
-        if self.config.autonomy.enabled:
+        has_cli=any(getattr(self.adapters.get(s.adapter),'channel','').startswith('cli_') for s in self.config.stages)
+        if has_cli:
+            from .recovery import config_hash
+            identity={'task_hash':sha256_text(self.task),'config_hash':config_hash(self.config)}
+            if self.state.control.get('cli_identity',identity)!=identity:
+                raise ValueError('同一 CLI 运行不可更换已固定的任务或配置')
+            self.state.control['cli_identity']=identity
+            jobfile=self.state.run_dir/'job.json'
+            deadline=self.state.control.get('cli_deadline')
+            if jobfile.is_file():
+                job=json.loads(jobfile.read_text(encoding='utf8'))
+                if job.get('task_hash')!=sha256_text(self.task) or (self.config.source_hash and job.get('config_hash')!=self.config.source_hash):
+                    raise ValueError('同一 CLI 运行不可更换已固定的任务或配置')
+                candidate=job['started_at']+job['max_duration_s']
+                deadline=min(deadline,candidate) if deadline is not None else candidate
+            elif deadline is None and self.config.run_budget.max_duration_s is not None:
+                started=min((e['ts'] for e in self.state.events if isinstance(e.get('ts'),(float,int))),default=time.time())
+                deadline=started+self.config.run_budget.max_duration_s
+            if deadline is not None:self.state.control['cli_deadline']=deadline
+            trackers=self.state.autonomy.setdefault('cli_attempts',{})
+            for spec in self.config.stages:
+                if getattr(self.adapters.get(spec.adapter),'channel','').startswith('cli_') and spec.name not in trackers:
+                    calls=sum(e['kind']=='model_call_started' and e.get('stage')==spec.name for e in self.state.events)
+                    cycle=str(self.state.invalidate_nonce.get(spec.name,0))
+                    trackers[spec.name]={'total':calls,'cycles':{cycle:calls}}
+            self.state.save()
+        if self.config.autonomy.enabled or has_cli:
             self._recover_pending_calls()
         # 启动扫描 interrupted（评审 B4）
         interrupted = self.state.scan_interrupted()
@@ -113,6 +140,9 @@ class Engine(AutonomousControls):
             artifacts.ensure_repo(self.config.task_workdir)
             if self.config.autonomy.enabled and not loaded:
                 self._bootstrap_declared_files()
+            if not loaded:
+                self.state.control['project_baseline'] = artifacts.head_sha(self.config.task_workdir)
+                self.state.save()
 
     def _read_prompt(self, spec: StageSpec) -> str:
         p = Path(spec.prompt)
@@ -156,7 +186,8 @@ class Engine(AutonomousControls):
             # 返工轮里会误判"实现代码缺失"）；其他阶段给末次变更摘要即可。
             if up.kind == "code" and st.commit_sha and self._git_ready:
                 if current_kind == "review":
-                    diff = artifacts.cumulative_diff(self.config.task_workdir, st.commit_sha)
+                    diff = artifacts.cumulative_diff(self.config.task_workdir, st.commit_sha,
+                                                      base_sha=self.state.control.get('project_baseline'))
                     label = "代码全量（相对项目基线累积）"
                 else:
                     diff = artifacts.diff_summary(self.config.task_workdir, st.commit_sha)
@@ -200,21 +231,78 @@ class Engine(AutonomousControls):
         # 模板未含 {feedback} 占位符但有反馈时，追加到末尾，确保反馈不被丢弃
         if feedback and "{feedback}" not in template:
             rendered += "\n\n" + feedback
-        if spec.kind == 'code' and spec.context_files:
-            rendered += '\n\n当前文件原文（仅用于构造精确补丁）：\n' + self._source_context(spec)
+        cli = getattr(self.adapters.get(spec.adapter), 'channel', '').startswith('cli_')
+        if spec.context_files and (spec.kind == 'code' or cli):
+            label = '当前声明文件原文（只读上下文）' if cli else '当前文件原文（仅用于构造精确补丁）'
+            rendered += '\n\n' + label + '：\n' + self._source_context(spec)
         if self.config.autonomy.enabled:
             if spec.kind == 'code':
                 rendered += (f'\n\n执行约束：本轮最多修改 {self.config.autonomy.repair_batch_size} 个文件。'
-                             f'只可修改 {self.config.autonomy.allowed_files}；不要修改测试或其他文件。'
-                             '优先修复失败证据中最靠前的一类问题，输出 # patch: 路径和 edits JSON；'
+                             f'只可修改 {self.config.autonomy.allowed_files}；不要修改测试或其他文件。')
+                rendered += ('直接修改当前任务工作区的允许文件，必须产生真实文件变更；最后简述实际修改。'
+                             if cli else '优先修复失败证据中最靠前的一类问题，输出 # patch: 路径和 edits JSON；'
                              '目标原文必须唯一匹配，不要输出解释。')
             elif spec.kind == 'review':
                 rendered += ('\n\n请先给出唯一的 review_verdict.json 结论（verdict 与 issues），'
                              '随后至多 200 字说明，不输出分析过程。')
         return rendered
 
+    def _rework_file_inventory(self, max_files: int = 160, max_chars: int = 6000,
+                               max_directories: int = 256) -> str:
+        """有上限的相对文件清单，不读取正文，不跟随目录链接或进入状态/依赖树。"""
+        root = self.config.task_workdir.resolve()
+        state_root = self.config.state_dir.resolve()
+        excluded = state_root if state_root != root else state_root / 'runs'
+        lines, count, size, visited, truncated = [], 0, 0, 0, False
+        def ignore_error(error):
+            nonlocal truncated
+            truncated = True
+        for directory, directories, files in os.walk(root, followlinks=False, onerror=ignore_error):
+            visited += 1
+            if visited > max_directories:
+                truncated = True
+                break
+            kept = []
+            for name in sorted(directories):
+                if name.startswith('.') or name in artifacts.SKIP_DIRS:
+                    continue
+                path = Path(directory) / name
+                try:
+                    resolved = path.resolve()
+                    if (path.is_symlink() or resolved != path.absolute() or not resolved.is_relative_to(root)
+                            or (excluded.is_relative_to(root) and resolved.is_relative_to(excluded))):
+                        continue
+                except OSError:
+                    truncated = True
+                    continue
+                kept.append(name)
+            directories[:] = kept
+            for name in sorted(files):
+                if name.startswith('.'):
+                    continue
+                path = Path(directory) / name
+                rel = path.relative_to(root).as_posix()
+                try:
+                    if path.is_symlink() or not relative_target(root, rel).is_file():
+                        continue
+                except (OSError, WriteRootViolation):
+                    continue
+                line = '- ' + json.dumps(rel, ensure_ascii=False)
+                if count >= max_files or size + len(line) + 1 > max_chars:
+                    truncated = True
+                    break
+                lines.append(line)
+                count += 1
+                size += len(line) + 1
+            if truncated:
+                break
+        detail = '\n'.join(lines) if lines else '（未列出普通文件；不代表工作区为空）'
+        if truncated:
+            detail += '\n（清单已截断或存在不可读目录；未列出不代表文件不存在。）'
+        return '### 当前工作区相对文件清单（只供定位，不授予写权限）\n' + detail
+
     def _rework_context(self, feedback: str, max_file_bytes: int = 8000) -> str:
-        """返工上下文：只取反馈里点名的文件内容（反引号或 文件: 形式）。"""
+        """轻量文件清单加被点名文件正文，保持结构可见并控制正文范围。"""
         import re
         names: list[str] = []
         for m in re.finditer(r"`([^`]+)`", feedback):
@@ -244,8 +332,10 @@ class Engine(AutonomousControls):
                 text = text[:max_file_bytes] + f"\n...（截断，原 {len(text)} 字符）"
             parts.append(f"### 待修复文件: {rel}\n```\n{text}\n```")
         if not parts:
-            return "（反馈未点名可读取的文件，请只按反馈条目定位并修复）"
-        return "\n\n".join(parts)
+            parts.append('（反馈未点名可读取的文件，请按清单与反馈定位，勿猜测缺失正文。）')
+        guidance = ('先在现有实现上修复，避免另建重复实现。只有确认旧文件已被替代且位于本轮允许修改范围内时才清理；'
+                    '范围外旧文件只报告，不擅自删除测试或其他文件。')
+        return self._rework_file_inventory() + '\n\n' + guidance + '\n\n' + '\n\n'.join(parts)
 
     def _upstream_hashes(self, index: int) -> list[str]:
         # 只用上游 outputs_hash（纯内容哈希，稳定）；commit_sha 含提交时间戳，
@@ -257,7 +347,7 @@ class Engine(AutonomousControls):
                 hashes.append(st.outputs_hash)
         return hashes
 
-    def _inputs_hash(self, spec: StageSpec, index: int) -> str:
+    def _inputs_hash(self, spec: StageSpec, index: int, prompt_override: str | None = None) -> str:
         # 渲染结果计入 inputs_hash（评审 B1）：上游产物变了 => 指纹变 => 下游 stale。
         config_keys = dict(spec.config_keys)
         adapter = self.config.adapters.get(spec.adapter)
@@ -270,6 +360,9 @@ class Engine(AutonomousControls):
             "feedback_to": spec.feedback_to, "max_rounds": spec.max_rounds,
             "allow_yolo": self.config.allow_yolo,
         }
+        fingerprint = getattr(self.adapters.get(spec.adapter), 'input_fingerprint', None)
+        if callable(fingerprint):
+            config_keys['__cli_profile__'] = fingerprint()
         # L2：反馈返工使相关阶段失效。invalidate_nonce 仅在反馈触发返工时递增，
         # 执行中与续跑时取值相同（已持久化），故指纹稳定；递增后旧 attempt 不再被采纳。
         nonce = self.state.invalidate_nonce.get(spec.name, 0)
@@ -278,14 +371,19 @@ class Engine(AutonomousControls):
         if spec.context_files or spec.precheck_cmd:
             config_keys['__sources__'] = spec.context_files
             config_keys['__precheck__'] = spec.precheck_cmd
+        if spec.kind == 'code' and self._feedback(spec.name):
+            config_keys['__rework_context_protocol__'] = 2
         logical = None
         if self.config.autonomy.enabled and spec.kind != 'test':
-            config_keys['__autonomy__'] = asdict(self.config.autonomy)
+            policy=asdict(self.config.autonomy)
+            if not getattr(self.adapters.get(spec.adapter),'channel','').startswith('cli_'):
+                policy={k:v for k,v in policy.items() if not k.startswith('cli_')}
+            config_keys['__autonomy__'] = policy
             logical = compute_inputs_hash(self._read_prompt(spec) + self.task + self._feedback(spec.name)
                                           + self.state.autonomy.get('recovery_hints', {}).get(spec.name, ''),
                                           self._upstream_hashes(index), config_keys)
             saved = self.state.autonomy.setdefault('execution_inputs', {}).get(spec.name)
-            if saved and saved['logical_hash'] == logical:
+            if prompt_override is None and saved and saved['logical_hash'] == logical:
                 self._prompts[spec.name] = saved['prompt']
                 return saved['inputs_hash']
         if spec.kind == "test":
@@ -295,7 +393,7 @@ class Engine(AutonomousControls):
                 config_keys["__workspace__"] = artifacts.workspace_hash(
                     self.config.task_workdir, exclude=self.config.state_dir)
         else:
-            prompt = self._render_prompt(spec, index)
+            prompt = prompt_override if prompt_override is not None else self._render_prompt(spec, index)
             self._prompts[spec.name] = prompt
         inputs_hash = compute_inputs_hash(prompt, self._upstream_hashes(index), config_keys)
         if logical:
@@ -306,7 +404,7 @@ class Engine(AutonomousControls):
     def _account_usage(self, result: Result, stage: str = "", call_id: str | None = None) -> None:
         """调用一旦发生就入账，失败和超限也算。续跑才能看见已经花掉的用量。"""
         unknown = self._settle_call(result, stage, call_id) if call_id else False
-        tokens = 0 if unknown else result.usage.get('tokens') or 0
+        tokens = result.usage.get('known_tokens',0) if unknown else result.usage.get('tokens') or 0
         self.state.usage_total["tokens"] += tokens
         self.state.usage_total["duration_s"] += result.usage.get("duration_s") or 0.0
         if stage:
@@ -347,6 +445,10 @@ class Engine(AutonomousControls):
             if max_duration is not None and used.get("duration_s", 0) >= max_duration:
                 raise BudgetExceeded(f"{label} 时长预算耗尽，调用前拦截")
         remaining = [float(spec.timeout_s)]
+        deadline=self.state.control.get('cli_deadline')
+        if deadline is not None:
+            if deadline<=time.time():raise BudgetExceeded('原 CLI 运行有效期已过，不能通过续跑延长')
+            remaining.append(deadline-time.time())
         for used, limit in ((run, self.config.run_budget.max_duration_s),
                             (stage, spec.max_duration_s)):
             if limit is not None:
@@ -511,6 +613,7 @@ class Engine(AutonomousControls):
                                  for s in reversed(self.config.stages[:index])
                                  if self.state.stage(s.name).commit_sha), None)
             worktree = None
+            setup_started = time.monotonic()
             try:
                 if upstream_sha and self._git_ready:
                     worktree = self.state.stage_dir(spec.name) / "worktree" / str(n)
@@ -519,7 +622,18 @@ class Engine(AutonomousControls):
                     workdir = worktree
                 record = run_test_cmd(spec.test_cmd, workdir, timeout_s=timeout)
             except artifacts.GitError as error:
-                return self._reject_budget(spec, error)
+                message = '隔离测试工作区创建失败，未执行测试：' + str(error)
+                record = {'ok': False, 'exit_code': -1, 'cmd': list(spec.test_cmd),
+                          'duration_s': time.monotonic() - setup_started, 'output': message,
+                          'error': message, 'failure_ids': ['worktree_creation_failed'], 'truncated': False}
+                write_record(record, attempt_dir)
+                from .evidence import seal
+                outputs_hash = seal(attempt_dir)
+                self._account_usage(Result(ok=False, usage={'duration_s': record['duration_s']}), spec.name)
+                self.state.log_event('worktree_error', spec.name, n=n, reason=message)
+                self.state.commit_success(spec.name, n, attempt_dir, inputs_hash, outputs_hash,
+                                          None, None, verdict='fail', status=StageStatus.FAILED, error=message)
+                return StageStatus.FAILED
             finally:
                 self._cleanup_worktree(worktree)
             rec_path, out_path = write_record(record, attempt_dir)
@@ -598,7 +712,15 @@ class Engine(AutonomousControls):
         adapter = self.adapters[spec.adapter]
         base_sha = self._stage_base_sha(index, spec.kind)
         last_error = ""
+        cli=getattr(adapter,'channel','').startswith('cli_')
         for attempt in range(1, spec.max_attempts + 1):
+            if cli:
+                cycle=str(self.state.invalidate_nonce.get(spec.name,0))
+                used=self.state.autonomy.get('cli_attempts',{}).get(spec.name,{}).get('cycles',{}).get(cycle,0)
+                if used>=spec.max_attempts:
+                    last_error='本轮 CLI 重试次数已耗尽，续跑不重置调用次数'
+                    self.state.log_event('cli_retry_exhausted',spec.name,used=used,limit=spec.max_attempts)
+                    break
             if self.control:
                 self.control.checkpoint(self)
             n, attempt_dir = self.state.new_attempt_dir(spec.name)
@@ -623,11 +745,32 @@ class Engine(AutonomousControls):
             else:
                 workdir = self.config.task_workdir
 
+            restored=None
+            if cli and spec.kind=='code':
+                try:
+                    from .recovery import restore
+                    restored=restore(self,spec,worktree,base_sha,n,attempt_dir)
+                except (OSError,ValueError,RuntimeError) as error:
+                    st.status=StageStatus.FAILED
+                    st.error='恢复点校验失败：'+str(error)
+                    self.state.log_event('recovery_rejected',spec.name,n=n,reason=st.error)
+                    self.state.save()
+                    self._cleanup_worktree(worktree)
+                    return StageStatus.FAILED
+
             if attempt > 1 and self.config.autonomy.enabled:
                 inputs_hash = self._inputs_hash(spec, index)
             prompt = self._prompts.get(spec.name)
             if prompt is None:
                 prompt = self._render_prompt(spec, index)
+            if restored:
+                bodies=[]
+                for name in restored['files']:
+                    target=relative_target(workdir,name)
+                    body=target.read_text(encoding='utf8',errors='replace')[:8000] if target.is_file() else '（文件在恢复点中已删除）'
+                    bodies.append(f'<file path="{name}">\n{body}\n</file>')
+                prompt+='\n\n已验证恢复点已应用；以下为当前隔离工作区原文，优先于旧基线，不要重复覆盖已完成修改：\n'+'\n'.join(bodies)
+                inputs_hash=self._inputs_hash(spec,index,prompt_override=prompt)
             try:
                 timeout = self._before_call(spec, prompt)
             except BudgetExceeded as error:
@@ -643,8 +786,12 @@ class Engine(AutonomousControls):
                 allow_yolo=self.config.allow_yolo, timeout_s=timeout,
                 kind=spec.kind, attempt_dir=attempt_dir,
                 feedback=self.state.feedback.get(spec.name, ""),
+                base_commit=base_sha,
+                idle_timeout_s=self.config.autonomy.cli_idle_timeout_s,
+                max_tool_errors=self.config.autonomy.cli_max_tool_errors,
+                max_repeated_reads=self.config.autonomy.cli_max_repeated_reads,
             )
-            if self.config.autonomy.enabled:
+            if self.config.autonomy.enabled or cli:
                 try:
                     ctx.output_tokens, ctx.token_reservation = self._call_limits(spec, adapter, prompt)
                 except BudgetExceeded as error:
@@ -681,13 +828,18 @@ class Engine(AutonomousControls):
             # G2：执行前对监视域拍快照，执行后对比，捕获根外写入
             before_snap = guard.snapshot()
             call_id = self._reserve_call(spec, n, ctx)
+            ctx.call_id=call_id or f'{spec.name}/{n}'
+            limits=[maximum-used.get('tokens',0)+ctx.token_reservation
+                    for used,maximum in ((self.state.usage_total,self.config.run_budget.max_tokens),
+                                          (self.state.stage_usage.get(spec.name,{}),spec.max_tokens)) if maximum is not None]
+            ctx.remaining_tokens=min(limits) if limits else None
             t0 = time.monotonic()
             try:
                 result = adapter.run(prompt, workdir, ctx)
             except Exception as e:  # 适配器崩溃
                 result = Result(ok=False, exit_code=-1, error_kind=ErrorKind.CRASH,
                                 stderr=str(e), channel=adapter.channel)
-                if self.config.autonomy.enabled:
+                if self.config.autonomy.enabled or cli:
                     result.usage['usage_unknown'] = True
             duration = time.monotonic() - t0
             result.usage.setdefault("duration_s", duration)
@@ -733,9 +885,15 @@ class Engine(AutonomousControls):
             # 预算（评审 S3/M3）：先入账再判断，超限的这次也算进用量
             self._account_usage(result, spec.name, call_id)
             self._save_attempt_trace(spec, attempt_dir, prompt, result)
+            if cli and spec.kind=='code' and not result.ok:
+                if not self._finish_cli_worktree(spec,worktree,base_sha,n,attempt_dir,result.error_kind.value):
+                    return StageStatus.FAILED
             try:
                 self._check_budget(spec, result)
             except BudgetExceeded as e:
+                if cli and spec.kind=='code' and result.ok:
+                    if not self._finish_cli_worktree(spec,worktree,base_sha,n,attempt_dir,'budget_exceeded'):
+                        return StageStatus.FAILED
                 st.status = StageStatus.FAILED
                 st.error = str(e)
                 self.state.log_event("rejected", spec.name, reason=str(e))
@@ -763,11 +921,17 @@ class Engine(AutonomousControls):
                 self.state.log_event("attempt_fail", spec.name, n=n,
                                      error_kind=result.error_kind.value)
                 self.state.save()
+                if cli and spec.kind=='code':
+                    record=self.state.control.get('cli_worktrees',{}).get(ctx.call_id,{})
+                    if record.get('status')=='active':
+                        if not self._finish_cli_worktree(spec,worktree,base_sha,n,attempt_dir,result.error_kind.value):
+                            return StageStatus.FAILED
                 self._cleanup_worktree(worktree)
                 if self.config.autonomy.enabled:
                     if result.error_kind in (ErrorKind.AUTH, ErrorKind.REJECTED):
                         break
                     self._recovery_hint(spec, last_error)
+                if cli and result.parse_unknown:break
                 # 限流退避（评审 M6）：429/5xx 指数退避后再试
                 if result.error_kind == ErrorKind.RATE_LIMIT and attempt < spec.max_attempts:
                     time.sleep(min(2 ** attempt, 30))
@@ -780,9 +944,16 @@ class Engine(AutonomousControls):
                 last_error = str(e)
                 self.state.log_event("attempt_fail", spec.name, n=n, error_kind="archive")
                 self.state.save()
+                if cli and spec.kind=='code':
+                    if not self._finish_cli_worktree(spec,worktree,base_sha,n,attempt_dir,'archive_failed'):
+                        return StageStatus.FAILED
                 self._cleanup_worktree(worktree)
                 continue
             self.state.log_event("attempt_done", spec.name, n=n, outputs_hash=outputs_hash)
+            if cli and spec.kind=='code':
+                self._finish_cli_worktree(spec,worktree,base_sha,n,attempt_dir,'archived',archived=True)
+                recovery=self.state.control.get('recoveries',{}).get(spec.name)
+                if recovery:recovery['status']='consumed'
             self._cleanup_worktree(worktree)
 
             # 审查先定结论，再决定这条记录能不能被续跑采纳。
@@ -1119,6 +1290,8 @@ class Engine(AutonomousControls):
         """仅修改内存，便于将指令收据和失效计数原子提交。"""
         idx = self.config.stage_index(stage_name)
         for s in self.config.stages[idx:]:
+            recovery=self.state.control.get('recoveries',{}).get(s.name)
+            if recovery:recovery['status']='consumed'
             st = self.state.stage(s.name)
             st.status = StageStatus.PENDING
             st.current_attempt = None

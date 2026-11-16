@@ -26,7 +26,8 @@ def propose(state_dir: Path, config_path: Path, last: int = 20) -> dict:
             data = json.loads(path.read_text(encoding="utf-8"))
             if (isinstance(data, dict) and data.get("config_hash") == config_hash
                     and data.get('unknown_calls', 0) == 0):
-                records.append(data)
+                if data.get('human_interventions', 0) == 0:
+                    records.append(data)
         except (OSError, ValueError):
             continue
     records.sort(key=lambda r: r.get("created_at", 0), reverse=True)

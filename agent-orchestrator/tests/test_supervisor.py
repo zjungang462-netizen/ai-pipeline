@@ -44,9 +44,9 @@ test_cmd=['''+json.dumps(sys.executable.replace('\\','/'))+''',"-c","assert 1+1=
     def test_done_job_still_validates_its_artifacts(self):
         self.assertEqual(supervise(self.file,'r','verify')['status'],'done')
         directory=self.root/'.s/runs/r/stages/verify/attempts/1'
-        (directory/'manifest.json').write_text('[]')
+        (directory/'manifest.json').write_text('[]', encoding="utf-8")
         self.assertEqual(supervise(self.file,'r','verify')['status'],'done')
-        state=json.loads((self.root/'.s/runs/r/state.json').read_text())
+        state=json.loads((self.root/'.s/runs/r/state.json').read_text(encoding="utf-8"))
         self.assertEqual(state['stages']['verify']['current_attempt'],2)
     def test_restart_exhaustion_is_terminal(self):
         failed=mock.Mock();failed.wait.return_value=70

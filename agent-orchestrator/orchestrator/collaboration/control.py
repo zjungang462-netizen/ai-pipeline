@@ -2,8 +2,26 @@
 from __future__ import annotations
 
 import time
+from contextlib import contextmanager
+from pathlib import Path
 
 from .storage import Store
+from ..state import StageLock
+
+
+@contextmanager
+def command_gate(directory):
+    """指令准入与终态发布串行化；只覆盖交接，不阻塞正在执行的阶段。"""
+    lock=StageLock(Path(directory)/'.control.lock')
+    deadline=time.monotonic()+10
+    while not lock.acquire():
+        if time.monotonic()>=deadline:
+            raise RuntimeError('控制指令交接繁忙，请稍后重试')
+        time.sleep(.02)
+    try:
+        yield
+    finally:
+        lock.release()
 
 
 class ControlSignal(Exception):
@@ -16,6 +34,22 @@ class Control:
     def __init__(self, database, run_key):
         self.store = Store(database)
         self.run_key = run_key
+
+    def pause_after_worker(self, state):
+        """成功 worker 已退出后的最后检查点；调用方持有控制门闩和运行写锁。"""
+        for command in self.store.commands(self.run_key):
+            if command['kind']!='pause':continue
+            receipts=state.control.setdefault('receipts',{})
+            if command['id'] in receipts:
+                receipt=receipts[command['id']]
+            else:
+                state.control['paused']=True
+                receipt={'status':'applied','result':{'lifecycle':'paused','checkpoint':True},'at':time.time()}
+                receipts[command['id']]=receipt
+                state.log_event('control_receipt','',command_id=command['id'],intent='pause',status='applied')
+                state.save()
+            self.store.finish(command['id'],receipt['status'],receipt['result'])
+        return state.control.get('paused',False)
 
     def checkpoint(self, engine):
         state = engine.state

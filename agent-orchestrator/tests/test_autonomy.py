@@ -31,7 +31,7 @@ class Writer(Adapter):
             return Result(ok=False,error_kind=ErrorKind.TIMEOUT,stderr='temporary',usage={'usage_unknown':True})
         if ctx.kind=='review':
             path=ctx.attempt_dir/'review_verdict.json';path.write_text('{"verdict":"pass","issues":[]}',encoding='utf8')
-            report=ctx.attempt_dir/'review.md';report.write_text('pass')
+            report=ctx.attempt_dir/'review.md';report.write_text('pass', encoding="utf-8")
             return Result(ok=True,text='pass',report_files=[report],verdict_file=path,usage={'tokens':10})
         name='tests/test_app.py' if self.wrong else ('a.py' if self.calls%2 else 'b.py')
         path=workdir/name;path.parent.mkdir(exist_ok=True)
@@ -43,7 +43,7 @@ class AutonomyTests(unittest.TestCase):
     def setUp(self):
         self.tmp=tempfile.TemporaryDirectory();self.addCleanup(self.tmp.cleanup)
         self.root=Path(self.tmp.name);self.ws=self.root/'ws';self.ws.mkdir()
-        (self.ws/'a.py').write_text('VALUE = 0\n');(self.ws/'b.py').write_text('VALUE = 0\n')
+        (self.ws/'a.py').write_text('VALUE = 0\n', encoding="utf-8");(self.ws/'b.py').write_text('VALUE = 0\n', encoding="utf-8")
         (self.ws/'tests').mkdir()
         (self.ws/'tests/test_app.py').write_text('''import unittest
 from a import VALUE as A
@@ -95,7 +95,7 @@ class Check(unittest.TestCase):
         class Broken(Writer):
             def run(self,prompt,workdir,ctx):
                 self.calls+=1
-                path=workdir/'a.py';path.write_text(f'VALUE = {self.calls+2}\n')
+                path=workdir/'a.py';path.write_text(f'VALUE = {self.calls+2}\n', encoding="utf-8")
                 return Result(ok=True,changed_files=[str(path)],usage={'tokens':10})
         engine=Engine(cfg,{'api':Broken()},'r','fix')
         self.assertEqual(engine.run()['testing'],'failed')
@@ -133,7 +133,7 @@ class Check(unittest.TestCase):
             def run(self,prompt,workdir,ctx):
                 if ctx.kind=='review':
                     self.calls+=1
-                    path=ctx.attempt_dir/'report.md';path.write_text('no conclusion')
+                    path=ctx.attempt_dir/'report.md';path.write_text('no conclusion', encoding="utf-8")
                     return Result(ok=True,report_files=[path],text='no conclusion',usage={'tokens':10})
                 return super().run(prompt,workdir,ctx)
         cfg=self.config();ad=Unparsed();engine=Engine(cfg,{'api':ad},'r','fix')

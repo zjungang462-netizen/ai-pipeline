@@ -168,9 +168,10 @@ type = "fake"
         with mock.patch("orchestrator.cli.load_config", return_value=cfg), \
                 mock.patch("orchestrator.engine.artifacts.git_available", return_value=False), \
                 mock.patch("orchestrator.adapters.cli_base.preflight_cli", return_value=version), \
-                mock.patch("orchestrator.adapters.cli_base.subprocess.run", return_value=response), \
+                mock.patch("orchestrator.adapters.cli_base.run_cli_process", return_value=response), \
                 contextlib.redirect_stdout(io.StringIO()):
-            self.assertEqual(main(["run", "unused.toml", "--run-id", "r", "--task", "task"]), 0)
+            # design 等待审批 => 退出码 11（未完成）；approve 后全部完成 => 0
+            self.assertEqual(main(["run", "unused.toml", "--run-id", "r", "--task", "task"]), 11)
             self.assertEqual(main(["approve", "unused.toml", "--run-id", "r", "--stage", "design"]), 0)
 
 

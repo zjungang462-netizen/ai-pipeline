@@ -66,7 +66,7 @@ type="fake"
         self.assertEqual(select_policy_config(self.file),self.file)
     def test_tampered_candidate_is_never_selected(self):
         self.samples(self.file);first=policy_tune(self.file);candidate=Path(first['config_path'])
-        candidate.write_text(candidate.read_text()+'\n# tampered\n')
+        candidate.write_text(candidate.read_text(encoding="utf-8")+'\n# tampered\n', encoding="utf-8")
         self.assertEqual(select_policy_config(self.file),self.file)
     def test_policy_chain_keeps_parent_lookup(self):
         self.samples(self.file);first=policy_tune(self.file);candidate=Path(first['config_path'])
@@ -75,7 +75,7 @@ type="fake"
         self.assertEqual(select_policy_config(self.file),Path(second['config_path']))
     def test_changed_original_configuration_does_not_auto_apply(self):
         self.samples(self.file);expected=sha256_file(self.file)
-        self.file.write_text(self.file.read_text()+'\n# changed\n')
+        self.file.write_text(self.file.read_text(encoding="utf-8")+'\n# changed\n', encoding="utf-8")
         with self.assertRaises(ValueError):policy_tune(self.file,expected)
     def test_rolled_back_strategy_is_not_automatically_reapplied(self):
         self.samples(self.file);first=policy_tune(self.file)
@@ -87,7 +87,7 @@ type="fake"
     def test_malformed_policy_pointer_is_rejected_as_configuration_error(self):
         self.samples(self.file);policy_tune(self.file)
         for pointer in (self.state/'tuning').glob('next-*.json'):
-            pointer.write_text('[]')
+            pointer.write_text('[]', encoding="utf-8")
         with self.assertRaises(ValueError):select_policy_config(self.file)
 
 if __name__=='__main__':unittest.main()
