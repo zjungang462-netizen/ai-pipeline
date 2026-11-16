@@ -33,15 +33,11 @@ from .autonomy import AutonomousControls
 _UPSTREAM_REPORT_LIMIT = 20000
 
 
-class BudgetExceeded(RuntimeError):
-    pass
+from .budget import BudgetPolicy, BudgetExceeded
+from .archive import ArchiveOperations, StageArchiveError
 
 
-class StageArchiveError(RuntimeError):
-    """产物归档/合并失败 => 阶段级失败，可重试，不中断整轮。"""
-
-
-class Engine(AutonomousControls):
+class Engine(BudgetPolicy, ArchiveOperations, AutonomousControls):
     def __init__(self, config: Config, adapters: dict[str, Adapter],
                  run_id: str, task: str,
                  adapter_factory: Callable[[str], Adapter] | None = None,
@@ -438,66 +434,6 @@ class Engine(AutonomousControls):
                 'logical_hash': logical, 'inputs_hash': inputs_hash, 'prompt': prompt}
         return inputs_hash
 
-    def _account_usage(self, result: Result, stage: str = "", call_id: str | None = None) -> None:
-        """调用一旦发生就入账，失败和超限也算。续跑才能看见已经花掉的用量。"""
-        unknown = self._settle_call(result, stage, call_id) if call_id else False
-        tokens = result.usage.get('known_tokens',0) if unknown else result.usage.get('tokens') or 0
-        self.state.usage_total["tokens"] += tokens
-        self.state.usage_total["duration_s"] += result.usage.get("duration_s") or 0.0
-        if stage:
-            used = self.state.stage_usage.setdefault(stage, {"tokens": 0, "duration_s": 0.0})
-            used['tokens'] += tokens
-            used['duration_s'] += result.usage.get('duration_s') or 0
-        self.state.save()
-
-    def _check_budget(self, spec: StageSpec, result: Result) -> None:
-        """用量已经计入 usage_total。阶段上限仍按这一次调用判断。"""
-        b = self.config.run_budget
-        used = self.state.usage_total
-        stage_used = self.state.stage_usage.get(spec.name, result.usage)
-        tokens = stage_used.get("tokens") or 0
-        duration = stage_used.get("duration_s") or 0.0
-        if b.max_tokens is not None and used["tokens"] > b.max_tokens:
-            raise BudgetExceeded(f"run 总 token 超限: {used['tokens']} > {b.max_tokens}")
-        if spec.max_tokens is not None and tokens > spec.max_tokens:
-            raise BudgetExceeded(f"阶段 {spec.name} token 超限: {tokens} > {spec.max_tokens}")
-        # 时长预算（评审 M3）
-        if b.max_duration_s is not None and used["duration_s"] > b.max_duration_s:
-            raise BudgetExceeded(
-                f"run 总时长超限: {used['duration_s']:.0f}s > {b.max_duration_s}s")
-        if spec.max_duration_s is not None and duration > spec.max_duration_s:
-            raise BudgetExceeded(
-                f"阶段 {spec.name} 时长超限: {duration:.0f}s > {spec.max_duration_s}s")
-
-    def _before_call(self, spec: StageSpec, prompt: str = "") -> float:
-        estimate = max(1, len(prompt) // 3) if spec.kind != "test" else 0
-        run = self.state.usage_total
-        stage = self.state.stage_usage.get(spec.name, {})
-        for label, used, max_tokens, max_duration in (
-                ("run", run, self.config.run_budget.max_tokens,
-                 self.config.run_budget.max_duration_s),
-                (f"阶段 {spec.name}", stage, spec.max_tokens, spec.max_duration_s)):
-            if max_tokens is not None and used.get("tokens", 0) + estimate > max_tokens:
-                raise BudgetExceeded(f"{label} token 预算不足，调用前拦截")
-            if max_duration is not None and used.get("duration_s", 0) >= max_duration:
-                raise BudgetExceeded(f"{label} 时长预算耗尽，调用前拦截")
-        remaining = [float(spec.timeout_s)]
-        deadline=self.state.control.get('cli_deadline')
-        if deadline is not None:
-            if deadline<=time.time():raise BudgetExceeded('原 CLI 运行有效期已过，不能通过续跑延长')
-            remaining.append(deadline-time.time())
-        for used, limit in ((run, self.config.run_budget.max_duration_s),
-                            (stage, spec.max_duration_s)):
-            if limit is not None:
-                remaining.append(limit - used.get("duration_s", 0))
-        return min(remaining)
-
-    def _reject_budget(self, spec: StageSpec, error: Exception) -> StageStatus:
-        st = self.state.stage(spec.name)
-        st.status, st.error = StageStatus.FAILED, str(error)
-        self.state.log_event("rejected", spec.name, reason=str(error))
-        self.state.save()
-        return StageStatus.FAILED
 
     # ---- 单阶段执行 ----
     def _run_stage(self, spec: StageSpec, index: int) -> StageStatus:
@@ -737,39 +673,6 @@ class Engine(AutonomousControls):
         finally:
             lock.release()
 
-    def _record_test_artifacts(self, spec: StageSpec, before: dict[str, str]) -> None:
-        """把测试命令新建/改写的文件记入 state.test_artifacts（有上限）。"""
-        after = artifacts.workspace_file_hashes(
-            self.config.task_workdir, exclude=self.config.state_dir)
-        changed = sorted({rel for rel, digest in after.items()
-                          if before.get(rel) != digest})
-        known = set(self.state.test_artifacts.get(spec.name, []))
-        merged = sorted(known | set(changed))
-        limit = 500
-        if len(merged) > limit:
-            merged = merged[:limit]
-            self.state.log_event("test_artifacts_truncated", spec.name,
-                                 total=len(known | set(changed)))
-        self.state.test_artifacts[spec.name] = merged
-        if changed:
-            self.state.log_event("test_artifacts", spec.name, files=changed[:20],
-                                 count=len(changed))
-        self.state.save()
-
-    def _stage_base_sha(self, index: int, kind: str = "code") -> str | None:
-        """代码阶段的基线 = 最近上游代码阶段的 commit（评审 B3：基于上游 commit）。
-
-        非代码阶段不需要基线，也不触碰 git（纯报告/审查流程可能没有仓库）。
-        """
-        if not self._git_ready or kind != "code":
-            return None
-        for up in reversed(self.config.stages[:index]):
-            sha = self.state.stage(up.name).commit_sha
-            if sha:
-                return sha
-        if not self.config.task_workdir.is_dir():
-            return None
-        return artifacts.head_sha(self.config.task_workdir)
 
     def _run_attempts(self, spec: StageSpec, index: int, inputs_hash: str) -> StageStatus:
         st = self.state.stage(spec.name)
@@ -1234,72 +1137,6 @@ class Engine(AutonomousControls):
         self.state.save()
         return StageStatus.REVIEW_FEEDBACK
 
-    def _cleanup_worktree(self, worktree: Path | None) -> None:
-        if worktree is not None and self._git_ready:
-            if not artifacts.remove_worktree(self.config.task_workdir, worktree):
-                self.state.log_event("worktree_cleanup_failed", "",
-                                     path=str(worktree))
-                self.state.save()
-
-    def _archive(self, spec: StageSpec, result: Result, attempt_dir: Path,
-                 base_sha: str | None, worktree: Path | None = None) -> str:
-        """归档产物，计算 outputs_hash。
-
-        outputs_hash 只基于产物**内容**（文件内容哈希 + 文本），不含 commit SHA/
-        路径/时间戳，保证续跑时内容相同则哈希相同（评审 S1）。commit SHA 单独
-        存为产物指针（代码类产物 = commit/branch，评审 B3）。
-        """
-        import shutil
-        from .state import sha256_file
-        commit_sha = None
-        content_hashes: dict[str, str] = {}
-        if spec.kind == "code" and self._git_ready:
-            repo = self.config.task_workdir
-            # 按变更清单提交（评审 B4），不用 git add -A 全仓
-            files = result.changed_files
-            if worktree is not None:
-                wt_sha = artifacts.commit_files(worktree, files, f"{spec.name}: {self.task[:40]}")
-                branch = artifacts._git(["rev-parse", "--abbrev-ref", "HEAD"], worktree).stdout.strip()
-                if wt_sha is None and artifacts.head_sha(worktree) == base_sha:
-                    raise StageArchiveError("代码未发生变化，无法视为一次修复")
-                try:
-                    commit_sha = artifacts.merge_branch(repo, branch)
-                except artifacts.GitError as e:
-                    # 快进合并失败（主线已分叉）=> 本阶段失败，不中断整轮
-                    raise StageArchiveError(f"合并 {branch} 失败: {e}") from e
-                result.branch = branch
-            else:
-                commit_sha = artifacts.commit_files(repo, files, f"{spec.name}: {self.task[:40]}")
-                if commit_sha is None:
-                    raise StageArchiveError("代码未发生变化，无法视为一次修复")
-                result.branch = f"stage/{spec.name}"
-            result.commit_sha = commit_sha
-            # 代码产物内容哈希：基于主线该 commit 的树对象（与基线/时间戳无关）
-            content_hashes["__tree__"] = artifacts.tree_content_hash(repo, commit_sha)
-        # 报告文件复制进 attempt 目录留证，并按内容计哈希
-        for rf in result.report_files:
-            rf = Path(rf)
-            if rf.is_file():
-                dest = attempt_dir / rf.name
-                if rf.resolve() != dest.resolve():
-                    shutil.copy2(rf, dest)
-                content_hashes[rf.name] = sha256_file(dest)
-        # 原始输出留证
-        (attempt_dir / "stdout.txt").write_text(result.stdout or result.text, encoding="utf-8")
-        (attempt_dir / "final_text.txt").write_text(result.text, encoding="utf-8")
-        if spec.kind == "review":
-            # 仅接收本次调用产生的结论，并固定归档到本 attempt。
-            sources = [result.verdict_file, attempt_dir / "review_verdict.json",
-                       self.state.run_dir / f"{spec.name}_review_verdict.json",
-                       self.state.run_dir / "review_verdict.json"]
-            for source in sources:
-                if source is not None and Path(source).is_file():
-                    dest = attempt_dir / "review_verdict.json"
-                    if Path(source).resolve() != dest.resolve():
-                        shutil.copy2(source, dest)
-                    break
-        from .evidence import seal
-        return seal(attempt_dir, self.config.task_workdir, result.commit_sha)
 
     # ---- 审批 ----
     def approve(self, stage_name: str) -> bool:

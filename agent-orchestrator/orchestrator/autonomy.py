@@ -133,7 +133,7 @@ class AutonomousControls:
             if maximum is not None:
                 cap = min(cap, maximum - used.get('tokens', 0) - estimate)
         if cap < 64:
-            from .engine import BudgetExceeded
+            from .budget import BudgetExceeded
             raise BudgetExceeded('剩余 token 预算不足以保留输入和最小输出，调用前拦截')
         return int(cap), int(estimate + cap)
 
