@@ -7,6 +7,10 @@
 - Node.js：完整测试中的前端异步契约需要，无需 npm 安装。仅启动工作台不需要 Node.js。
 - 真正调用模型时另装相应 CLI 或在环境变量中配置 API Key；离线验收不调用模型或网络服务。
 
+本次标签为 `delivery-2026-11-16-round9`，完整离线验收 **479 项通过，0 失败、0 错误、0 跳过**，134 个验收范围文件前后指纹一致。实际提交、全部交付源文件 SHA-256 和本次验收摘要记录在包内 `SNAPSHOT.json`；原始结构化结果见 `delivery-metadata/verification.json`。包旁的 `<包名>.sha256` 校验压缩包整体字节。包自身的哈希放在包外，避免自引用。
+
+本次验证环境为 Windows、Python 3.11.9、Git 2.45.1.windows.1、Node.js v24.15.0。Python 3.12/3.13 与 Linux/POSIX 尚未完成交付矩阵验收；Python 3.11+ 是最低版本要求，不代表这些组合均已验证。
+
 解压源码包或检出交付分支后，进入 `agent-orchestrator`。命令中的 `python`、`git`、`node` 应能在当前 PATH 解析；命令行包含中文时建议使用 UTF-8 终端。
 
 ## 离线启动
@@ -55,6 +59,23 @@ Windows 上测试会真实创建临时文件、Git 仓库和进程树，耗时�
 
 `config.example.toml` / `pipeline.example.toml` 使用环境变量 `DEEPSEEK_API_KEY`；它们包含设计审批。`unattended.example.toml` 显式定义预授权文件和预算。`cli-mixed.example.toml` 需要已验证版本的 Codex 与反重力及本机登录；`dsh-test.example.toml` 需要 dsh 及显式允许的 `DEEPSEEK_API_KEY`。先复制模板、配置工作目录和工具路径，再按 README 启动；不要把真实凭据写入 TOML 或提交仓库。`demo/run_api_demo.py` 退出码与 CLI 对齐：全部阶段完成 0、等待审批 11、失败/超时/中断等未完成 1。
 
+## 升级与回滚注意事项
+
+- **严格配置校验**：未知顶层、阶段和 `run_budget` 字段现在直接报错。升级前对照同包示例修正拼写和字段位置，不能依赖旧版静默忽略未知键。
+- **越界写入隔离**：`watch_enforce=true` 时，根外新文件移入 `<run>/violations/<stage>/` 留证；既有根外文件被改写仍判失败，不自动还原。违规按输入指纹持久保存，修正问题后用 `rerun-from` 显式重试。`watch_root` 位于可写根内时禁用该监视域并记录 `watch_disabled`。
+- **审查覆盖不完整**：diff 超过 600 行时尝试按 commit 注入变更文件全文；仍无法覆盖时，`pass` 在人工模式下转待审批，无人值守模式下判失败。人工确认前应核查未覆盖的变更。
+- **审批校验变化**：code/test 阶段校验申请时冻结的输入指纹、attempt 归档及 evidence；report/review 阶段仍拒绝输入变化后的审批。等待审批退出码为 11，不能作为任务成功处理。
+- **状态兼容与备份**：当前保存的 `state.json` 使用 `schema_version=2`，新增顶层 `test_artifacts` 以及 `control.consumed_feedback`、`control.write_violations`。缺失字段按空值读取；没有提供向旧版本回滚的迁移工具。升级前及回滚前先停止写入该状态目录的 worker/supervisor/工作台，备份整个 `state_dir`（含 attempts、审批与隔离证据）；回滚时使用与旧代码配套的备份，不让旧代码覆盖新版状态。不要只修改 `schema_version` 或删字段来冒充迁移。
+- **既有工作区与脚本**：非 Git 工作区首次 coding 会提交已有文件作为本地基线；零净变更 code 阶段现在判失败。`demo/run_api_demo.py` 的未完成退出码为 11 或 1，调用方应检查退出码。
+
+## 包内容与独立核验
+
+源码包只包含标签提交下 `agent-orchestrator/` 的跟踪文件，另附生成的 `SNAPSHOT.json` 与 `delivery-metadata/`。源文件直接取自 Git 对象，不经过检出换行转换；`SNAPSHOT.json` 的 `files` 以仓库相对路径记录源文件 SHA-256，`metadata_files` 记录附带验收证据的 SHA-256。这两个清单不包含清单自身；完整 ZIP 的字节由包外 `.sha256` 校验。
+
+`delivery-metadata/` 包含本次 `verification.json`、`smoke.json`、`source-before.json`、`source-after.json` 和 `test-durations.json`；未脱敏的主回归日志仅保留在开发机。`live-validation-*`、`review-*`、本机配置/凭据、运行状态、数据库、缓存、worktree 和 Git 数据不入包。开发机审查与实测目录继续按现有忽略规则保留，不入库；交付的启动与回归不依赖它们。
+
+下载或复制后先用 `Get-FileHash <源码包.zip> -Algorithm SHA256` 对照包旁 `.sha256`。解压到新的仓库外目录后，用 `SNAPSHOT.json` 核对源文件与证据清单，再执行上面的完整离线验证；验收会生成新的运行状态和缓存，不应将它们重新混入发布包。
+
 ## 原始验证与历史记录
 
-交付基线提交 `e2a4535` 的 388 项通过来自该提交源码的一次完整回归。当前工作树在基线之上还有未提交改动，其测试数量、修复范围与复验结果以本轮 `verify_delivery` 输出和上级 `review-2026-11-16/修复复验报告.md` 为准；不要把旧交付包或旧数字当作当前工作树结论。交付包的可复现验收使用上面的脚本和同包附带的测试；具体文件指纹以 `verification.json` 与压缩包 SHA-256 为准。原始性能测量和模型执行日志保留在开发机被忽略的实测目录，不是启动或测试依赖。
+旧交付基线 `e2a4535` 的 388 项通过以及 `validation/development-baseline.json` 是历史记录，本次发布以包内验收证据为准。README 各轮历史数字与开发机 `review-2026-11-16/修复复验报告.md` 仅用于追溯。原始性能测量、主回归日志和模型执行日志保留在开发机证据目录，不是启动或测试依赖。
