@@ -1,0 +1,12 @@
+{
+  "tests_collected": 388,
+  "tests_run": 388,
+  "failures": [],
+  "errors": [],
+  "skipped": [],
+  "duration_s": 1349.875,
+  "source_unchanged": true,
+  "changed_files": [],
+  "exit_code": 0,
+  "scope": "收口前工作区完整离线回归；交付包另以 scripts/verify_delivery.py 从干净目录复验"
+}

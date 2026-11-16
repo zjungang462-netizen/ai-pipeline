@@ -1,3 +1,3 @@
 # 抓包样本按原始字节核验来源哈希，跨平台检出时保留换行。
-tests/fixtures/codex_0.169_policy_stderr.txt -text
-tests/fixtures/*.jsonl -text
+tests/fixtures/codex_0.169_policy_stderr.txt -text whitespace=cr-at-eol
+tests/fixtures/*.jsonl -text whitespace=cr-at-eol

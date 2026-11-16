@@ -1,0 +1,27 @@
+# 本地工作台离线示例：只执行真实 Python 断言，最后等待人工审批。
+# 在 agent-orchestrator 目录启动；Python 3.11+ 应在 PATH 中。
+task_workdir = ".workbench/demo-workspace"
+state_dir = ".workbench/demo-state"
+
+[run_budget]
+max_tokens = 12000
+max_duration_s = 3600
+
+[[stages]]
+name = "environment"
+kind = "test"
+timeout_s = 20
+test_cmd = ["python", "-X", "utf8", "-c", "import sys; assert sys.version_info >= (3,11); print('Python 运行时检查通过')"]
+
+[[stages]]
+name = "testing"
+kind = "test"
+timeout_s = 30
+test_cmd = ["python", "-X", "utf8", "-c", "import time; time.sleep(5); assert 2 + 2 == 4; assert 'pipeline'.startswith('pipe'); print('真实断言通过')"]
+
+[[stages]]
+name = "acceptance"
+kind = "test"
+approval = true
+timeout_s = 20
+test_cmd = ["python", "-X", "utf8", "-c", "print('请在工作台核对测试记录后人工批准')"]

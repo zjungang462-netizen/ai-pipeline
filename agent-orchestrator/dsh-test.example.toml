@@ -1,0 +1,30 @@
+# dsh 测试角色：模型负责实际执行并解释测试，独立命令继续负责确定性判定。
+task_workdir = "."
+state_dir = ".dsh-test-state"
+watch_root = "off"
+
+[run_budget]
+max_tokens = 100000
+max_duration_s = 180
+
+[[stages]]
+name = "test_report"
+kind = "report"
+adapter = "dsh"
+timeout_s = 90
+max_attempts = 1
+prompt = "只允许一次 pwsh 调用执行 node tests/js/pagination_contract.cjs 和 node tests/js/history_filter_contract.cjs；每条命令后打印 $LASTEXITCODE。禁止修改文件、安装依赖、子代理或其他工具探索。中文报告真实测试结果，失败照实报告，不因模型调用完成就声称测试通过。"
+
+[[stages]]
+name = "testing"
+kind = "test"
+timeout_s = 60
+test_cmd = ["python", "-X", "utf8", "-m", "unittest", "discover", "-s", "tests", "-p", "test_history_filter_ui.py", "-v"]
+
+[adapters.dsh]
+type = "cli_dsh"
+# exe 可省略，改用 PATH 上的 dsh；Windows 需确认是已验证的原生命令包装器。
+permission_mode = "read-only"
+extra_env = ["DEEPSEEK_API_KEY"]
+# 本机使用代理时显式指定，地址中不要放凭据。
+# proxy_url = "http://127.0.0.1:7897"

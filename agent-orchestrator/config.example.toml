@@ -1,5 +1,5 @@
 # 推荐流水线：需求 → 设计 → 编码 → 测试(真命令) → 审查(结论文件)
-# 默认通道 openai_compat（唯一跑通全链的路径）。CLI 需真实样本后再启用。
+# 默认通道 openai_compat。已验证的 CLI 混合链路见 cli-mixed.example.toml。
 
 task_workdir = "./workspace"
 state_dir = "./.orchestrator"
@@ -67,5 +67,5 @@ api_key_env = "DEEPSEEK_API_KEY"   # 只存环境变量名，不存密钥
 # base_url = "https://ark.cn-beijing.volces.com/api/v3"           model = "<接入点ID>"        api_key_env = "ARK_API_KEY"
 
 # CLI 适配器留在注册表，但**默认不参与流水线**：
-# 各工具 stdin 语义与输出格式尚无真机样本，先抓真实 --version 与一次成功输出，
-# 替换 tests/fixtures 下的合成样本后再启用。
+# Codex 0.169.0、反重力 1.5.9 与 dsh 0.2.2-rc.3 已有真实协议样本；
+# 其他工具或版本仍需抓取真实 --version 与成功输出后验证，不能沿用合成版本号。

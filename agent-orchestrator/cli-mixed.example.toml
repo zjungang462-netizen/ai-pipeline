@@ -1,0 +1,73 @@
+# 实际调用本机 CLI：Codex 设计/审查，反重力编辑源码，编排器执行测试。
+# 首次使用请核对 exe、Codex 本机模型配置、反重力登录和代理；测试额度不是 API 硬输出上限。
+task_workdir = "examples/cli_mixed_demo"
+state_dir = ".cli_mixed_state"
+serial = true
+allow_yolo = false
+watch_root = "off"
+
+[run_budget]
+max_tokens = 220000
+max_duration_s = 600
+
+[autonomy]
+enabled = true
+auto_approve = ["coding"]
+allowed_files = ["name_ops.py", "count_ops.py"]
+baseline_paths = ["name_ops.py", "count_ops.py", "tests"]
+max_repair_rounds = 2
+max_stagnant_rounds = 2
+repair_batch_size = 2
+output_tokens = 2048
+context_chars = 12000
+
+[[stages]]
+name = "design"
+kind = "report"
+adapter = "codex"
+prompt = "prompts/cli_design.md"
+context_files = ["name_ops.py", "count_ops.py", "tests/test_contract.py"]
+timeout_s = 180
+max_attempts = 1
+
+[[stages]]
+name = "coding"
+kind = "code"
+adapter = "agy"
+prompt = "prompts/cli_develop.md"
+context_files = ["name_ops.py", "count_ops.py"]
+precheck_cmd = ["python", "-X", "utf8", "-m", "unittest", "discover", "-s", "tests", "-v"]
+approval = true
+timeout_s = 240
+max_attempts = 1
+
+[[stages]]
+name = "testing"
+kind = "test"
+test_cmd = ["python", "-X", "utf8", "-m", "unittest", "discover", "-s", "tests", "-v"]
+feedback_to = "coding"
+max_rounds = 2
+timeout_s = 30
+
+[[stages]]
+name = "review"
+kind = "review"
+adapter = "codex"
+prompt = "prompts/cli_review.md"
+context_files = ["name_ops.py", "count_ops.py", "tests/test_contract.py"]
+feedback_to = "coding"
+max_rounds = 2
+timeout_s = 180
+max_attempts = 1
+
+[adapters.codex]
+type = "cli_codex"
+isolate_config = true
+# 使用本机 Codex 配置中的模型与连接；凭据只在内存中转为子进程环境变量。
+# Windows 建议 exe 指向 npm 安装目录中的原生 codex.exe，避免 .cmd 对 TOML 参数二次解释。
+
+[adapters.agy]
+type = "cli_agy"
+model = "gemini-3.8-flash-high"
+# 如本机需要代理，显式配置；代理地址不可携带用户名和密码。
+# proxy_url = "http://127.0.0.1:7897"
