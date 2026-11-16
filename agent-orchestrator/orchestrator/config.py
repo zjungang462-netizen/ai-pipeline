@@ -1,6 +1,8 @@
 """配置加载与校验（评审 S4：零依赖，tomllib + 手写校验替代 pydantic）。"""
 from __future__ import annotations
 
+from .schema import config_field, default_value, describe, field_metadata
+
 import tomllib
 import math
 import re
@@ -30,24 +32,11 @@ KNOWN_ADAPTER_TYPES = {
 }
 
 # 配置表允许的键集合：未知键直接报错，避免拼写错误让安全/预算字段静默失效。
-_ROOT_KEYS = {
-    "task_workdir", "state_dir", "serial", "allow_yolo", "watch_root",
-    "watch_enforce", "git_exe", "tune_proposal_id", "adapters", "stages",
-    "run_budget", "autonomy", "autotune",
-}
-_STAGE_KEYS = {
-    "name", "kind", "adapter", "prompt", "timeout_s", "approval",
-    "max_attempts", "max_tokens", "max_duration_s", "config_keys",
-    "feedback_to", "max_rounds", "test_cmd", "context_files", "precheck_cmd",
-}
-_BUDGET_KEYS = {"max_tokens", "max_duration_s"}
 
 
 def config_key_sets() -> dict[str, set[str]]:
-    """诊断复用加载器的字段集合；不维护第二套配置 schema。"""
-    return {"root": set(_ROOT_KEYS), "stages": set(_STAGE_KEYS),
-            "run_budget": set(_BUDGET_KEYS), "autonomy": set(vars(Autonomy())),
-            "autotune": set(vars(AutoTune()))}
+    """诊断与校验复用 dataclass 字段定义。"""
+    return {name: set(describe(cls)) for name, cls in CONFIG_SECTIONS.items()}
 
 
 def _reject_unknown(raw: dict, allowed: set[str], label: str) -> None:
@@ -65,55 +54,55 @@ class AdapterConfig:
 
 @dataclass
 class RunBudget:
-    max_tokens: int | None = None
-    max_duration_s: int | None = None
+    max_tokens: int | None = config_field('运行累计 token 上限；无人值守时必须为正数', default=None, numeric=True, integer=True, minimum=0)
+    max_duration_s: int | None = config_field('运行累计秒数上限；无人值守时必须为正数', default=None, numeric=True, minimum=0)
 
 
 @dataclass
 class Autonomy:
-    enabled: bool = False
-    auto_approve: list[str] = field(default_factory=list)
-    allowed_files: list[str] = field(default_factory=list)
-    baseline_paths: list[str] = field(default_factory=list)
-    max_repair_rounds: int = 4
-    max_stagnant_rounds: int = 2
-    repair_batch_size: int = 1
-    output_tokens: int = 2048
-    context_chars: int = 32000
-    cli_input_overhead_tokens: int = 32768
-    cli_idle_timeout_s: int = 120
-    cli_max_tool_errors: int = 3
-    cli_max_repeated_reads: int = 4
+    enabled: bool = config_field('显式开启无人值守', default=False)
+    auto_approve: list[str] = config_field('预授权自动批准的阶段名列表', default_factory=list)
+    allowed_files: list[str] = config_field('允许修改的相对文件路径白名单', default_factory=list)
+    baseline_paths: list[str] = config_field('首次初始化加入基线的相对路径', default_factory=list)
+    max_repair_rounds: int = config_field('整个反馈链的最大修复轮数', default=4, numeric=True, integer=True, minimum=1, maximum=20, validation_order=2, limit_message='max_repair_rounds 上限为 20')
+    max_stagnant_rounds: int = config_field('连续无进展的最大轮数', default=2, numeric=True, integer=True, minimum=1)
+    repair_batch_size: int = config_field('单轮最多修改文件数', default=1, numeric=True, integer=True, minimum=1, maximum=3, validation_order=1, limit_message='repair_batch_size 上限为 3')
+    output_tokens: int = config_field('单次输出额度，CLI 不构成服务端硬限制', default=2048, numeric=True, integer=True, minimum=1, maximum=16384, validation_order=3, limit_message='output_tokens 上限为 16384')
+    context_chars: int = config_field('上下文字符数上限', default=32000, numeric=True, integer=True, minimum=1, maximum=128000, validation_order=4, limit_message='context_chars 上限为 128000')
+    cli_input_overhead_tokens: int = config_field('CLI 工具上下文的保守输入预留', default=32768, numeric=True, integer=True, minimum=1)
+    cli_idle_timeout_s: int = config_field('CLI 无活动超时，秒', default=120, numeric=True, integer=True, minimum=1, maximum=3600, validation_order=5, limit_message='cli_idle_timeout_s 上限为 3600')
+    cli_max_tool_errors: int = config_field('连续工具错误上限', default=3, numeric=True, integer=True, minimum=1, maximum=20, validation_order=6, limit_message='cli_max_tool_errors 上限为 20')
+    cli_max_repeated_reads: int = config_field('重复读取上限', default=4, numeric=True, integer=True, minimum=1, maximum=20, validation_order=7, limit_message='cli_max_repeated_reads 上限为 20')
 
 
 @dataclass
 class AutoTune:
-    enabled: bool = False
-    auto_apply: bool = False
-    min_runs: int = 5
-    max_batch_size: int = 2
+    enabled: bool = config_field('开启策略提案与选择', default=False)
+    auto_apply: bool = config_field('自动选择需同时启用 autonomy 和 autotune', default=False)
+    min_runs: int = config_field('最少同配置终态记录数', default=5, numeric=True, integer=True, minimum=1, constraint_minimum=5, validation_order=1, limit_message='自动调优至少需要 5 条同配置记录')
+    max_batch_size: int = config_field('可自动选择的修复文件批量上限', default=2, numeric=True, integer=True, minimum=1, maximum=3, validation_order=2, limit_message='自动修复文件批量上限为 3')
 
 
 @dataclass
 class Config:
-    task_workdir: Path
-    state_dir: Path
-    stages: list[StageSpec]
-    adapters: dict[str, AdapterConfig]
-    serial: bool = True
-    allow_yolo: bool = False
-    run_budget: RunBudget = field(default_factory=RunBudget)
+    task_workdir: Path = config_field('任务工作目录，相对配置文件目录解析')
+    state_dir: Path = config_field('状态目录，相对配置文件目录解析')
+    stages: list[StageSpec] = config_field('顺序执行的阶段数组，至少一个阶段')
+    adapters: dict[str, AdapterConfig] = config_field('具名适配器表；纯 test 流程可为空', input_default={})
+    serial: bool = config_field('当前只支持 true，阶段串行执行', default=True)
+    allow_yolo: bool = config_field('兼容开关，不解除路径与审批约束', default=False)
+    run_budget: RunBudget = config_field('整个运行的 token 与时长上限', default_factory=RunBudget)
     base_dir: Path = field(default_factory=Path.cwd)
-    git_exe: str = ""                          # 可选：git 可执行文件绝对路径（G1）
-    watch_root: str = ""                       # 可选：越界监视域（G2）；空=不扫描（默认关闭）
+    git_exe: str = config_field('可选 Git 可执行路径；为空时探测 PATH/安装位置', default='')
+    watch_root: str = config_field('有限监视域；相对配置目录解析；空或 off 关闭', default='')
     # 目录快照默认只告警（启发式，父目录无关保存不该判阶段失败）。
     # 设 true 才把根外变更当失败；硬隔离请用容器/系统级作业对象。
-    watch_enforce: bool = False
+    watch_enforce: bool = config_field('根外快照变化是否判失败，默认仅告警', default=False)
     source_path: Path | None = None
     source_hash: str = ""
-    tune_proposal_id: str = ""
-    autonomy: Autonomy = field(default_factory=Autonomy)
-    autotune: AutoTune = field(default_factory=AutoTune)
+    tune_proposal_id: str = config_field('已批准调优提案标识；空或 tune- 加 12 位十六进制', default='')
+    autonomy: Autonomy = config_field('显式预授权的无人值守策略', default_factory=Autonomy)
+    autotune: AutoTune = config_field('有界的后续运行策略选择', default_factory=AutoTune)
 
     def stage(self, name: str) -> StageSpec:
         for s in self.stages:
@@ -126,6 +115,13 @@ class Config:
             if s.name == name:
                 return i
         raise ConfigError(f"未定义的阶段: {name}")
+
+
+CONFIG_SECTIONS = {"root": Config, "stages": StageSpec, "run_budget": RunBudget,
+                   "autonomy": Autonomy, "autotune": AutoTune}
+_ROOT_KEYS = set(describe(Config))
+_STAGE_KEYS = set(describe(StageSpec))
+_BUDGET_KEYS = set(describe(RunBudget))
 
 
 def _require(cond: bool, msg: str) -> None:
@@ -154,6 +150,21 @@ def _numeric(value, label: str, *, integer=False, minimum=0):
     return value
 
 
+def _schema_bounds(value, info, label):
+    if info.get('maximum') is not None:
+        _require(value <= info['maximum'], info['limit_message'] or f"{label} 超过上限")
+    if info.get('constraint_minimum') is not None:
+        _require(value >= info['constraint_minimum'], info['limit_message'] or f"{label} 低于下限")
+
+
+def _schema_number(value, cls, key, label, *, bounds=True):
+    info = field_metadata(cls, key)
+    result = _numeric(value, label, integer=info['integer'], minimum=info['minimum'])
+    if bounds:
+        _schema_bounds(result, info, label)
+    return result
+
+
 def parse_config(raw: dict[str, Any], base_dir: Path | None = None) -> Config:
     base_dir = Path(base_dir) if base_dir else Path.cwd()
     _require(isinstance(raw, dict), "配置根必须是表")
@@ -173,12 +184,12 @@ def parse_config(raw: dict[str, Any], base_dir: Path | None = None) -> Config:
     _require(isinstance(state_dir, str) and state_dir, "缺少 state_dir")
 
     # 适配器
-    adapters_raw = raw.get("adapters", {})
+    adapters_raw = raw.get("adapters", default_value(Config, "adapters"))
     _require(isinstance(adapters_raw, dict), "[adapters] 配置必须是表")
     for key in ("serial", "allow_yolo", "watch_enforce"):
         if key in raw:
             _require(type(raw[key]) is bool, f"{key} 必须是布尔值")
-    _require(raw.get("serial", True), "当前只支持 serial=true")
+    _require(raw.get("serial", default_value(Config, "serial")), "当前只支持 serial=true")
     if raw.get("tune_proposal_id"):
         _require(isinstance(raw["tune_proposal_id"], str)
                  and bool(re.fullmatch(r"tune-[0-9a-f]{12}", raw["tune_proposal_id"])),
@@ -213,13 +224,13 @@ def parse_config(raw: dict[str, Any], base_dir: Path | None = None) -> Config:
                  and name not in (".", ".."), f"非法阶段名: {name}")
         _require(name not in seen, f"阶段名重复: {name}")
         seen.add(name)
-        kind = s.get("kind", "code")
+        kind = s.get("kind", default_value(StageSpec, "kind"))
         if kind == "verify":
             kind = "test"  # 兼容优化方案中的命名，不新增另一套执行路径。
         _require(kind in ("code", "report", "review", "test"),
                  f"阶段 {name} 的 kind 非法: {kind!r}")
         # test 阶段不调用模型：不需要 adapter/prompt，但必须有 test_cmd
-        test_cmd_raw = s.get("test_cmd", [])
+        test_cmd_raw = s.get("test_cmd", default_value(StageSpec, "test_cmd"))
         if kind == "test":
             _require(isinstance(test_cmd_raw, list) and test_cmd_raw
                      and all(isinstance(x, str) and x for x in test_cmd_raw),
@@ -234,8 +245,7 @@ def parse_config(raw: dict[str, Any], base_dir: Path | None = None) -> Config:
             prompt = s.get("prompt")
             _require(isinstance(prompt, str) and prompt, f"阶段 {name} 缺少 prompt")
         feedback_to = s.get("feedback_to")
-        max_rounds = _numeric(s.get("max_rounds", 1), f"阶段 {name} max_rounds",
-                              integer=True, minimum=1)
+        max_rounds = _schema_number(s.get("max_rounds", default_value(StageSpec, "max_rounds")), StageSpec, "max_rounds", f"阶段 {name} max_rounds")
         _require(max_rounds >= 1, f"阶段 {name} 的 max_rounds 须 >= 1")
         if feedback_to is not None:
             _require(kind in ("review", "test"),
@@ -244,9 +254,9 @@ def parse_config(raw: dict[str, Any], base_dir: Path | None = None) -> Config:
                      f"阶段 {name} 的 feedback_to 须为非空字符串")
         for key in ("max_tokens", "max_duration_s"):
             if s.get(key) is not None:
-                _numeric(s[key], f"阶段 {name} {key}", integer=key == "max_tokens")
-        _require(type(s.get("approval", False)) is bool, f"阶段 {name} approval 必须是布尔值")
-        config_keys_raw = s.get("config_keys", {})
+                _schema_number(s[key], StageSpec, key, f"阶段 {name} {key}")
+        _require(type(s.get("approval", default_value(StageSpec, "approval"))) is bool, f"阶段 {name} approval 必须是布尔值")
+        config_keys_raw = s.get("config_keys", default_value(StageSpec, "config_keys"))
         _require(isinstance(config_keys_raw, dict), f"阶段 {name} config_keys 必须是表")
         try:
             json.dumps(config_keys_raw, ensure_ascii=False, sort_keys=True)
@@ -258,18 +268,18 @@ def parse_config(raw: dict[str, Any], base_dir: Path | None = None) -> Config:
             name=name,
             adapter=adapter,
             prompt=prompt,
-            timeout_s=_numeric(s.get("timeout_s", 300), f"阶段 {name} timeout_s", minimum=0.001),
-            approval=bool(s.get("approval", False)),
-            max_attempts=_numeric(s.get("max_attempts", 2), f"阶段 {name} max_attempts", integer=True, minimum=1),
+            timeout_s=_schema_number(s.get("timeout_s", default_value(StageSpec, "timeout_s")), StageSpec, "timeout_s", f"阶段 {name} timeout_s"),
+            approval=bool(s.get("approval", default_value(StageSpec, "approval"))),
+            max_attempts=_schema_number(s.get("max_attempts", default_value(StageSpec, "max_attempts")), StageSpec, "max_attempts", f"阶段 {name} max_attempts"),
             max_tokens=s.get("max_tokens"),
             max_duration_s=s.get("max_duration_s"),
             kind=kind,
-            config_keys=dict(s.get("config_keys", {})),
+            config_keys=dict(s.get("config_keys", default_value(StageSpec, "config_keys"))),
             feedback_to=feedback_to,
             max_rounds=max_rounds,
             test_cmd=list(test_cmd_raw) if kind == "test" else [],
-            context_files=_paths(s.get("context_files", []), f"阶段 {name} context_files"),
-            precheck_cmd=_command(s.get("precheck_cmd", []), f"阶段 {name} precheck_cmd"),
+            context_files=_paths(s.get("context_files", default_value(StageSpec, "context_files")), f"阶段 {name} context_files"),
+            precheck_cmd=_command(s.get("precheck_cmd", default_value(StageSpec, "precheck_cmd")), f"阶段 {name} precheck_cmd"),
         ))
         _require(not stages[-1].precheck_cmd or kind == "code", "只有 code 阶段能配置 precheck_cmd")
 
@@ -296,7 +306,7 @@ def parse_config(raw: dict[str, Any], base_dir: Path | None = None) -> Config:
     _reject_unknown(budget_raw, _BUDGET_KEYS, "[run_budget]")
     for key in ("max_tokens", "max_duration_s"):
         if budget_raw.get(key) is not None:
-            _numeric(budget_raw[key], f"run_budget.{key}", integer=key == "max_tokens")
+            _schema_number(budget_raw[key], RunBudget, key, f"run_budget.{key}")
     budget = RunBudget(
         max_tokens=budget_raw.get("max_tokens"),
         max_duration_s=budget_raw.get("max_duration_s"),
@@ -311,14 +321,14 @@ def parse_config(raw: dict[str, Any], base_dir: Path | None = None) -> Config:
         state_dir=(base_dir / state_dir).resolve(),
         stages=stages,
         adapters=adapters,
-        serial=bool(raw.get("serial", True)),
-        allow_yolo=bool(raw.get("allow_yolo", False)),
+        serial=bool(raw.get("serial", default_value(Config, "serial"))),
+        allow_yolo=bool(raw.get("allow_yolo", default_value(Config, "allow_yolo"))),
         run_budget=budget,
         base_dir=base_dir.resolve(),
-        git_exe=str(raw.get("git_exe", "") or ""),
-        watch_root=str(raw.get("watch_root", "") or ""),
-        watch_enforce=bool(raw.get("watch_enforce", False)),
-        tune_proposal_id=str(raw.get("tune_proposal_id", "")),
+        git_exe=str(raw.get("git_exe", default_value(Config, "git_exe")) or ""),
+        watch_root=str(raw.get("watch_root", default_value(Config, "watch_root")) or ""),
+        watch_enforce=bool(raw.get("watch_enforce", default_value(Config, "watch_enforce"))),
+        tune_proposal_id=str(raw.get("tune_proposal_id", default_value(Config, "tune_proposal_id"))),
         autonomy=autonomy,
         autotune=autotune,
     )
@@ -353,17 +363,9 @@ def _policy(raw, cls):
         elif isinstance(original, list):
             value = _paths(value, key) if key != "auto_approve" else _command(value, key)
         else:
-            _numeric(value, key, integer=True, minimum=1)
+            _schema_number(value, cls, key, key, bounds=False)
         values[key] = value
-    if cls is Autonomy:
-        _require(values['repair_batch_size'] <= 3, "repair_batch_size 上限为 3")
-        _require(values['max_repair_rounds'] <= 20, "max_repair_rounds 上限为 20")
-        _require(values['output_tokens'] <= 16384, "output_tokens 上限为 16384")
-        _require(values['context_chars'] <= 128000, "context_chars 上限为 128000")
-        _require(values['cli_idle_timeout_s'] <= 3600, "cli_idle_timeout_s 上限为 3600")
-        _require(values['cli_max_tool_errors'] <= 20, "cli_max_tool_errors 上限为 20")
-        _require(values['cli_max_repeated_reads'] <= 20, "cli_max_repeated_reads 上限为 20")
-    else:
-        _require(values['min_runs'] >= 5, "自动调优至少需要 5 条同配置记录")
-        _require(values['max_batch_size'] <= 3, "自动修复文件批量上限为 3")
+    constraints = [(key, info) for key, info in describe(cls).items() if info['validation_order']]
+    for key, info in sorted(constraints, key=lambda row: row[1]['validation_order']):
+        _schema_bounds(values[key], info, key)
     return cls(**values)

@@ -103,6 +103,13 @@ def main(argv=None):
     args = parser.parse_args(argv)
     repo = Path(git(ROOT, 'rev-parse', '--show-toplevel').stdout.decode('utf8').strip())
     report = check_repository(repo)
+    from scripts.generate_config_docs import check_generated
+    try:
+        for name in check_generated(ROOT):
+            report['issues'].append(dict(path=name,kind='generated_docs',message='运行 generate_config_docs.py 同步'))
+    except (OSError,ValueError):
+        report['issues'].append(dict(kind='generated_docs',message='无法检查配置表与示例注释'))
+    report['ok']=not report['issues']
     print(json.dumps(report, ensure_ascii=False, indent=2), flush=True)
     if not report['ok']:
         return 1

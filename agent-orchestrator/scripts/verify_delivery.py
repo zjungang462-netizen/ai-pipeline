@@ -6,6 +6,7 @@ import contextlib
 import hashlib
 import http.client
 import json
+import math
 import os
 import platform
 import shutil
@@ -24,14 +25,37 @@ from scripts.failure_evidence import (EvidenceResultMixin, Scrubber, RedactedLog
 # 固定、可审计的快速集合；完整入口继续发现全部测试。
 QUICK_TESTS = ('test_stage1', 'test_budget', 'test_api_adapter', 'test_cli_adapters',
                'test_cli_entry', 'test_execution_scope', 'test_fix_ninth.ConfigValidation',
-               'test_phase2_operations', 'test_phase2_gates')
+               'test_phase2_operations', 'test_phase2_gates', 'test_schema_docs', 'test_test_layers')
 
 
-def collect_tests(quick=False):
-    if quick:
-        sys.path.insert(0, str(ROOT/'tests'))
+def test_ids(suite):
+    ids=[]
+    def visit(node):
+        if isinstance(node,unittest.TestSuite):
+            for item in node:visit(item)
+        else:ids.append(node.id())
+    visit(suite)
+    return sorted(ids)
+
+
+def collect_tests(quick=False, suite=None):
+    mode='fast' if quick else suite or 'full'
+    sys.path.insert(0, str(ROOT/'tests'))
+    if mode=='fast':
         return unittest.defaultTestLoader.loadTestsFromNames(QUICK_TESTS)
-    return unittest.defaultTestLoader.discover(str(ROOT/'tests'))
+    full=unittest.defaultTestLoader.discover(str(ROOT/'tests'))
+    if mode=='full':return full
+    if mode!='slow':raise ValueError('未知测试分层')
+    fast=set(test_ids(unittest.defaultTestLoader.loadTestsFromNames(QUICK_TESTS)))
+    if not fast <= set(test_ids(full)):
+        raise ValueError('快速集合含完整发现范围之外的测试')
+    selected=[]
+    def visit(node):
+        if isinstance(node,unittest.TestSuite):
+            for item in node:visit(item)
+        elif node.id() not in fast:selected.append(node)
+    visit(full)
+    return unittest.TestSuite(selected)
 
 
 def digest_files():
@@ -39,7 +63,7 @@ def digest_files():
     files=[p for directory in ('orchestrator','tests','prompts','scripts','demo')
            for p in (ROOT/directory).rglob('*') if p.is_file() and '__pycache__' not in p.parts]
     files+=list(ROOT.glob('*.example.toml'))
-    files+=[p for p in (ROOT/'README.md',ROOT/'RELEASE_NOTES.md',ROOT/'DELIVERY.md',ROOT/'.gitattributes') if p.exists()]
+    files+=[p for p in (ROOT/'README.md',ROOT/'HISTORY.md',ROOT/'RELEASE_NOTES.md',ROOT/'DELIVERY.md',ROOT/'.gitattributes') if p.exists()]
     return {p.relative_to(ROOT).as_posix():hashlib.sha256(p.read_bytes()).hexdigest() for p in sorted(files)}
 
 
@@ -132,9 +156,15 @@ def smoke(output, redact_logs=False):
 def main(argv=None):
     parser=argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--output',required=True)
-    parser.add_argument('--quick', action='store_true', help='冒烟与核心快速集合，目标总耗时不超过 120 秒')
+    mode=parser.add_mutually_exclusive_group()
+    mode.add_argument('--quick', action='store_true', help='fast 的别名，目标总耗时不超过 120 秒')
+    mode.add_argument('--suite', choices=('fast','slow','full'), default='full', help='显式测试分层；默认 full')
+    parser.add_argument('--slow-threshold', type=float, default=2, help='慢用例记录阈值，秒')
     parser.add_argument('--redact-logs', action='store_true', help='对回归日志与 CLI 冒烟日志脱敏')
     args=parser.parse_args(argv)
+    if not math.isfinite(args.slow_threshold) or args.slow_threshold<=0:
+        parser.error('--slow-threshold 必须为正数')
+    selected_mode='fast' if args.quick else args.suite
     output=Path(args.output).resolve()
     if output.is_relative_to(ROOT):raise ValueError('验证输出目录必须位于项目之外')
     output.mkdir(parents=True,exist_ok=True)
@@ -156,9 +186,11 @@ def main(argv=None):
         def stopTest(self,test):
             durations.append({'test':test.id(),'duration_s':round(time.monotonic()-self.started,3)})
             super().stopTest(test);self.stream.flush()
-    suite=collect_tests(args.quick)
-    print(json.dumps({'tests_collected':suite.countTestCases()}),flush=True)
-    log_name='quick-regression.log' if args.quick else 'full-regression.log'
+    suite=collect_tests(args.quick, suite=selected_mode)
+    collected=suite.countTestCases()
+    (output/'test-ids.json').write_text(json.dumps(test_ids(suite),indent=2),encoding='utf8')
+    print(json.dumps({'suite':selected_mode,'tests_collected':collected}),flush=True)
+    log_name='quick-regression.log' if args.quick else selected_mode+'-regression.log'
     with (output/log_name).open('w',encoding='utf8') as raw_log:
         log=RedactedLog(raw_log) if args.redact_logs else raw_log
         try:
@@ -170,7 +202,10 @@ def main(argv=None):
     after=digest_files()
     (output/'source-after.json').write_text(json.dumps(after,ensure_ascii=False,indent=2),encoding='utf8')
     (output/'test-durations.json').write_text(json.dumps(durations,ensure_ascii=False,indent=2),encoding='utf8')
-    proof={'mode':'quick' if args.quick else 'full', 'log_file':log_name,
+    slow=sorted((r for r in durations if r['duration_s']>=args.slow_threshold),key=lambda r:r['duration_s'],reverse=True)
+    (output/'slow-tests.json').write_text(json.dumps({'threshold_s':args.slow_threshold,'tests':slow},indent=2),encoding='utf8')
+    proof={'mode':'quick' if args.quick else selected_mode, 'suite':selected_mode,
+           'tests_collected':collected, 'log_file':log_name, 'slow_test_count':len(slow),
            'tests_run':result.testsRun,'failures':[{'test':t.id(),'traceback':s} for t,s in result.failures],
            'errors':[{'test':t.id(),'traceback':s} for t,s in result.errors],
            'skipped':[{'test':t.id(),'reason':s} for t,s in result.skipped],
@@ -181,10 +216,13 @@ def main(argv=None):
                         'full_regression_log':'known_credentials_and_token_patterns' if args.redact_logs else 'raw_not_redacted',
                         'cli_logs':'known_credentials_and_token_patterns' if args.redact_logs else 'raw_not_redacted'}
     proof['exit_code']=0 if result.wasSuccessful() and before==after and not result.skipped else 1
-    if args.quick:
+    if selected_mode=='fast':
         proof['quick_budget_s']=120
         proof['quick_within_budget']=proof['duration_s']<=120
         if not proof['quick_within_budget']:proof['exit_code']=1
+    if selected_mode=='full':
+        proof['full_target_s']=480
+        proof['full_within_target']=proof['duration_s']<=480
     (output/'verification.json').write_text(json.dumps(proof,ensure_ascii=False,indent=2),encoding='utf8')
     print(json.dumps({k:v for k,v in proof.items() if k!='runtime'},ensure_ascii=True),flush=True)
     return proof['exit_code']

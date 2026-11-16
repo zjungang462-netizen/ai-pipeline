@@ -1,27 +1,44 @@
 # 本地工作台离线示例：只执行真实 Python 断言，最后等待人工审批。
 # 在 agent-orchestrator 目录启动；Python 3.11+ 应在 PATH 中。
+# schema: root.task_workdir：任务工作目录，相对配置文件目录解析
 task_workdir = ".workbench/demo-workspace"
+# schema: root.state_dir：状态目录，相对配置文件目录解析
 state_dir = ".workbench/demo-state"
 
 [run_budget]
+# schema: run_budget.max_tokens：运行累计 token 上限；无人值守时必须为正数
 max_tokens = 12000
+# schema: run_budget.max_duration_s：运行累计秒数上限；无人值守时必须为正数
 max_duration_s = 3600
 
 [[stages]]
+# schema: stages.name：唯一阶段名；字母数字、下划线、点或横线，禁止父目录段
 name = "environment"
+# schema: stages.kind：code/report/review/test；verify 是 test 的兼容别名
 kind = "test"
+# schema: stages.timeout_s：单次执行超时，秒
 timeout_s = 20
+# schema: stages.test_cmd：test 必填的非空 argv 数组，其它类型禁止设置
 test_cmd = ["python", "-X", "utf8", "-c", "import sys; assert sys.version_info >= (3,11); print('Python 运行时检查通过')"]
 
 [[stages]]
+# schema: stages.name：唯一阶段名；字母数字、下划线、点或横线，禁止父目录段
 name = "testing"
+# schema: stages.kind：code/report/review/test；verify 是 test 的兼容别名
 kind = "test"
+# schema: stages.timeout_s：单次执行超时，秒
 timeout_s = 30
+# schema: stages.test_cmd：test 必填的非空 argv 数组，其它类型禁止设置
 test_cmd = ["python", "-X", "utf8", "-c", "import time; time.sleep(5); assert 2 + 2 == 4; assert 'pipeline'.startswith('pipe'); print('真实断言通过')"]
 
 [[stages]]
+# schema: stages.name：唯一阶段名；字母数字、下划线、点或横线，禁止父目录段
 name = "acceptance"
+# schema: stages.kind：code/report/review/test；verify 是 test 的兼容别名
 kind = "test"
+# schema: stages.approval：成功产物是否等待人工审批
 approval = true
+# schema: stages.timeout_s：单次执行超时，秒
 timeout_s = 20
+# schema: stages.test_cmd：test 必填的非空 argv 数组，其它类型禁止设置
 test_cmd = ["python", "-X", "utf8", "-c", "print('请在工作台核对测试记录后人工批准')"]

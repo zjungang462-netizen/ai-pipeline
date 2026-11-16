@@ -1,24 +1,39 @@
 # dsh 测试角色：模型负责实际执行并解释测试，独立命令继续负责确定性判定。
+# schema: root.task_workdir：任务工作目录，相对配置文件目录解析
 task_workdir = "."
+# schema: root.state_dir：状态目录，相对配置文件目录解析
 state_dir = ".dsh-test-state"
+# schema: root.watch_root：有限监视域；相对配置目录解析；空或 off 关闭
 watch_root = "off"
 
 [run_budget]
+# schema: run_budget.max_tokens：运行累计 token 上限；无人值守时必须为正数
 max_tokens = 100000
+# schema: run_budget.max_duration_s：运行累计秒数上限；无人值守时必须为正数
 max_duration_s = 180
 
 [[stages]]
+# schema: stages.name：唯一阶段名；字母数字、下划线、点或横线，禁止父目录段
 name = "test_report"
+# schema: stages.kind：code/report/review/test；verify 是 test 的兼容别名
 kind = "report"
+# schema: stages.adapter：非 test 阶段必填，引用具名适配器
 adapter = "dsh"
+# schema: stages.timeout_s：单次执行超时，秒
 timeout_s = 90
+# schema: stages.max_attempts：本轮适配器调用尝试次数上限
 max_attempts = 1
+# schema: stages.prompt：非 test 阶段必填；提示词文件或内联文本
 prompt = "只允许一次 pwsh 调用执行 node tests/js/pagination_contract.cjs 和 node tests/js/history_filter_contract.cjs；每条命令后打印 $LASTEXITCODE。禁止修改文件、安装依赖、子代理或其他工具探索。中文报告真实测试结果，失败照实报告，不因模型调用完成就声称测试通过。"
 
 [[stages]]
+# schema: stages.name：唯一阶段名；字母数字、下划线、点或横线，禁止父目录段
 name = "testing"
+# schema: stages.kind：code/report/review/test；verify 是 test 的兼容别名
 kind = "test"
+# schema: stages.timeout_s：单次执行超时，秒
 timeout_s = 60
+# schema: stages.test_cmd：test 必填的非空 argv 数组，其它类型禁止设置
 test_cmd = ["python", "-X", "utf8", "-m", "unittest", "discover", "-s", "tests", "-p", "test_history_filter_ui.py", "-v"]
 
 [adapters.dsh]

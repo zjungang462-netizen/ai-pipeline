@@ -5,6 +5,8 @@
 """
 from __future__ import annotations
 
+from .schema import config_field
+
 from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
@@ -76,23 +78,23 @@ class Result:
 
 @dataclass
 class StageSpec:
-    name: str
-    adapter: str
-    prompt: str                                 # prompt 模板文件路径
-    timeout_s: int = 300
-    approval: bool = False
-    max_attempts: int = 2
-    max_tokens: int | None = None
-    max_duration_s: int | None = None
-    kind: str = "code"                          # code | report | review | test
-    config_keys: dict[str, Any] = field(default_factory=dict)  # 参与 inputs_hash 的配置
+    name: str = config_field('唯一阶段名；字母数字、下划线、点或横线，禁止父目录段')
+    adapter: str = config_field('非 test 阶段必填，引用具名适配器', input_default="", required=True)
+    prompt: str = config_field('非 test 阶段必填；提示词文件或内联文本', input_default="", required=True)
+    timeout_s: int = config_field('单次执行超时，秒', default=300, numeric=True, minimum=0.001)
+    approval: bool = config_field('成功产物是否等待人工审批', default=False)
+    max_attempts: int = config_field('本轮适配器调用尝试次数上限', default=2, numeric=True, integer=True, minimum=1)
+    max_tokens: int | None = config_field('该阶段累计 token 上限；空表示无阶段级上限', default=None, numeric=True, integer=True, minimum=0)
+    max_duration_s: int | None = config_field('该阶段累计计量秒数上限；空表示无阶段级上限', default=None, numeric=True, minimum=0)
+    kind: str = config_field('code/report/review/test；verify 是 test 的兼容别名', default='code')
+    config_keys: dict[str, Any] = config_field('参与输入指纹的可 JSON 序列化配置表', default_factory=dict)
     # L2 审查反馈环（仅 kind=review 生效）
-    feedback_to: str | None = None              # 不通过时反馈回哪个阶段（如 coding）
-    max_rounds: int = 1                         # 最多反馈轮次（含首轮审查）
+    feedback_to: str | None = config_field('review/test 反馈目标，必须是之前的阶段', default=None)
+    max_rounds: int = config_field('反馈轮次上限，含首轮', default=1, numeric=True, integer=True, minimum=1)
     # kind=test：不调用模型，真实执行命令；非零退出码即失败
-    test_cmd: list[str] = field(default_factory=list)
-    context_files: list[str] = field(default_factory=list)
-    precheck_cmd: list[str] = field(default_factory=list)
+    test_cmd: list[str] = config_field('test 必填的非空 argv 数组，其它类型禁止设置', default_factory=list)
+    context_files: list[str] = config_field('显式上下文相对文件路径列表', default_factory=list)
+    precheck_cmd: list[str] = config_field('仅 code 可设，运行前真实检查命令 argv', default_factory=list)
 
 
 @dataclass

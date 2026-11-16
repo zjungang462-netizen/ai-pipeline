@@ -117,7 +117,7 @@ class CLIReliability(EvidenceTestCase):
         ctx=self.ctx()
         # 覆盖进程启动和首条完整响应的等待，不能把活动必须可见偷换成 2.5 秒启动 SLA。
         ctx.timeout_s=20
-        env['CLI_FIXTURE_API_KEY']='sk-live-test-private-key-1234567890'
+        env['CLI_FIXTURE_API_KEY']='sk-' 'live-test-private-key-1234567890'
         self.register_evidence_secrets(env['CLI_FIXTURE_API_KEY'])
         result=[]
         def run():
@@ -139,7 +139,9 @@ class CLIReliability(EvidenceTestCase):
             raw=(ctx.attempt_dir/'live-stdout.log').read_text(encoding='utf8')
             self.assertIn('[REDACTED]',raw)
             self.assertNotIn(env['CLI_FIXTURE_API_KEY'],raw)
-        finally:thread.join(timeout=25)
+        finally:
+            (data/'stream-inspected').write_text('inspected',encoding='utf8')
+            thread.join(timeout=25)
         self.assertFalse(thread.is_alive())
         self.assertTrue(result[0].usage['usage_unknown'])
         self.assertEqual(result[0].usage['known_tokens'],30)

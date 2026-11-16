@@ -1,59 +1,96 @@
 # 推荐流水线：需求 → 设计 → 编码 → 测试(真命令) → 审查(结论文件)
 # 默认通道 openai_compat。已验证的 CLI 混合链路见 cli-mixed.example.toml。
 
+# schema: root.task_workdir：任务工作目录，相对配置文件目录解析
 task_workdir = "./workspace"
+# schema: root.state_dir：状态目录，相对配置文件目录解析
 state_dir = "./.orchestrator"
+# schema: root.serial：当前只支持 true，阶段串行执行
 serial = true
+# schema: root.allow_yolo：兼容开关，不解除路径与审批约束
 allow_yolo = false
 
 # 父目录快照默认关闭；显式设置 watch_root 后才扫描，默认仅告警。
 # 真正的写入约束 = API 适配器相对路径校验 + git 按清单提交。
 # 需要把根外变更当失败时才设 true；硬隔离请用容器/系统级作业对象。
+# schema: root.watch_enforce：根外快照变化是否判失败，默认仅告警
 watch_enforce = false
 # watch_root = "off"             # off 完全关闭根外扫描（零开销）
 
 [run_budget]
+# schema: run_budget.max_tokens：运行累计 token 上限；无人值守时必须为正数
 max_tokens = 200000
+# schema: run_budget.max_duration_s：运行累计秒数上限；无人值守时必须为正数
 max_duration_s = 1800
 
 [[stages]]
+# schema: stages.name：唯一阶段名；字母数字、下划线、点或横线，禁止父目录段
 name = "requirements"
+# schema: stages.adapter：非 test 阶段必填，引用具名适配器
 adapter = "api"
+# schema: stages.prompt：非 test 阶段必填；提示词文件或内联文本
 prompt = "prompts/requirements.md"
+# schema: stages.kind：code/report/review/test；verify 是 test 的兼容别名
 kind = "report"
+# schema: stages.timeout_s：单次执行超时，秒
 timeout_s = 120
 
 [[stages]]
+# schema: stages.name：唯一阶段名；字母数字、下划线、点或横线，禁止父目录段
 name = "design"
+# schema: stages.adapter：非 test 阶段必填，引用具名适配器
 adapter = "api"
+# schema: stages.prompt：非 test 阶段必填；提示词文件或内联文本
 prompt = "prompts/design.md"
+# schema: stages.kind：code/report/review/test；verify 是 test 的兼容别名
 kind = "report"
+# schema: stages.timeout_s：单次执行超时，秒
 timeout_s = 120
+# schema: stages.approval：成功产物是否等待人工审批
 approval = true                  # 设计人工确认后再往下
 
 [[stages]]
+# schema: stages.name：唯一阶段名；字母数字、下划线、点或横线，禁止父目录段
 name = "coding"
+# schema: stages.adapter：非 test 阶段必填，引用具名适配器
 adapter = "api"
+# schema: stages.prompt：非 test 阶段必填；提示词文件或内联文本
 prompt = "prompts/coding.md"
+# schema: stages.kind：code/report/review/test；verify 是 test 的兼容别名
 kind = "code"
+# schema: stages.timeout_s：单次执行超时，秒
 timeout_s = 180
+# schema: stages.max_attempts：本轮适配器调用尝试次数上限
 max_attempts = 2
 
 [[stages]]
+# schema: stages.name：唯一阶段名；字母数字、下划线、点或横线，禁止父目录段
 name = "testing"
+# schema: stages.kind：code/report/review/test；verify 是 test 的兼容别名
 kind = "test"                    # 不调用模型：真实执行命令
+# schema: stages.test_cmd：test 必填的非空 argv 数组，其它类型禁止设置
 test_cmd = ["python", "-m", "unittest", "discover", "-s", "tests"]
+# schema: stages.timeout_s：单次执行超时，秒
 timeout_s = 600
+# schema: stages.feedback_to：review/test 反馈目标，必须是之前的阶段
 feedback_to = "coding"           # 退出码非零 => 直接把执行记录反馈回编码
+# schema: stages.max_rounds：反馈轮次上限，含首轮
 max_rounds = 2
 
 [[stages]]
+# schema: stages.name：唯一阶段名；字母数字、下划线、点或横线，禁止父目录段
 name = "review"
+# schema: stages.adapter：非 test 阶段必填，引用具名适配器
 adapter = "api"
+# schema: stages.prompt：非 test 阶段必填；提示词文件或内联文本
 prompt = "prompts/review.md"
+# schema: stages.kind：code/report/review/test；verify 是 test 的兼容别名
 kind = "review"                  # 结论写 review_verdict.json，报告只给人看
+# schema: stages.timeout_s：单次执行超时，秒
 timeout_s = 180
+# schema: stages.feedback_to：review/test 反馈目标，必须是之前的阶段
 feedback_to = "coding"
+# schema: stages.max_rounds：反馈轮次上限，含首轮
 max_rounds = 2                   # 只在有文件级问题时返工，否则停下等人
 
 [adapters.api]

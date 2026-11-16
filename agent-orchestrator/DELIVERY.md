@@ -1,6 +1,6 @@
 # 干净目录运行与验收
 
-2026-11-17 阶段二开发源码的全量离线验收为 **514 项通过，零失败/错误/跳过**。下文 `delivery-2026-11-16-round9` 的 479 项与 SHA 清单描述上次冻结发布包；本阶段的新命令需使用最新源码，未改写旧包或标签。
+2026-11-17 阶段三开发源码的全量离线验收为 **519 项通过，零失败/错误/跳过**；分层为 fast **95** 项、slow **424** 项，互斥并完整覆盖 full。阶段二的 514 项为历史基线。下文 `delivery-2026-11-16-round9` 的 479 项与 SHA 清单描述上次冻结发布包；新命令需使用最新源码，未改写旧包或标签。
 
 ## 环境
 
@@ -84,6 +84,21 @@ python scripts/precommit.py --output ../precommit-verification
 `--quick` 保留完整示例/CLI/HTTP 冒烟，执行固定核心集合，覆盖配置、引擎状态、预算、适配器、工作台执行范围及新增运维门禁；目标总耗时不超过 120 秒，超时预算、失败、错误或跳过均返回非零。`verification.json` 写入 `mode=quick` 和预算结果，不能替代 `mode=full` 的完整验收；quick 的日志名为 `quick-regression.log`，完整验收仍为 `full-regression.log`。
 
 `precommit.py` 先对暂存区与工作树做 `git diff --check`，验证受 Git 管理/未忽略的流水线 TOML，再扫描新增或改动文本中的常见令牌、含凭据 URL、私钥头和直接写入的凭据。暂存区与工作树分别读取，防止已暂存凭据被工作树的干净版本掩盖。只输出位置和类别，不回显凭据；大于 2 MiB 的文本拒绝跳过扫描，二进制不扫描。受控夹具应使用明确的运行时构造，不提交可被误用的真实凭据；扫描不是任意秘密的识别保证。静态检查通过后调用同一个官方 `--quick --redact-logs` 入口；`--checks-only` 仅用于静态诊断，不代表完整提交前门禁通过。脚本不自动安装 Git hook。
+
+## 配置与测试维护（阶段三）
+
+配置 dataclass 的字段元数据统一声明默认值、数值上下限与说明；严格校验、doctor 字段集合、README 配置表和六份示例注释复用这些声明。生成示例注释不改变 TOML 解析值；生成文件的漂移会使提交前检查失败。历史过程与旧测试数字已移至 HISTORY。
+
+```powershell
+python scripts/generate_config_docs.py --check
+python scripts/verify_delivery.py --suite fast --redact-logs --output ../fast-verification
+python scripts/verify_delivery.py --suite slow --redact-logs --output ../slow-verification
+python scripts/verify_delivery.py --suite full --redact-logs --output ../full-verification
+```
+
+`--quick` 与 `--suite fast` 使用同一组测试；slow 为完整发现集合减去 fast，因此新增测试不会因未分类而漏出 full。`--quick` 与 `--suite` 互斥。每次仍执行原有冒烟，并额外保存 `test-ids.json`、`test-durations.json`、`slow-tests.json`；默认将至少 2 秒的用例列入慢表，可用正数 `--slow-threshold` 调整。
+
+fast 的 120 秒门限仍影响退出码；full 的 480 秒是性能观察目标，以 `full_within_target` 记录，不把机器负载导致的变慢冒充功能失败。流式日志夹具改用观察握手结束，保留原有执行中读取、凭据替换和部分用量断言；不再为该观察测试固定等到超时。
 
 ## 日志脱敏与诊断保留（阶段二）
 

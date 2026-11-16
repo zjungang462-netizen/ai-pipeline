@@ -60,7 +60,11 @@ elif mode=='stream':
     sys.stdout.write('\n')
     usage(1)
     (data/'ready').write_text('ready',encoding='utf8')
-    time.sleep(30)
+    # 观察者确认已在执行中读取进度后结束；保留无最终响应的部分用量语义。
+    deadline=time.monotonic()+30
+    while not (data/'stream-inspected').is_file() and time.monotonic()<deadline:
+        time.sleep(.02)
+    raise SystemExit(7)
 
 emit({'event':'result','result':{'status':'SUCCESS','response':'fixture changed module.py; external tests decide completion',
     'usage':{'total_tokens':15,'cache_read_tokens':5}}})

@@ -1,63 +1,110 @@
 # 实际调用本机 CLI：Codex 设计/审查，反重力编辑源码，编排器执行测试。
 # 首次使用请核对 exe、Codex 本机模型配置、反重力登录和代理；测试额度不是 API 硬输出上限。
+# schema: root.task_workdir：任务工作目录，相对配置文件目录解析
 task_workdir = "examples/cli_mixed_demo"
+# schema: root.state_dir：状态目录，相对配置文件目录解析
 state_dir = ".cli_mixed_state"
+# schema: root.serial：当前只支持 true，阶段串行执行
 serial = true
+# schema: root.allow_yolo：兼容开关，不解除路径与审批约束
 allow_yolo = false
+# schema: root.watch_root：有限监视域；相对配置目录解析；空或 off 关闭
 watch_root = "off"
 
 [run_budget]
+# schema: run_budget.max_tokens：运行累计 token 上限；无人值守时必须为正数
 max_tokens = 220000
+# schema: run_budget.max_duration_s：运行累计秒数上限；无人值守时必须为正数
 max_duration_s = 600
 
 [autonomy]
+# schema: autonomy.enabled：显式开启无人值守
 enabled = true
+# schema: autonomy.auto_approve：预授权自动批准的阶段名列表
 auto_approve = ["coding"]
+# schema: autonomy.allowed_files：允许修改的相对文件路径白名单
 allowed_files = ["name_ops.py", "count_ops.py"]
+# schema: autonomy.baseline_paths：首次初始化加入基线的相对路径
 baseline_paths = ["name_ops.py", "count_ops.py", "tests"]
+# schema: autonomy.max_repair_rounds：整个反馈链的最大修复轮数
 max_repair_rounds = 2
+# schema: autonomy.max_stagnant_rounds：连续无进展的最大轮数
 max_stagnant_rounds = 2
+# schema: autonomy.repair_batch_size：单轮最多修改文件数
 repair_batch_size = 2
+# schema: autonomy.output_tokens：单次输出额度，CLI 不构成服务端硬限制
 output_tokens = 2048
+# schema: autonomy.context_chars：上下文字符数上限
 context_chars = 12000
 
 [[stages]]
+# schema: stages.name：唯一阶段名；字母数字、下划线、点或横线，禁止父目录段
 name = "design"
+# schema: stages.kind：code/report/review/test；verify 是 test 的兼容别名
 kind = "report"
+# schema: stages.adapter：非 test 阶段必填，引用具名适配器
 adapter = "codex"
+# schema: stages.prompt：非 test 阶段必填；提示词文件或内联文本
 prompt = "prompts/cli_design.md"
+# schema: stages.context_files：显式上下文相对文件路径列表
 context_files = ["name_ops.py", "count_ops.py", "tests/test_contract.py"]
+# schema: stages.timeout_s：单次执行超时，秒
 timeout_s = 180
+# schema: stages.max_attempts：本轮适配器调用尝试次数上限
 max_attempts = 1
 
 [[stages]]
+# schema: stages.name：唯一阶段名；字母数字、下划线、点或横线，禁止父目录段
 name = "coding"
+# schema: stages.kind：code/report/review/test；verify 是 test 的兼容别名
 kind = "code"
+# schema: stages.adapter：非 test 阶段必填，引用具名适配器
 adapter = "agy"
+# schema: stages.prompt：非 test 阶段必填；提示词文件或内联文本
 prompt = "prompts/cli_develop.md"
+# schema: stages.context_files：显式上下文相对文件路径列表
 context_files = ["name_ops.py", "count_ops.py"]
+# schema: stages.precheck_cmd：仅 code 可设，运行前真实检查命令 argv
 precheck_cmd = ["python", "-X", "utf8", "-m", "unittest", "discover", "-s", "tests", "-v"]
+# schema: stages.approval：成功产物是否等待人工审批
 approval = true
+# schema: stages.timeout_s：单次执行超时，秒
 timeout_s = 240
+# schema: stages.max_attempts：本轮适配器调用尝试次数上限
 max_attempts = 1
 
 [[stages]]
+# schema: stages.name：唯一阶段名；字母数字、下划线、点或横线，禁止父目录段
 name = "testing"
+# schema: stages.kind：code/report/review/test；verify 是 test 的兼容别名
 kind = "test"
+# schema: stages.test_cmd：test 必填的非空 argv 数组，其它类型禁止设置
 test_cmd = ["python", "-X", "utf8", "-m", "unittest", "discover", "-s", "tests", "-v"]
+# schema: stages.feedback_to：review/test 反馈目标，必须是之前的阶段
 feedback_to = "coding"
+# schema: stages.max_rounds：反馈轮次上限，含首轮
 max_rounds = 2
+# schema: stages.timeout_s：单次执行超时，秒
 timeout_s = 30
 
 [[stages]]
+# schema: stages.name：唯一阶段名；字母数字、下划线、点或横线，禁止父目录段
 name = "review"
+# schema: stages.kind：code/report/review/test；verify 是 test 的兼容别名
 kind = "review"
+# schema: stages.adapter：非 test 阶段必填，引用具名适配器
 adapter = "codex"
+# schema: stages.prompt：非 test 阶段必填；提示词文件或内联文本
 prompt = "prompts/cli_review.md"
+# schema: stages.context_files：显式上下文相对文件路径列表
 context_files = ["name_ops.py", "count_ops.py", "tests/test_contract.py"]
+# schema: stages.feedback_to：review/test 反馈目标，必须是之前的阶段
 feedback_to = "coding"
+# schema: stages.max_rounds：反馈轮次上限，含首轮
 max_rounds = 2
+# schema: stages.timeout_s：单次执行超时，秒
 timeout_s = 180
+# schema: stages.max_attempts：本轮适配器调用尝试次数上限
 max_attempts = 1
 
 [adapters.codex]
