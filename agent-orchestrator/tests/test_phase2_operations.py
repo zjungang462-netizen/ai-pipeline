@@ -132,6 +132,9 @@ test_cmd=["missing-command-xyznothing"]
         self.assertFalse(self.doctor()['ok'])
         self.config.write_text('watch_root="off"\n'+text, encoding='utf8')
         self.assertTrue(self.doctor()['ok'])
+        # 状态根包含多个 run，并不等于某一次运行的可写根。
+        self.config.write_text('watch_root="state"\n'+text, encoding='utf8')
+        self.assertTrue(self.doctor()['ok'])
 
     def test_doctor_budget_and_config_keys_datetime_use_strict_loader(self):
         report=self.doctor('\n[stages.config_keys]\nwhen=2026-11-17T00:00:00Z\n')

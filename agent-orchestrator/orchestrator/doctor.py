@@ -147,8 +147,10 @@ def diagnose(path: str | Path) -> dict:
         watch = (cfg.base_dir/cfg.watch_root).resolve()
         if not watch.is_dir():
             add('error', 'watch_root', '监视目录不存在', str(watch))
-        elif watch.is_relative_to(cfg.task_workdir) or watch.is_relative_to(cfg.state_dir):
+        elif watch.is_relative_to(cfg.task_workdir):
             add('error', 'watch_root', '监视域落在可写根内，运行时会禁用该域', '选择可写根外的有限监视目录')
+        elif watch.is_relative_to(cfg.state_dir):
+            add('warning', 'watch_root', '监视域位于状态目录内，需确认未落入本次 run 的可写根')
     elif cfg.watch_enforce:
         add('error', 'watch_enforce', '开启强制监视但未设置 watch_root', '指定有效的监视域')
     if cfg.watch_enforce and not any(s.kind == 'code' for s in cfg.stages):
