@@ -113,5 +113,37 @@
     "source_sha256": "040053bdef769919ba6ec7703ec69f71c6086c1ae37efc67816cc2bf86cad4fb",
     "fixture_sha256": "8f67362be8bf2b28687fce5347a27114179d3ba3277ee62043d68ceac762f0ea",
     "token_scope": "zero token counters are incomplete; credits preserved separately"
+  },
+  "claude_2.1.325_result_real.jsonl": {
+    "source": "真实本机Claude Code经DeepSeek Anthropic兼容API的无工具成功调用",
+    "version": "2.1.325",
+    "captured_at": "2026-11-17T12:28:00.527196+08:00",
+    "backend": "DeepSeek api.deepseek.com/anthropic; not Anthropic Claude model",
+    "requested_model": "deepseek-v4-pro[1M]",
+    "requested_effort": "max",
+    "redacted_fields": [
+      "session/message/tool IDs",
+      "cwd/original_cwd/powershell_path",
+      "tool file paths",
+      "thinking body omitted"
+    ],
+    "source_sha256": "d59aadd3ee0b3dcf391ad21faff81f5b8115257e3718fa79b9354d0188a97386",
+    "fixture_sha256": "ba862678baa3e8df60d6541df94f5b2cca8ce03dd0491451f92974eb3a21210a"
+  },
+  "claude_2.1.325_tools_real.jsonl": {
+    "source": "真实本机Claude Code经DeepSeek Anthropic兼容API的Read/Edit工具调用",
+    "version": "2.1.325",
+    "captured_at": "2026-11-17T12:28:00.535087+08:00",
+    "backend": "DeepSeek api.deepseek.com/anthropic; not Anthropic Claude model",
+    "requested_model": "deepseek-v4-pro[1M]",
+    "requested_effort": "max",
+    "redacted_fields": [
+      "session/message/tool IDs",
+      "cwd/original_cwd/powershell_path",
+      "tool file paths",
+      "thinking body omitted"
+    ],
+    "source_sha256": "97894bc5422488e66caf335948ee88e3f89dccafc6f9038a98a4a6c833457cec",
+    "fixture_sha256": "ad4b8d1505ecbb71226e4cffc13a3fa97b3339d7ece433036e5624172bf3ebfa"
   }
 }

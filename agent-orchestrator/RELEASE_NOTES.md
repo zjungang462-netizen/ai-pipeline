@@ -1,4 +1,10 @@
-# 0.5.2：Qoder真实文件工具与维护闭环
+# 0.5.3：Claude Code接入用户的DeepSeek兼容连接
+
+新增`cli_claude`，按真实Claude Code 2.1.325流式协议验证终态、工具事件和计量。只继承用户的连接/模型字段，凭据仅在子进程环境；原配置不改写，工具身份与DeepSeek实际后端分开记录。控制台支持模型、上下文后缀和max思考强度。
+
+原生Claude Code经DeepSeek Pro连接完成真实文件读写和一条维护任务闭环，四阶段各一次通过，独立保护测试与审查通过，无主代理补写实现。计量按message.id去重、最终累计取最大值，缓存与thinking子计数不重复加，缺失/中断保留未知。CLI美元估值不冒充DeepSeek账单。具体范围、样本、操作和最终回归数字见[DELIVERY.md](DELIVERY.md)；旧包和标签保持冻结。
+
+## 0.5.2：Qoder真实文件工具与维护闭环
 
 精确适配Qoder 1.1.89/协议1.5.0的stdin、stream-json和严格成功终态。控制台可选Qoder账户模型/思考强度及adaptive模式；代码阶段只开放文件工具，独立测试不交给模型执行，未知版本或工具拒绝不算完成。token全零按未知计量处理，credits在state/metrics/CSV单列留存。
 

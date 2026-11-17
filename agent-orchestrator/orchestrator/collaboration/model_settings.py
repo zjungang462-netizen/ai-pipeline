@@ -9,7 +9,7 @@ from pathlib import Path
 from ..config import load_config, parse_config
 from .config_copy import dump_config
 
-MODEL_TYPES = {'openai_compat', 'cli_codex', 'cli_qwen', 'cli_agy', 'cli_qoder'}
+MODEL_TYPES = {'openai_compat', 'cli_codex', 'cli_qwen', 'cli_agy', 'cli_qoder', 'cli_claude'}
 EFFORTS = ('none', 'low', 'medium', 'high', 'xhigh')
 
 
@@ -18,11 +18,21 @@ def describe_models(cfg):
     for name, adapter in cfg.adapters.items():
         if adapter.type not in MODEL_TYPES: continue
         options=adapter.options
+        effective_model=options.get('model') or ''
+        effective_effort=options.get('reasoning_effort') or ''
+        endpoint=None
+        if adapter.type=='cli_claude':
+            from ..adapters.cli_claude import ClaudeAdapter
+            profile=ClaudeAdapter(name,model=options.get('model'),reasoning_effort=options.get('reasoning_effort'),
+                                  inherit_connection=options.get('inherit_connection',True)).input_fingerprint()
+            effective_model=profile['model'] or '';effective_effort=profile['reasoning_effort'] or ''
+            endpoint=profile['backend_endpoint']
         result.append(dict(name=name, type=adapter.type, model=options.get('model') or '',
-                           reasoning_effort=options.get('reasoning_effort') or '',
+                           reasoning_effort=effective_effort, effective_model=effective_model,
+                           backend_endpoint=endpoint,
                            thinking=options.get('thinking') or '',
                            review_json_mode=options.get('review_json_mode', False),
-                           supports_effort=adapter.type in ('openai_compat','cli_codex','cli_qoder'),
+                           supports_effort=adapter.type in ('openai_compat','cli_codex','cli_qoder','cli_claude'),
                            supports_thinking=adapter.type in ('openai_compat','cli_qoder')))
     return result
 
@@ -48,11 +58,11 @@ def validate_options(cfg, options):
                 row[key]=value;continue
             if not isinstance(value,str):raise ValueError('模型选项必须为字符串')
             if key=='model':
-                if not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9._:/-]{0,159}',value):
+                if len(value)>160 or not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9._:/-]{0,159}(?:\[(?:1M|200K)\])?',value):
                     raise ValueError('模型名称必须为 1..160 字符的模型标识')
             elif key=='reasoning_effort':
-                allowed=('low','medium','high','xhigh','max') if adapter.type=='cli_qoder' else EFFORTS
-                if adapter.type not in ('openai_compat','cli_codex','cli_qoder') or value not in allowed:
+                allowed=('low','medium','high','xhigh','max') if adapter.type in ('cli_qoder','cli_claude') else EFFORTS
+                if adapter.type not in ('openai_compat','cli_codex','cli_qoder','cli_claude') or value not in allowed:
                     raise ValueError('该工具不支持此思考强度')
             elif (adapter.type=='cli_qoder' and value not in ('auto','adaptive','disabled')) or (
                     adapter.type!='cli_qoder' and (adapter.type!='openai_compat' or value not in ('enabled','disabled'))):

@@ -81,6 +81,23 @@ class UsageLedger:
         old=self.responses.get(key,{})
         self.responses[key]={k:max(old.get(k,0),v) for k,v in values.items()}
 
+    def observe_claude(self,event):
+        """Claude真实message.id重复块去重，最终usage为累积总量，不与分步重复相加。"""
+        raw=None;identifier=None;final=False
+        if event.get('type')=='assistant' and isinstance(event.get('message'),dict):
+            message=event['message'];raw=message.get('usage');identifier=message.get('id')
+        elif event.get('type')=='result':raw=event.get('usage');final=True
+        if not isinstance(raw,dict):return
+        keys=('input_tokens','output_tokens','cache_read_input_tokens','cache_creation_input_tokens')
+        if not all(type(raw.get(k)) is int and raw[k]>=0 for k in keys):return
+        value={'tokens':sum(raw[k] for k in keys),'cli_reported_tokens':sum(raw[k] for k in keys),
+               'cache_read_tokens':raw['cache_read_input_tokens']}
+        if final:
+            self.final=value
+            self.complete=event.get('subtype')=='success' and event.get('is_error') is False and event.get('stop_reason')=='end_turn'
+        elif isinstance(identifier,str):
+            self._put(('claude',identifier),value);self.complete=False
+
     def snapshot(self):
         totals={key:sum(row[key] for row in self.responses.values())
                 for key in ('tokens','cli_reported_tokens','cache_read_tokens')}
@@ -216,7 +233,8 @@ class CLITrace:
         except (ValueError,TypeError):return
         if not isinstance(event,dict):return
         self.ledger.observe(event)
-        if self.channel=='cli_qoder':
+        if self.channel=='cli_claude':self.ledger.observe_claude(event)
+        if self.channel in ('cli_qoder','cli_claude'):
             message=event.get('message')
             content=message.get('content',[]) if isinstance(message,dict) else []
             for item in content if isinstance(content,list) else []:
@@ -226,7 +244,7 @@ class CLITrace:
                     # 仅映射真实抓取的读/写事件；不推断任意工具调用具有写权限。
                     mapped={'Read':'read_file','Edit':'edit_file','Write':'write_file','Glob':'glob','Grep':'grep'}.get(name)
                     if not mapped:continue
-                    key=('qoder',str(event.get('session_id') or ''),item['id'])
+                    key=(self.channel,str(event.get('session_id') or ''),item['id'])
                     parameters=item.get('input',{})
                     if not isinstance(parameters,dict):parameters={}
                     self.qoder_tools[item['id']]=(key,mapped)

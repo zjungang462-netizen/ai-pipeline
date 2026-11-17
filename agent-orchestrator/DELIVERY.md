@@ -1,14 +1,30 @@
 # 干净目录运行与验收
 
-## 当前版本：0.5.2（Qoder真实接入）
+## 当前版本：0.5.3（Claude Code与DeepSeek兼容连接）
 
-当前源码全量收集 **594 项**，fast/quick **118 项**、slow **476 项**；最终以同包 `delivery-metadata/verification.json` 与包旁 `verification-package/verification.json` 的实际结果为准。下方阶段二至四的旧数字和标签为历史冻结版本，不表示本次新增功能的验证。用 `python -m orchestrator.cli --version` 查看版本，包的实际提交与原始字节清单见 `SNAPSHOT.json`。
+当前源码全量收集 **607 项**，fast/quick **127 项**、slow **480 项**；最终以同包 `delivery-metadata/verification.json` 与包旁 `verification-package/verification.json` 的实际结果为准。下方阶段二至四的旧数字和标签为历史冻结版本，不表示本次新增功能的验证。用 `python -m orchestrator.cli --version` 查看版本，包的实际提交与原始字节清单见 `SNAPSHOT.json`。
 
 新建任务默认选择“不限制 token”，并可按已登记适配器指定账户可用模型和受支持的思考选项。模型名由账户/端点决定，系统不虚构“最佳”型号；工具或 API 拒绝参数会保留失败，不自动回退到低配模型。
 
 ### 模型与性能设置
 
-工作台创建对话框显示每个适配器的当前模型：API/Codex/Qwen/反重力/Qoder支持本次模型覆盖；Codex 可设 `reasoning_effort=xhigh` 等强度；兼容 API 可设 `reasoning_effort` 与 `thinking=enabled/disabled`，取决于端点支持。启用 thinking 时不同时发送 temperature。Qoder支持模型所提供的low/medium/high/xhigh/max强度，思考模式限auto/adaptive/disabled；实际能力仍由账户与型号决定，不自动降级。
+工作台创建对话框显示每个适配器的当前模型：API/Codex/Qwen/反重力/Qoder/Claude Code支持本次模型覆盖；Codex 可设 `reasoning_effort=xhigh` 等强度；兼容 API 可设 `reasoning_effort` 与 `thinking=enabled/disabled`，取决于端点支持。启用 thinking 时不同时发送 temperature。Qoder支持模型所提供的low/medium/high/xhigh/max强度，思考模式限auto/adaptive/disabled；Claude Code可设low/medium/high/xhigh/max，不展示API专属thinking/JSON选项。实际能力由工具、账户与型号决定，不自动降级。
+
+### Claude Code工具与DeepSeek模型分离
+
+`cli_claude`精确绑定已验证的Claude Code **2.1.325**。本机连接为`https://api.deepseek.com/anthropic`，模型选择`deepseek-v4-pro[1M]`、思考选项`max`；不是Anthropic原生Claude模型。当前用户配置的Opus别名映射为DeepSeek Pro，默认优先读取该高能力映射，也可显式指定模型/强度，支持`[1M]`上下文后缀。
+
+`inherit_connection=true`仅从`~/.claude/settings.json`读取ANTHROPIC端点、凭据和模型映射及思考设置；不会载入用户hooks/MCP/plugins、apiKeyHelper或改写源配置。凭据只在子进程内存环境，不能写入argv、任务TOML或输入指纹；显式`extra_env`声明的连接变量可以覆盖。`inherit_connection=false`不读取该文件，可配合明确的环境变量名使用。端点、模型/别名映射和effort参与指纹；连接变化不会沿用旧输入哈希，凭据值不入指纹。
+
+采用原生`claude.exe`更适合Windows，示例`claude-deepseek.example.toml`可填写真实路径，npm `claude.cmd`也可配置。使用bare/safe-mode/restricted与strict-mcp-config，显式禁用自定义slash命令、Chrome、会话持久化；只继承连接字段，不调用订阅登录。编码只开放Read/Glob/Grep/Edit/Write、acceptEdits，报告/审查只有读工具且dontAsk；不开放shell/Web/Agent、额外目录或绕过全部权限。CLI内置组件可能仍在init中列出，不能将“关闭自定义组件”解释为所有内置组件从协议消失。
+
+严格要求init版本、唯一末尾result、success/is_error=false/end_turn/completed、无权限拒绝或安全停止、非零退出失败。Claude常把同一响应拆成thinking和tool_use/text多个消息，以message.id取计量最大值去重，最终usage是累计总量，不和分步再次相加。Anthropic兼容计量中input、output、cache_read、cache_creation相加；thinking_tokens是output子集，不重复加。缺少计量时保留unknown，超时仍保存已观察下界。CLI的美元估值未按DeepSeek账单验证，不进入实际费用列。
+
+实际无工具调用与Read/Edit单文件探针均成功，用户设置文件内容哈希不变。随后真实维护任务完成API设计→Claude Code/DeepSeek编码→四项保护测试→独立API审查，四阶段各attempt1、只改一个允许文件，保护测试哈希不变、主代理未补写实现；墙钟178.625秒，总已报告67948tokens，其中Claude工具阶段60296（含33152缓存读取），API设计/审查7652。该样本不代表所有业务任务或后端参数效果；工具接受max且后端有thinking计数，不等于独立证明最大推理深度带来质量提升。
+
+CLI可能输出unrecognized_model警告，因为DeepSeek名称不在其内置Claude型号表，但本次真实响应的model与usage仍显示DeepSeek；不把警告当成功，也不忽略失败退出码。execution记录保存CLI身份与实报模型，stage_usage/metrics/CSV新增backend_model/backend_endpoint，工作台区分配置和实报值，历史记录无字段不根据当前连接猜补。
+
+真实工具样本/provenance已脱敏会话与消息ID、路径，并省略思考正文；离线回归不调用模型。修复任务产出的畸形stages/stage_usage摘要边界已整合并新增回归，保持终态metrics优先、未知字段不填零。
 
 ### Qoder 1.1.89 真实文件工具链路
 

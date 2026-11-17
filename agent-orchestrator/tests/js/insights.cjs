@@ -43,6 +43,11 @@ class Element{
  const thinking=qc.find(n=>n.dataset.option==='thinking');assert.ok(thinking.children.some(o=>o.value==='adaptive'));assert.ok(!thinking.children.some(o=>o.value==='enabled'));
  effort.value='high';thinking.value='adaptive';const qo=vm.runInContext('executionOptions()',context);assert.equal(qo.models.qoder.thinking,'adaptive');
 
+ vm.runInContext("projects.push({id:'c',config_hash:'h',models:[{name:'claude',type:'cli_claude',model:'',effective_model:'deepseek-v4-pro[1M]',reasoning_effort:'max',supports_effort:true,supports_thinking:false}]});",context);
+ nodes.get('project-select').value='c';vm.runInContext('renderModelSettings()',context);
+ const cc=nodes.get('model-settings').querySelectorAll();assert.equal(cc.find(n=>n.dataset.option==='model').value,'deepseek-v4-pro[1M]');
+ assert.ok(cc.find(n=>n.dataset.option==='reasoning_effort').children.some(o=>o.value==='max'));
+ assert.ok(!cc.some(n=>n.dataset.option==='review_json_mode'||n.dataset.option==='thinking'));
  assert.equal(requests.filter(r=>r.options?.method==='POST').length,0,'applying template must not execute');
  await nodes.get('compare-run').onclick();
  assert.ok(nodes.get('compare-result').textContent.includes('未知'));

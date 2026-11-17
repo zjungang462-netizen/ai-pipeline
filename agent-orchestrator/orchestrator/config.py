@@ -29,6 +29,7 @@ KNOWN_ADAPTER_TYPES = {
     "cli_dsh",
     "cli_doubao",
     "cli_agy",
+    "cli_claude",
 }
 
 # 配置表允许的键集合：未知键直接报错，避免拼写错误让安全/预算字段静默失效。

@@ -9,6 +9,7 @@ from .cli_dsh import DshAdapter
 from .cli_agy import AgyAdapter
 from .cli_qoder import QoderAdapter
 from .cli_doubao import DoubaoAdapter
+from .cli_claude import ClaudeAdapter
 
 _REGISTRY = {
     "cli_codex": CodexAdapter,
@@ -17,6 +18,7 @@ _REGISTRY = {
     "cli_agy": AgyAdapter,
     "cli_qoder": QoderAdapter,
     "cli_doubao": DoubaoAdapter,
+    "cli_claude": ClaudeAdapter,
 }
 
 
@@ -35,6 +37,8 @@ def build(cfg: AdapterConfig, kind: str = "report") -> Adapter:
         kwargs["model"] = o["model"]
     if cls is QoderAdapter:
         kwargs.update(model=o.get('model'),reasoning_effort=o.get('reasoning_effort'),thinking=o.get('thinking'))
+    if cls is ClaudeAdapter:
+        kwargs.update(model=o.get('model'),reasoning_effort=o.get('reasoning_effort'),inherit_connection=o.get('inherit_connection',True))
     if cls is CodexAdapter:
         kwargs.update(model=o.get('model'), isolate_config=o.get('isolate_config', False),
                       reasoning_effort=o.get('reasoning_effort'))

@@ -132,6 +132,12 @@ class Service:
         data['models'] = describe_models(cfg)
         data['code_stages'] = [s.name for s in cfg.stages if s.kind == 'code' and state.get('stages', {}).get(s.name, {}).get('commit_sha')]
         data['metrics'] = read_json(directory(run) / 'metrics.json')
+        observed_usage=(data['metrics'].get('stage_usage',{}) if data['metrics'] else state.get('stage_usage',{}))
+        if isinstance(observed_usage,dict):
+            for model in data['models']:
+                rows=[observed_usage.get(spec.name,{}) for spec in cfg.stages if spec.adapter==model['name']]
+                model['observed_models']=sorted({r['backend_model'] for r in rows if isinstance(r,dict) and isinstance(r.get('backend_model'),str)})
+                model['observed_backend_endpoints']=sorted({r['backend_endpoint'] for r in rows if isinstance(r,dict) and isinstance(r.get('backend_endpoint'),str)})
         data['strategy'] = {'proposal_id': cfg.tune_proposal_id,
                             'repair_batch_size': cfg.autonomy.repair_batch_size,
                             'auto_apply': cfg.autotune.auto_apply}

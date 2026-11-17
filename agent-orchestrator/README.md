@@ -32,6 +32,8 @@ python -m orchestrator.cli resume workbench.example.toml --run-id demo-1
 
 Qoder 1.1.89 已验证 `Ultimate + high + adaptive` 真实读取/编辑与一条维护任务闭环；控制台支持 Qoder 模型、思考强度和 `auto/adaptive/disabled`。`thinking=enabled` 需要该工具额外的固定思考预算，本接入不使用它。示例见 `qoder.example.toml`。
 
+Claude Code 2.1.325 可作为文件工具代理接入你现有的 DeepSeek Anthropic 兼容连接：`cli_claude` 默认只继承 `~/.claude/settings.json` 的连接与模型字段，不改原配置。可指定 `deepseek-v4-pro[1M] + max`，控制台支持模型与思考强度；工具身份、连接配置和实报后端模型分开显示。示例见 `claude-deepseek.example.toml`。
+
 工作台新任务默认勾选“不限制 token”，取消本地运行/阶段/输出 token 限额，继续记录用量并保留时长、轮次、文件与审批约束。模型服务自身仍可能有输出/上下文上限。CLI 使用此模式需在 `[run_budget]` 显式设 `unlimited_tokens=true`，并删除运行/阶段/适配器的 `max_tokens`。
 
 支持的 API 可同时启用“结构化审查 JSON”，约束审查输出为 JSON 对象，避免高思考模型额外说明导致协议拒收；不放宽审查判据。
@@ -50,6 +52,7 @@ Qoder 1.1.89 已验证 `Ultimate + high + adaptive` 真实读取/编辑与一条
 | `cli-mixed.example.toml` | Codex 设计/审查与反重力编码 |
 | `dsh-test.example.toml` | dsh 测试角色 |
 | `qoder.example.toml` | API 设计/审查、Qoder 文件工具编码与独立测试 |
+| `claude-deepseek.example.toml` | API 设计/审查、Claude Code 经现有 DeepSeek 连接编码与独立测试 |
 
 模型示例会真实调用工具或 API，并可能修改示例任务目录。用于业务项目时，先核对 `task_workdir`、测试命令、允许修改的文件及预算。工作台中的任务文字不会切换执行目录，也不会替配置增加设计或编码阶段。
 
@@ -150,6 +153,7 @@ Qoder 1.1.89 已验证 `Ultimate + high + adaptive` 真实读取/编辑与一条
 | `cli_dsh` | 可设 `exe`、`permission_mode`、无凭据 `proxy_url`、`extra_env`、`timeout_s`；已有真实样本 |
 | `cli_qwen` | Qwen Code 0.26.0 的 stdin/JSON 数组/终态用量已有真实样本；后端为 DeepSeek，工具执行与其它版本仍待验证 |
 | `cli_qoder` | 1.1.89 真机 stdin/流式成功终态及 Read/Edit 已验证；Ultimate/high/adaptive 真实维护任务通过；token计数不完整、credits分列 |
+| `cli_claude` | Claude Code 2.1.325 的真实流式终态与文件工具；默认继承用户兼容连接，已用 DeepSeek Pro/max 跑通维护闭环，不冒充 Claude 原生模型 |
 | `cli_doubao` | 未核实独立官方 CLI，属于未验证预留；调用豆包模型可使用方舟兼容API |
 | `fake` | 仅用于离线演示和确定性回归 |
 

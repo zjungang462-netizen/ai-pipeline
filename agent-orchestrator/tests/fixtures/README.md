@@ -10,6 +10,8 @@
 | `qoder_1.1.89_auth_stderr.txt` | 2026-11-17 本机 Qoder 1.1.89 非交互探针 | 真实未登录失败，保留作认证失败回归 |
 | `qoder_1.1.89_real.json` | 2026-11-17 登录后本机 Qoder stdin调用 | 真实成功终态、credits与全零token计数，后者按未知处理 |
 | `qoder_1.1.89_tools_real.jsonl` | 2026-11-17 Qoder Ultimate/high/adaptive | 真实Read/Edit单文件修改、init协议1.5.0与成功终态，标识/路径已脱敏 |
+| `claude_2.1.325_result_real.jsonl` | 2026-11-17 Claude Code经用户DeepSeek兼容API | 无工具成功终态，模型DeepSeek Pro[1M]、max选项；不是原生Claude模型；思考正文省略 |
+| `claude_2.1.325_tools_real.jsonl` | 2026-11-17 Claude Code/DeepSeek Read/Edit | 真实单文件工具修改与累计usage；thinking为output子计数，标识/路径已脱敏 |
 | `codex_0.169_real.jsonl` | 2026-11-15 本机 Codex CLI 0.169.0 实际执行 | 真实 JSONL，脱敏 thread_id |
 | `agy_1.5.9_real.jsonl` | 2026-11-15 本机反重力 CLI 1.5.9 实际执行 | 真实 stream-json，脱敏会话标识与 cwd |
 | `codex_0.169_policy_stderr.txt` | 2026-11-16 本机 Codex CLI 0.169.0 只读探针 | 真实策略拒绝日志，命令与本机路径已脱敏；命令未实际执行 |

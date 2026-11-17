@@ -29,6 +29,8 @@ class BudgetPolicy:
             if credits is not None:used['qoder_credits']=used.get('qoder_credits',0)+credits
             if result.usage.get('usage_unknown'):
                 used['unknown_calls']=used.get('unknown_calls',0)+1
+            for field in ('backend_model','backend_endpoint'):
+                if isinstance(result.usage.get(field),str):used[field]=result.usage[field]
         self.state.save()
 
     def _check_budget(self, spec: StageSpec, result: Result) -> None:

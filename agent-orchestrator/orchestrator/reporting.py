@@ -60,21 +60,24 @@ def failure_categories(state, job=None, metrics=None):
         if isinstance(error, str) and error in known: categories.add(error)
         kind = event.get('kind')
         if isinstance(kind, str) and kind in mapping: categories.add(mapping[kind])
-    reasons = (metrics or {}).get('fail_reasons')
+    reasons = metrics.get('fail_reasons') if isinstance(metrics, dict) else None
     for reason in reasons if isinstance(reasons, list) else []:
         if isinstance(reason, str) and reason in {'budget_exhausted', 'verify_nonzero', 'review_exhausted',
                                                   'review_fail', 'execution_failed'}:
             categories.add(reason)
     if (job or {}).get('status') in ('timeout', 'cancelled'):
         categories.add(job['status'])
-    failed = any(isinstance(s, dict) and s.get('status') == 'failed' for s in state.get('stages', {}).values())
+    stages = state.get('stages')
+    failed = False
+    if isinstance(stages, dict):
+        failed = any(isinstance(s, dict) and s.get('status') == 'failed' for s in stages.values())
     if failed and not categories: categories.add('unknown')
     return sorted(categories)
 
 
 def usage_summary(run_id, state, metrics=None):
-    metrics = metrics or {}
     # 终态 metrics 优先，防止续跑现场覆盖历史计量；旧 metrics 无字段时明确未知。
+    metrics = metrics if isinstance(metrics, dict) else {}
     frozen = bool(metrics)
     usage = metrics if frozen else state.get('usage_total', {})
     tokens = number(usage.get('tokens'))
@@ -83,14 +86,23 @@ def usage_summary(run_id, state, metrics=None):
     if reported is None and tokens is not None and reserved is not None:
         reported = max(0, tokens - reserved)
     rows = []
-    stages = metrics.get('stages', {}) if frozen else state.get('stages', {})
-    stage_usage = metrics.get('stage_usage', {}) if frozen else state.get('stage_usage', {})
+    # 畸形阶段元数据按缺失阶段处理；metrics 优先时不回退到 state.stages。
+    stages = metrics.get('stages') if frozen else state.get('stages')
+    if not isinstance(stages, dict):
+        stages = {}
+    # 畸形阶段用量按未知用量处理：不填零、不抛异常。
+    stage_usage = metrics.get('stage_usage') if frozen else state.get('stage_usage')
+    if not isinstance(stage_usage, dict):
+        stage_usage = {}
     for name, stage in stages.items():
         if not isinstance(stage, dict): continue
-        used = stage_usage.get(name, {})
+        used = stage_usage.get(name)
+        if not isinstance(used, dict):
+            used = {}
         rows.append(dict(run_id=run_id, stage=name, tool=stage.get('tool') or 'unknown',
                          adapter=stage.get('adapter') or 'unknown', status=stage.get('status', 'unknown'),
                          model=stage.get('model'), reasoning_effort=stage.get('reasoning_effort'),
+                         backend_model=used.get('backend_model'),backend_endpoint=used.get('backend_endpoint'),
                          thinking=stage.get('thinking'),
                          tokens=number(used.get('tokens')), duration_s=number(used.get('duration_s')),
                          qoder_credits=number(used.get('qoder_credits')),
@@ -128,7 +140,7 @@ def export_usage(state_dir, run_id=None):
     return dict(runs=result, errors=errors, scope='reported_usage_not_a_bill')
 
 
-CSV_FIELDS = ('scope', 'run_id', 'stage', 'tool', 'adapter', 'model', 'reasoning_effort', 'thinking', 'status', 'tokens',
+CSV_FIELDS = ('scope', 'run_id', 'stage', 'tool', 'adapter', 'model', 'backend_model', 'backend_endpoint', 'reasoning_effort', 'thinking', 'status', 'tokens',
               'reported_tokens', 'reserved_tokens', 'unknown_calls', 'token_status', 'duration_s', 'qoder_credits', 'billing_cost', 'currency', 'cost_status')
 
 

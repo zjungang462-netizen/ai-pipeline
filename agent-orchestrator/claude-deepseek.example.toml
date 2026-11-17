@@ -1,0 +1,107 @@
+# Claude Code 2.1.325作为文件工具代理，实际后端沿用用户的DeepSeek兼容连接。
+# 仅继承 ~/.claude/settings.json 的连接/模型字段，凭据不写入此文件。
+# schema: root.task_workdir：任务工作目录，相对配置文件目录解析
+task_workdir = "examples/cli_mixed_demo"
+# schema: root.state_dir：状态目录，相对配置文件目录解析
+state_dir = ".claude_deepseek_state"
+# schema: root.watch_root：有限监视域；相对配置目录解析；空或 off 关闭
+watch_root = "off"
+
+[run_budget]
+# schema: run_budget.unlimited_tokens：显式取消运行/阶段/输出 token 限额，保留墙钟与轮次约束；模型服务仍可能有自身上限
+unlimited_tokens = true
+# schema: run_budget.max_duration_s：运行累计秒数上限；无人值守时必须为正数
+max_duration_s = 900
+
+[autonomy]
+# schema: autonomy.enabled：显式开启无人值守
+enabled = true
+# schema: autonomy.allowed_files：允许修改的相对文件路径白名单
+allowed_files = ["name_ops.py", "count_ops.py"]
+# schema: autonomy.baseline_paths：首次初始化加入基线的相对路径
+baseline_paths = ["name_ops.py", "count_ops.py", "tests"]
+# schema: autonomy.max_repair_rounds：整个反馈链的最大修复轮数
+max_repair_rounds = 2
+# schema: autonomy.repair_batch_size：单轮最多修改文件数
+repair_batch_size = 2
+
+[adapters.claude]
+type = "cli_claude"
+# Windows推荐exe指向真实原生claude.exe；也可配置可执行的claude.cmd。
+exe = "claude"
+inherit_connection = true
+model = "deepseek-v4-pro[1M]"
+reasoning_effort = "max"
+timeout_s = 300
+
+[adapters.review]
+type = "openai_compat"
+base_url = "https://api.deepseek.com/v1"
+api_key_env = "DEEPSEEK_API_KEY"
+model = "deepseek-v4-pro"
+reasoning_effort = "high"
+thinking = "enabled"
+review_json_mode = true
+timeout_s = 180
+
+[[stages]]
+# schema: stages.name：唯一阶段名；字母数字、下划线、点或横线，禁止父目录段
+name = "design"
+# schema: stages.kind：code/report/review/test；verify 是 test 的兼容别名
+kind = "report"
+# schema: stages.adapter：非 test 阶段必填，引用具名适配器
+adapter = "review"
+# schema: stages.prompt：非 test 阶段必填；提示词文件或内联文本
+prompt = "prompts/cli_design.md"
+# schema: stages.timeout_s：单次执行超时，秒
+timeout_s = 180
+# schema: stages.max_attempts：本轮适配器调用尝试次数上限
+max_attempts = 1
+
+[[stages]]
+# schema: stages.name：唯一阶段名；字母数字、下划线、点或横线，禁止父目录段
+name = "coding"
+# schema: stages.kind：code/report/review/test；verify 是 test 的兼容别名
+kind = "code"
+# schema: stages.adapter：非 test 阶段必填，引用具名适配器
+adapter = "claude"
+# schema: stages.prompt：非 test 阶段必填；提示词文件或内联文本
+prompt = "prompts/cli_develop.md"
+# schema: stages.context_files：显式上下文相对文件路径列表
+context_files = ["name_ops.py", "count_ops.py"]
+# schema: stages.timeout_s：单次执行超时，秒
+timeout_s = 300
+# schema: stages.max_attempts：本轮适配器调用尝试次数上限
+max_attempts = 2
+
+[[stages]]
+# schema: stages.name：唯一阶段名；字母数字、下划线、点或横线，禁止父目录段
+name = "testing"
+# schema: stages.kind：code/report/review/test；verify 是 test 的兼容别名
+kind = "test"
+# schema: stages.test_cmd：test 必填的非空 argv 数组，其它类型禁止设置
+test_cmd = ["python", "-X", "utf8", "-m", "unittest", "discover", "-s", "tests", "-v"]
+# schema: stages.timeout_s：单次执行超时，秒
+timeout_s = 60
+# schema: stages.feedback_to：review/test 反馈目标，必须是之前的阶段
+feedback_to = "coding"
+# schema: stages.max_rounds：反馈轮次上限，含首轮
+max_rounds = 2
+
+[[stages]]
+# schema: stages.name：唯一阶段名；字母数字、下划线、点或横线，禁止父目录段
+name = "review"
+# schema: stages.kind：code/report/review/test；verify 是 test 的兼容别名
+kind = "review"
+# schema: stages.adapter：非 test 阶段必填，引用具名适配器
+adapter = "review"
+# schema: stages.prompt：非 test 阶段必填；提示词文件或内联文本
+prompt = "prompts/cli_review.md"
+# schema: stages.timeout_s：单次执行超时，秒
+timeout_s = 180
+# schema: stages.max_attempts：本轮适配器调用尝试次数上限
+max_attempts = 1
+# schema: stages.feedback_to：review/test 反馈目标，必须是之前的阶段
+feedback_to = "coding"
+# schema: stages.max_rounds：反馈轮次上限，含首轮
+max_rounds = 2
