@@ -6,6 +6,7 @@ const ids=[...html.matchAll(/\bid="([^"]+)"/g)].map(m=>m[1]);
 class Element{
  constructor(){this.children=[];this._text='';this.value='';this.disabled=false;this.style={};this.dataset={};this.classList={toggle(){}};}
  set textContent(v){this._text=String(v??'');this.children=[];}get textContent(){return this._text+this.children.map(n=>n.textContent||'').join('');}
+ querySelectorAll(){return this.children.flatMap(node=>[...(node.dataset?.adapter?[node]:[]),...(node.querySelectorAll?node.querySelectorAll():[])]);}
  append(...nodes){this.children.push(...nodes);}replaceChildren(...nodes){this._text='';this.children=[...nodes];}showModal(){this.open=true;}close(){this.open=false;}
 }
 (async()=>{
@@ -18,7 +19,7 @@ class Element{
    if(url.startsWith('/compare'))return {same_config:false,left:{lifecycle:'failed'},right:{lifecycle:'done'},delta:{tokens:10,reported_tokens:null,reserved_tokens:0,duration_s:2}};
    if(url.startsWith('/failures')){page++;return {failures:[{id:'r1',run_id:'run1',categories:['timeout']}],errors:[],has_more:page===1,next_after:page===1?'cursor-1':null};}
    throw Error('unexpected '+url);},toast:message=>messages.push(message),select(){},renderTaskScope(){}});
- vm.runInContext(`const $=id=>document.getElementById(id);function el(tag,cls,text){const n=document.createElement(tag);if(text!==undefined)n.textContent=text;return n;}function show(){};const num=n=>String(n);const labels={done:'完成',failed:'失败'};let parent=null,taskProjectsFresh=true;const projects=[{id:'p',config_hash:'hash'}],runs=[{id:'a',run_id:'a'},{id:'b',run_id:'b'}];`,context);
+ vm.runInContext(`const $=id=>document.getElementById(id);function el(tag,cls,text){const n=document.createElement(tag);if(text!==undefined)n.textContent=text;return n;}function show(){};const num=n=>String(n);const labels={done:'完成',failed:'失败'};let parent=null,taskProjectsFresh=true;const projects=[{id:'p',config_hash:'hash',models:[{name:'api',type:'openai_compat',model:'fixture-model',supports_effort:true,supports_thinking:true}]}],runs=[{id:'a',run_id:'a'},{id:'b',run_id:'b'}];`,context);
  vm.runInContext(fs.readFileSync(path.join(dir,'insights.js'),'utf8'),context);
  vm.runInContext(`renderBudgetAlerts({budget_alerts:[{dimension:'tokens',ratio:.85}]})`,context);
  assert.ok(nodes.get('budget-alert').textContent.includes('85%'));
@@ -32,6 +33,9 @@ class Element{
  resolveTemplates({templates:[{id:'t',name:'常用',project_id:'p',config_hash:'hash',task:'需求',usable:true}]});await fresh;
  nodes.get('task-template').value='t';nodes.get('task-template').onchange();
  assert.equal(nodes.get('project-select').value,'p');assert.equal(nodes.get('task-input').value,'需求');
+ nodes.get('unlimited-tokens').checked=true;
+ const controls=nodes.get('model-settings').querySelectorAll();const jsonMode=controls.find(node=>node.dataset.option==='review_json_mode');assert.ok(jsonMode);jsonMode.value='true';
+ const opts=vm.runInContext('executionOptions()',context);assert.equal(opts.models.api.review_json_mode,true);assert.equal(opts.unlimited_tokens,true);
  assert.equal(requests.filter(r=>r.options?.method==='POST').length,0,'applying template must not execute');
  await nodes.get('compare-run').onclick();
  assert.ok(nodes.get('compare-result').textContent.includes('未知'));

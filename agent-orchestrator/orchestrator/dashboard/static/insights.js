@@ -7,7 +7,7 @@ function renderBudgetAlerts(run){
  if(alerts.length)box.textContent+='。请核对当前进度；提示不会增加预算。';show(box,alerts.length>0);
  show($('token-progress'),!!run.budget?.max_tokens);
  const modelBox=$('active-models');
- modelBox.textContent=(run.models||[]).map(m=>`${m.name}: ${m.model||'工具默认'}${m.reasoning_effort?' · 思考 '+m.reasoning_effort:''}${m.thinking?' · thinking '+m.thinking:''}`).join('；')+(run.budget?.unlimited_tokens?'；本次不限制 token，仍受工具上限、时长和轮次约束。':'');
+ modelBox.textContent=(run.models||[]).map(m=>`${m.name}: ${m.model||'工具默认'}${m.reasoning_effort?' · 思考 '+m.reasoning_effort:''}${m.thinking?' · thinking '+m.thinking:''}${m.review_json_mode?' · JSON审查':''}`).join('；')+(run.budget?.unlimited_tokens?'；本次不限制 token，仍受工具上限、时长和轮次约束。':'');
  show(modelBox,!!modelBox.textContent);
 }
 
@@ -18,12 +18,15 @@ function renderModelSettings(){
   for(const [field,enabled,values,title] of [['reasoning_effort',model.supports_effort,['none','low','medium','high','xhigh'],'思考强度'],['thinking',model.supports_thinking,['enabled','disabled'],'深度思考（端点需支持）']]){
    if(!enabled)continue;const fieldLabel=el('label','',title),select=el('select');select.dataset.adapter=model.name;select.dataset.option=field;
    for(const value of ['',...values]){const option=el('option','',value||'沿用配置/模型默认');option.value=value;select.append(option);}select.value=model[field]||'';fieldLabel.append(select);row.append(fieldLabel);
+  }
+  if(model.supports_thinking){const label=el('label','','结构化审查 JSON（端点需支持）'),select=el('select');select.dataset.adapter=model.name;select.dataset.option='review_json_mode';
+   for(const [value,text] of [['','沿用配置'],['true','启用'],['false','禁用']]){const option=el('option','',text);option.value=value;select.append(option);}select.value=model.review_json_mode?'true':'';label.append(select);row.append(label);
   }box.append(row);
  }
 }
 function executionOptions(){
  const models={};for(const node of $('model-settings').querySelectorAll('[data-adapter]')){
-  if(!node.value.trim())continue;models[node.dataset.adapter]??={};models[node.dataset.adapter][node.dataset.option]=node.value.trim();
+  if(!node.value.trim())continue;models[node.dataset.adapter]??={};models[node.dataset.adapter][node.dataset.option]=node.dataset.option==='review_json_mode'?node.value==='true':node.value.trim();
  }
  return {models,unlimited_tokens:$('unlimited-tokens').checked};
 }

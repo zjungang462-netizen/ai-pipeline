@@ -104,6 +104,8 @@ max_rounds = 2                   # 只在有文件级问题时返工，否则停
 type = "openai_compat"
 base_url = "https://api.deepseek.com"
 model = "deepseek-chat"
+# 高思考审查建议按端点支持情况启用：
+# review_json_mode = true
 api_key_env = "DEEPSEEK_API_KEY"   # 只存环境变量名，不存密钥
 
 # 其他兼容端点（按需切换）：

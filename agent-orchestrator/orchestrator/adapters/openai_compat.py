@@ -25,7 +25,8 @@ class OpenAICompatAdapter(Adapter):
     def __init__(self, name: str, base_url: str, model: str, api_key_env: str,
                  kind: str = "report", temperature: float = 0.2,
                  max_tokens: int | None = None, timeout_s: int = 120,
-                 reasoning_effort: str | None = None, thinking: str | None = None):
+                 reasoning_effort: str | None = None, thinking: str | None = None,
+                 review_json_mode: bool = False):
         self.name = name
         self.base_url = base_url.rstrip("/")
         self.model = model
@@ -39,6 +40,8 @@ class OpenAICompatAdapter(Adapter):
         if thinking is not None and thinking not in ('enabled', 'disabled'):
             raise ValueError('thinking 必须为 enabled/disabled')
         self.reasoning_effort, self.thinking = reasoning_effort, thinking
+        if type(review_json_mode) is not bool:raise ValueError('review_json_mode 必须为布尔值')
+        self.review_json_mode = review_json_mode
 
     def _key(self) -> str | None:
         return os.environ.get(self.api_key_env)
@@ -75,6 +78,8 @@ class OpenAICompatAdapter(Adapter):
         if self.thinking is not None:
             payload['thinking'] = {'type': self.thinking}
             if self.thinking == 'enabled': payload.pop('temperature', None)
+        if self.review_json_mode and (getattr(ctx, 'kind', None) or self.kind) == 'review':
+            payload['response_format'] = {'type': 'json_object'}
         if ctx.output_tokens is not None:
             payload['max_tokens'] = min(payload.get('max_tokens', ctx.output_tokens), ctx.output_tokens)
         req = urllib.request.Request(

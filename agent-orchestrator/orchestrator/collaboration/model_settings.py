@@ -21,6 +21,7 @@ def describe_models(cfg):
         result.append(dict(name=name, type=adapter.type, model=options.get('model') or '',
                            reasoning_effort=options.get('reasoning_effort') or '',
                            thinking=options.get('thinking') or '',
+                           review_json_mode=options.get('review_json_mode', False),
                            supports_effort=adapter.type in ('openai_compat','cli_codex'),
                            supports_thinking=adapter.type=='openai_compat'))
     return result
@@ -37,10 +38,14 @@ def validate_options(cfg, options):
     for name, values in models.items():
         adapter=cfg.adapters.get(name)
         if not adapter or adapter.type not in MODEL_TYPES:raise ValueError('该适配器不支持工作台模型覆盖')
-        if not isinstance(values,dict) or set(values)-{'model','reasoning_effort','thinking'}:
+        if not isinstance(values,dict) or set(values)-{'model','reasoning_effort','thinking','review_json_mode'}:
             raise ValueError('仅可覆盖模型及受支持的思考选项')
         row={}
         for key,value in values.items():
+            if key=='review_json_mode':
+                if adapter.type!='openai_compat' or type(value) is not bool:
+                    raise ValueError('结构化审查模式仅支持兼容 API 的布尔选项')
+                row[key]=value;continue
             if not isinstance(value,str):raise ValueError('模型选项必须为字符串')
             if key=='model':
                 if not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9._:/-]{0,159}',value):

@@ -32,6 +32,8 @@ python -m orchestrator.cli resume workbench.example.toml --run-id demo-1
 
 工作台新任务默认勾选“不限制 token”，取消本地运行/阶段/输出 token 限额，继续记录用量并保留时长、轮次、文件与审批约束。模型服务自身仍可能有输出/上下文上限。CLI 使用此模式需在 `[run_budget]` 显式设 `unlimited_tokens=true`，并删除运行/阶段/适配器的 `max_tokens`。
 
+支持的 API 可同时启用“结构化审查 JSON”，约束审查输出为 JSON 对象，避免高思考模型额外说明导致协议拒收；不放宽审查判据。
+
 本次选择写入独立配置副本，原配置不改写；任务房间显示实际绑定的模型与思考参数。高思考/不限 token 是执行选项，不代表所有工具/复杂任务已证明能成功，实际效果需结合真实验收。
 
 ## 接入模型与项目

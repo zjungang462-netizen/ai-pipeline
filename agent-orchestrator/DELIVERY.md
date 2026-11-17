@@ -1,8 +1,8 @@
 # 干净目录运行与验收
 
-## 当前版本：0.5.0（阶段五）
+## 当前版本：0.5.1（阶段五）
 
-当前源码全量收集 **580 项**，fast/quick **108 项**、slow **472 项**；最终以同包 `delivery-metadata/verification.json` 与包旁 `verification-package/verification.json` 的实际结果为准。下方阶段二至四的旧数字和标签为历史冻结版本，不表示本次新增功能的验证。用 `python -m orchestrator.cli --version` 查看版本，包的实际提交与原始字节清单见 `SNAPSHOT.json`。
+当前源码全量收集 **581 项**，fast/quick **109 项**、slow **472 项**；最终以同包 `delivery-metadata/verification.json` 与包旁 `verification-package/verification.json` 的实际结果为准。下方阶段二至四的旧数字和标签为历史冻结版本，不表示本次新增功能的验证。用 `python -m orchestrator.cli --version` 查看版本，包的实际提交与原始字节清单见 `SNAPSHOT.json`。
 
 新建任务默认选择“不限制 token”，并可按已登记适配器指定账户可用模型和受支持的思考选项。模型名由账户/端点决定，系统不虚构“最佳”型号；工具或 API 拒绝参数会保留失败，不自动回退到低配模型。
 
@@ -10,7 +10,9 @@
 
 工作台创建对话框显示每个适配器的当前模型：API/Codex/Qwen/反重力支持本次模型覆盖；Codex 可设 `reasoning_effort=xhigh` 等强度；兼容 API 可设 `reasoning_effort` 与 `thinking=enabled/disabled`，取决于端点支持。启用 thinking 时不同时发送 temperature。尚无真实成功协议的豆包/Qoder不会因界面增加选项而被标成已验证。
 
-本次选项只接受模型、受支持思考参数和不限 token 开关，不接受浏览器提供的路径、命令、端点或凭据。来源配置保持原样，独立副本固化工作目录、提示词引用、配置哈希与本次模型选择。重试同一创建标识不能替换选项；派生任务仍校验父运行绑定与来源配置。
+0.5.1 增加兼容 API 的可选 `review_json_mode=true`（控制台“结构化审查 JSON”），只对 review 请求发送 `response_format={"type":"json_object"}`。高思考重放暴露了模型在合法 JSON 后附加说明而无法被严格协议接收的问题；此选项让支持的端点约束输出，解析器仍拒绝 JSON 后额外正文。端点不支持时明确失败，不隐式降级。DeepSeek v4-pro/high/thinking 的真实结构化探针已验证可生成独立 verdict 文件；这不是全面任务成功率保证。
+
+本次选项只接受模型、受支持思考参数、结构化审查开关和不限 token 开关，不接受浏览器提供的路径、命令、端点或凭据。来源配置保持原样，独立副本固化工作目录、提示词引用、配置哈希与本次模型选择。重试同一创建标识不能替换选项；派生任务仍校验父运行绑定与来源配置。
 
 CLI 配置示意：
 

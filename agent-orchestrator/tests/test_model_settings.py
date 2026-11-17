@@ -107,11 +107,12 @@ max_tokens=500
     def test_run_creation_binds_override_hash_and_idempotency(self):
         service=Service(self.root/'db.sqlite3',[self.path]);self.addCleanup(service._background_sync.close)
         project=service.list_projects()[0]
-        options={'models':{'api':{'model':'strong-model','reasoning_effort':'high'}},'unlimited_tokens':True}
+        options={'models':{'api':{'model':'strong-model','reasoning_effort':'high','review_json_mode':True}},'unlimited_tokens':True}
         with mock.patch.object(service,'launch'):
             run=service.create_run(project['id'],'task','run-override-001',expected_config_hash=project['config_hash'],execution_options=options)
             self.assertTrue(run['budget']['unlimited_tokens'])
             self.assertEqual(run['models'][0]['model'],'strong-model')
+            self.assertTrue(run['models'][0]['review_json_mode'])
             self.assertEqual(run['config_integrity'],'valid')
             again=service.create_run(project['id'],'task','run-override-001',expected_config_hash=project['config_hash'],execution_options=options)
             self.assertEqual(again['id'],run['id'])
@@ -141,3 +142,26 @@ max_tokens=500
             changed_hash=load_config(self.path).source_hash
             with self.assertRaises(Conflict):
                 service.create_run(project['id'],'changed','derive-child-002',parent=parent['id'],expected_config_hash=changed_hash,execution_options=options)
+
+    def test_json_mode_only_changes_review_wire_format_and_retains_strict_parser(self):
+        adapter=OpenAICompatAdapter('api','https://example.invalid/v1','chosen','MODEL_TEST_KEY',
+                                    reasoning_effort='high',thinking='enabled',review_json_mode=True)
+        class Response(io.BytesIO):
+            def __enter__(self):return self
+            def __exit__(self,*args):self.close()
+        requests=[]
+        def send(request,**kwargs):
+            requests.append(json.loads(request.data))
+            return Response(json.dumps({'choices':[{'message':{'content':'{"verdict":"pass","issues":[]}'}}],
+                                        'usage':{'total_tokens':10}}).encode())
+        with mock.patch.dict('os.environ',{'MODEL_TEST_KEY':'test-value'}),mock.patch('urllib.request.urlopen',side_effect=send):
+            for kind in ('review','report'):
+                ctx=RunContext(task='test',run_id='run',stage=kind,workdir=self.root,runs_dir=self.root,kind=kind)
+                result=adapter.run('Return JSON verdict',self.root,ctx)
+                self.assertTrue(result.ok)
+                if kind=='review':self.assertIsNotNone(result.verdict_file)
+        self.assertEqual(requests[0]['response_format'],{'type':'json_object'})
+        self.assertNotIn('response_format',requests[1])
+        self.assertIsNone(adapter._write_verdict_file('{"verdict":"pass","issues":[]}\nextra prose',self.root))
+        with self.assertRaises(ValueError):
+            validate_options(load_config(self.path),{'models':{'api':{'review_json_mode':'true'}}})
