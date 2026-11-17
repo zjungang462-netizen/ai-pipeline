@@ -94,10 +94,10 @@ python scripts/precommit.py --output ../precommit-verification
 ## 升级与回滚注意事项
 
 - **严格配置校验**：未知顶层、阶段和 `run_budget` 字段现在直接报错。升级前对照同包示例修正拼写和字段位置，不能依赖旧版静默忽略未知键。
-- **越界写入隔离**：`watch_enforce=true` 时，根外新文件移入 `<run>/violations/<stage>/` 留证；既有根外文件被改写仍判失败，不自动还原。违规按输入指纹持久保存，修正问题后用 `rerun-from` 显式重试。`watch_root` 位于可写根内时禁用该监视域并记录 `watch_disabled`。
+- **根外变化留证**：当前增量在 `watch_enforce=true` 时保留根外文件原位置，只在 `<run>/violations/<stage>/` 保存最多 100 条变化的路径、前后大小及时间戳，不读取或复制文件正文；变化总数和截断标记一并留存。证据写入失败也保持阶段失败并记录错误。违规按输入指纹持久保存，修正问题后用 `rerun-from` 显式重试。`watch_root` 位于可写根内时禁用该监视域并记录 `watch_disabled`。已发布第九轮标签的旧行为仍为移动隔离。
 - **审查覆盖不完整**：diff 超过 600 行时尝试按 commit 注入变更文件全文；仍无法覆盖时，`pass` 在人工模式下转待审批，无人值守模式下判失败。人工确认前应核查未覆盖的变更。
 - **审批校验变化**：code/test 阶段校验申请时冻结的输入指纹、attempt 归档及 evidence；report/review 阶段仍拒绝输入变化后的审批。等待审批退出码为 11，不能作为任务成功处理。
-- **状态兼容与备份**：当前保存的 `state.json` 使用 `schema_version=2`，新增顶层 `test_artifacts` 以及 `control.consumed_feedback`、`control.write_violations`。缺失字段按空值读取；没有提供向旧版本回滚的迁移工具。升级前及回滚前先停止写入该状态目录的 worker/supervisor/工作台，备份整个 `state_dir`（含 attempts、审批与隔离证据）；回滚时使用与旧代码配套的备份，不让旧代码覆盖新版状态。不要只修改 `schema_version` 或删字段来冒充迁移。
+- **状态兼容与备份**：当前保存的 `state.json` 使用 `schema_version=2`，包含 `test_artifacts`、当前增量的 `test_artifact_hashes` 以及 `control.consumed_feedback`、`control.write_violations`。缺失字段按空值读取；仅路径、无哈希的旧测试产物不自动受信，测试输入协议升级后需重新验证。测试期间既有输入发生变化会判失败，即使命令退出码为 0；同一工作区上一次运行登记且未改动的产物会被继承为输出，被改写过的历史生成物可先清理或将测试输出改到独立目录。没有提供向旧版本回滚的迁移工具。升级前及回滚前先停止写入该状态目录的 worker/supervisor/工作台，备份整个 `state_dir`（含 attempts、审批与变化证据）；回滚时使用与旧代码配套的备份，不让旧代码覆盖新版状态。不要只修改 `schema_version` 或删字段来冒充迁移。
 - **既有工作区与脚本**：非 Git 工作区首次 coding 会提交已有文件作为本地基线；零净变更 code 阶段现在判失败。`demo/run_api_demo.py` 的未完成退出码为 11 或 1，调用方应检查退出码。
 
 ## 包内容与独立核验

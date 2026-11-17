@@ -13,6 +13,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 from orchestrator.config import parse_config
+from orchestrator.safety import build_subprocess_env
 from scripts.failure_evidence import TOKEN
 
 MAX_SCAN_BYTES = 2 * 1024 * 1024
@@ -24,7 +25,7 @@ SECRET_ASSIGNMENT = re.compile(
 
 def git(repo, *args, check=True):
     return subprocess.run(['git', '-C', str(repo), *args], check=check,
-                          capture_output=True, timeout=30)
+                          capture_output=True, timeout=30, env=build_subprocess_env())
 
 
 def credential_findings(data, path, source):

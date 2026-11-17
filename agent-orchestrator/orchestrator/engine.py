@@ -369,7 +369,8 @@ class Engine(AutonomousControls):
                 hashes.append(st.outputs_hash)
         return hashes
 
-    def _inputs_hash(self, spec: StageSpec, index: int, prompt_override: str | None = None) -> str:
+    def _inputs_hash(self, spec: StageSpec, index: int, prompt_override: str | None = None,
+                     workspace_hash_override: str | None = None) -> str:
         # 渲染结果计入 inputs_hash（评审 B1）：上游产物变了 => 指纹变 => 下游 stale。
         config_keys = dict(spec.config_keys)
         adapter = self.config.adapters.get(spec.adapter)
@@ -411,9 +412,12 @@ class Engine(AutonomousControls):
                 # 测试命令会写工作区（junit/coverage/快照等）。这些产物属于
                 # 本次测试的输出而不是被测输入；若计入指纹，续跑时 hash 会
                 # 随产物变化而改变，导致每次 resume 都重跑测试（P2-1）。
-                config_keys["__workspace__"] = artifacts.workspace_hash(
-                    self.config.task_workdir, exclude=self.config.state_dir,
-                    ignore=set(self.state.test_artifacts.get(spec.name, [])))
+                config_keys["__workspace__"] = (workspace_hash_override
+                    if workspace_hash_override is not None else artifacts.workspace_hash(
+                        self.config.task_workdir, exclude=self.config.state_dir,
+                        ignore_hashes=self.state.test_artifact_hashes.get(spec.name, {})))
+                # 旧版仅按路径忽略的结果不能直接沿用。
+                config_keys["__test_input_protocol__"] = 2
         logical = None
         if self.config.autonomy.enabled and spec.kind != 'test':
             policy=asdict(self.config.autonomy)
@@ -618,6 +622,9 @@ class Engine(AutonomousControls):
         st = self.state.stage(spec.name)
         if spec.name in self.state.pending_approvals:
             return StageStatus.AWAITING_APPROVAL
+        # 同一工作区上一次运行登记过的测试产物，内容未变时直接继承，
+        # 避免后续任务把它们当成既有输入而永久失败。
+        self._inherit_test_artifact_bindings(spec)
 
         # 指纹纳入命令本身与上游产物：命令或代码变了就重跑
         inputs_hash = self._inputs_hash(spec, index)
@@ -651,8 +658,8 @@ class Engine(AutonomousControls):
                                  if self.state.stage(s.name).commit_sha), None)
             worktree = None
             setup_started = time.monotonic()
-            # 无上游 commit 时测试直接跑在任务工作区：记录测试自身写出的文件，
-            # 下次指纹计算忽略它们，避免 resume 因新产物永不收敛（P2-1）。
+            # 无上游 commit 时记录新输出及其内容；既有输入被改写须拒收，
+            # 不能把测试/其它进程改写的源码自动降格为可忽略的输出。
             before_workspace = None
             if not (upstream_sha and self._git_ready):
                 before_workspace = artifacts.workspace_file_hashes(
@@ -665,7 +672,24 @@ class Engine(AutonomousControls):
                     workdir = worktree
                 record = run_test_cmd(spec.test_cmd, workdir, timeout_s=timeout)
                 if before_workspace is not None:
-                    self._record_test_artifacts(spec, before_workspace)
+                    changed_inputs = self._record_test_artifacts(spec, before_workspace,
+                                                                 successful=record['ok'])
+                    if changed_inputs:
+                        message = '被测输入在测试期间发生变化：' + ', '.join(changed_inputs[:20])
+                        record['ok'] = False
+                        record['error'] = message
+                        record['output'] = record.get('output', '') + '\n' + message
+                        record['failure_ids'] = list(record.get('failure_ids', [])) + ['test_inputs_modified']
+                        self.state.log_event('test_inputs_modified', spec.name,
+                                             files=changed_inputs[:20], count=len(changed_inputs))
+                    elif record['ok']:
+                        # 已执行的测试验证了当前输入；用新输出哈希规范化缓存，
+                        # 避免产物被外部修改后验证成功还要额外重跑一轮。
+                        outputs = self.state.test_artifact_hashes.get(spec.name, {})
+                        frozen = sorted((rel, digest) for rel, digest in before_workspace.items()
+                                        if rel not in outputs)
+                        inputs_hash = self._inputs_hash(
+                            spec, index, workspace_hash_override=sha256_text(repr(frozen)))
             except artifacts.GitError as error:
                 message = '隔离测试工作区创建失败，未执行测试：' + str(error)
                 record = {'ok': False, 'exit_code': -1, 'cmd': list(spec.test_cmd),
@@ -737,24 +761,82 @@ class Engine(AutonomousControls):
         finally:
             lock.release()
 
-    def _record_test_artifacts(self, spec: StageSpec, before: dict[str, str]) -> None:
-        """把测试命令新建/改写的文件记入 state.test_artifacts（有上限）。"""
+    def _inherit_test_artifact_bindings(self, spec: StageSpec) -> None:
+        """首次尝试前继承同一状态根下最近一次运行的产物绑定。
+
+        只继承当前内容仍与绑定一致的路径：文件被用户或其它进程改过就
+        不再当作产物，避免把源码降格为输出；未改动的上次测试产物则不会
+        被当成“既有输入”，同一工作区上的后续任务无需手工清理。
+        """
+        if self.state.test_artifact_hashes.get(spec.name):
+            return
+        if self.state.stage(spec.name).attempts:
+            return
+        runs_dir = self.state.state_dir / "runs"
+        if not runs_dir.is_dir():
+            return
+        current = artifacts.workspace_file_hashes(
+            self.config.task_workdir, exclude=self.config.state_dir)
+        donors = []
+        for path in runs_dir.glob("*/state.json"):
+            if path.resolve() == self.state.state_file.resolve():
+                continue
+            try:
+                donors.append((path.stat().st_mtime, path))
+            except OSError:
+                continue
+        for _, path in sorted(donors, reverse=True)[:20]:
+            try:
+                data = json.loads(path.read_text(encoding="utf-8"))
+            except (OSError, ValueError):
+                continue
+            known = (data.get("test_artifact_hashes") or {}).get(spec.name) or {}
+            keep = {rel: digest for rel, digest in known.items()
+                    if current.get(rel) == digest}
+            if keep:
+                self.state.test_artifact_hashes[spec.name] = keep
+                self.state.test_artifacts[spec.name] = list(keep)
+                self.state.log_event("test_artifacts_inherited", spec.name,
+                                     source=str(data.get("run_id", "")), count=len(keep))
+                return
+
+    def _record_test_artifacts(self, spec: StageSpec, before: dict[str, str],
+                               *, successful: bool) -> list[str]:
+        """登记测试产物，返回被改写/删除的既有输入。
+
+        失败尝试也登记它自己新建的文件（本次尝试开始时不存在的路径）：
+        它们不属于输入；不登记的话，下一次尝试会把它们当成既有输入，
+        并在测试重写时永久判为“被测输入发生变化”。已绑定的输出只在成功
+        时重新绑定，失败尝试改写的内容不会因此获得信任，旧 pass 不能重新命中。
+        """
         after = artifacts.workspace_file_hashes(
             self.config.task_workdir, exclude=self.config.state_dir)
-        changed = sorted({rel for rel, digest in after.items()
-                          if before.get(rel) != digest})
-        known = set(self.state.test_artifacts.get(spec.name, []))
-        merged = sorted(known | set(changed))
+        known = dict(self.state.test_artifact_hashes.get(spec.name, {}))
+        changed_inputs = sorted(rel for rel, digest in before.items()
+                                if rel not in known and after.get(rel) != digest)
         limit = 500
-        if len(merged) > limit:
-            merged = merged[:limit]
-            self.state.log_event("test_artifacts_truncated", spec.name,
-                                 total=len(known | set(changed)))
-        self.state.test_artifacts[spec.name] = merged
-        if changed:
-            self.state.log_event("test_artifacts", spec.name, files=changed[:20],
-                                 count=len(changed))
+        if successful:
+            candidates = sorted(rel for rel in after if rel not in before or rel in known)
+            if len(candidates) > limit:
+                self.state.log_event("test_artifacts_truncated", spec.name,
+                                     total=len(candidates))
+            recorded = {rel: after[rel] for rel in candidates[:limit]}
+        else:
+            # 失败尝试只能补充它新建的文件；known 中的旧哈希保持不变。
+            created = sorted(rel for rel in after if rel not in before and rel not in known)
+            if len(known) + len(created) > limit:
+                self.state.log_event("test_artifacts_truncated", spec.name,
+                                     total=len(known) + len(created))
+            recorded = dict(known)
+            for rel in created[:max(0, limit - len(recorded))]:
+                recorded[rel] = after[rel]
+        self.state.test_artifact_hashes[spec.name] = recorded
+        self.state.test_artifacts[spec.name] = list(recorded)
+        if recorded:
+            self.state.log_event("test_artifacts", spec.name, files=list(recorded)[:20],
+                                 count=len(recorded))
         self.state.save()
+        return changed_inputs
 
     def _stage_base_sha(self, index: int, kind: str = "code") -> str | None:
         """代码阶段的基线 = 最近上游代码阶段的 commit（评审 B3：基于上游 commit）。
@@ -941,15 +1023,15 @@ class Engine(AutonomousControls):
                 self.state.save()
                 outside = []
             elif outside:
-                # 不删除无归属文件：新文件移入本运行的隔离目录留证，已有文件
-                # 只记录。越界记录按 inputs_hash 持久化，续跑不能把同一输入
-                # 的违规“洗白”成通过（P2-6）。
-                moved = self._quarantine_new_outside(spec, before_snap, outside)
+                # 无法按目录快照归属写入者；只保存变化元数据，不移动、删除
+                # 或复制无关进程的原文件，继续保守失败并持久化违规记录。
+                evidence = self._record_outside_evidence(spec, before_snap, after_snap, outside)
                 self.state.control.setdefault('write_violations', {})[spec.name] = {
                     'inputs_hash': inputs_hash, 'files': outside[:20],
-                    'quarantined': moved[:20], 'at': time.time()}
+                    'evidence': evidence, 'source_files_preserved': True, 'at': time.time()}
                 self.state.log_event("watch_enforce", spec.name,
-                                     files=outside[:10], quarantined=moved[:10])
+                                     files=outside[:10], evidence=evidence,
+                                     source_files_preserved=True)
                 self.state.save()
                 result.ok = False
                 result.error_kind = ErrorKind.REJECTED
@@ -1091,29 +1173,21 @@ class Engine(AutonomousControls):
             return False
         return bool(st.error) and "仍未通过" in st.error
 
-    def _quarantine_new_outside(self, spec: StageSpec, before: dict,
-                                outside: list[str]) -> list[str]:
-        """把本次新写出的根外文件移入运行目录隔离区（可恢复，不直接删除）。
-
-        改写过的既有根外文件留在原地并由持久化越界记录阻止续跑重试。
-        返回实际移动的原始路径列表。
-        """
-        target = self.state.run_dir / "violations" / spec.name
-        moved: list[str] = []
-        for path in outside:
-            if path in before:
-                continue
-            source = Path(path)
-            try:
-                if not source.is_file():
-                    continue
-                target.mkdir(parents=True, exist_ok=True)
-                destination = target / f"{uuid.uuid4().hex[:8]}-{source.name}"
-                shutil.move(str(source), str(destination))
-                moved.append(path)
-            except OSError:
-                continue
-        return moved
+    def _record_outside_evidence(self, spec: StageSpec, before: dict,
+                                 after: dict, outside: list[str]) -> str | None:
+        """留存有界快照元数据；不再读写无法归属的根外文件。"""
+        target = self.state.run_dir / "violations" / spec.name / f"{uuid.uuid4().hex}.json"
+        changes = [{'path': path, 'before': before.get(path), 'after': after.get(path)}
+                   for path in outside[:100]]
+        try:
+            atomic_write_json(target, {'source_files_preserved': True,
+                                      'observed_count': len(outside),
+                                      'truncated': len(outside) > len(changes),
+                                      'changes': changes})
+        except OSError as error:
+            self.state.log_event('watch_evidence_error', spec.name, reason=str(error))
+            return None
+        return target.relative_to(self.state.run_dir).as_posix()
 
     def _write_violation_stands(self, spec: StageSpec, inputs_hash: str) -> str:
         """同一输入上已记录的根外写入 => 保持失败，不再调用模型。"""

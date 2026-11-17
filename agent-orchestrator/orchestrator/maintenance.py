@@ -13,6 +13,7 @@ import subprocess
 import time
 from pathlib import Path
 
+from .safety import build_subprocess_env
 from .state import StageLock
 
 DEFAULT_RETENTION_DAYS = 30
@@ -194,7 +195,8 @@ def prune_evidence(root: Path, *, keep=(), older_than=DEFAULT_RETENTION_DAYS,
 
 
 def _git(repo, *args):
-    env = dict(os.environ, LC_ALL='C', LANG='C')
+    env = build_subprocess_env()
+    env.update(LC_ALL='C', LANG='C')
     return subprocess.run(['git', '-C', str(repo), *args], env=env, capture_output=True,
                           text=True, encoding='utf8', errors='replace', timeout=30, check=True)
 

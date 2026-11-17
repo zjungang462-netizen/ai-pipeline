@@ -41,7 +41,7 @@ const posts=b=>b.state.requests.filter(r=>r.url==='/api/runs'&&r.options.method=
  // 状态筛选文案与生命周期一致；阶段完成文案单独使用“已完成”。
  assert.ok(html.includes('<option value="done">流程完成</option>'),'状态筛选的完成文案应与运行生命周期一致');
  let b=await boot();
- assert.ok(b.nodes.get('run-list').children[0].textContent.includes('流程完成'),'运行卡片使用生命周期文案');
+ assert.ok(b.nodes.get('run-list').children.find(n=>n.dataset.runId).textContent.includes('流程完成'),'运行卡片使用生命周期文案');
  // 打开“新建任务”时重新拉取项目配置，并携带 config_hash。
  b.nodes.get('new-run').onclick();await turn();
  assert.equal(b.nodes.get('project-select').value,'');assert.equal(b.nodes.get('task-submit').disabled,true);
@@ -57,7 +57,7 @@ const posts=b=>b.state.requests.filter(r=>r.url==='/api/runs'&&r.options.method=
  assert.equal(body.project_id,'demo');assert.equal(body.task,'验证新建任务请求');
  assert.equal(body.expected_config_hash,'hash-demo');assert.equal(body.parent_id,null);
  // 阶段卡片使用“已完成”，运行生命周期仍是“流程完成/固定测试已通过”。
- await b.nodes.get('run-list').children[0].onclick();await turn();
+ await b.nodes.get('run-list').children.find(n=>n.dataset.runId).onclick();await turn();
  assert.equal(b.nodes.get('lifecycle').textContent,'固定测试已通过');
  assert.ok(b.nodes.get('stage-cards').children[0].textContent.includes('已完成'));
  assert.equal(b.nodes.get('task-submit').disabled,true,'关闭对话框后不应保留可提交状态');
@@ -99,7 +99,7 @@ const posts=b=>b.state.requests.filter(r=>r.url==='/api/runs'&&r.options.method=
  b.nodes.get('project-select').value='demo';b.nodes.get('project-select').onchange();
  assert.equal(b.nodes.get('task-submit').disabled,true);assert.ok(b.nodes.get('task-scope').textContent.includes('尚未取得'));
  // 配置已变化的旧运行不能声称固定测试已通过。
- b=await boot({changed:true});await b.nodes.get('run-list').children[0].onclick();await turn();
+ b=await boot({changed:true});await b.nodes.get('run-list').children.find(n=>n.dataset.runId).onclick();await turn();
  assert.notEqual(b.nodes.get('lifecycle').textContent,'固定测试已通过');
  assert.ok(b.nodes.get('execution-scope').textContent.includes('不能据此推断旧运行交付'));
  console.log('EXECUTION_SCOPE_UI_OK');
