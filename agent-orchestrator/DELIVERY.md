@@ -1,14 +1,30 @@
 # 干净目录运行与验收
 
-## 当前版本：0.5.1（阶段五）
+## 当前版本：0.5.2（Qoder真实接入）
 
-当前源码全量收集 **581 项**，fast/quick **109 项**、slow **472 项**；最终以同包 `delivery-metadata/verification.json` 与包旁 `verification-package/verification.json` 的实际结果为准。下方阶段二至四的旧数字和标签为历史冻结版本，不表示本次新增功能的验证。用 `python -m orchestrator.cli --version` 查看版本，包的实际提交与原始字节清单见 `SNAPSHOT.json`。
+当前源码全量收集 **594 项**，fast/quick **118 项**、slow **476 项**；最终以同包 `delivery-metadata/verification.json` 与包旁 `verification-package/verification.json` 的实际结果为准。下方阶段二至四的旧数字和标签为历史冻结版本，不表示本次新增功能的验证。用 `python -m orchestrator.cli --version` 查看版本，包的实际提交与原始字节清单见 `SNAPSHOT.json`。
 
 新建任务默认选择“不限制 token”，并可按已登记适配器指定账户可用模型和受支持的思考选项。模型名由账户/端点决定，系统不虚构“最佳”型号；工具或 API 拒绝参数会保留失败，不自动回退到低配模型。
 
 ### 模型与性能设置
 
-工作台创建对话框显示每个适配器的当前模型：API/Codex/Qwen/反重力支持本次模型覆盖；Codex 可设 `reasoning_effort=xhigh` 等强度；兼容 API 可设 `reasoning_effort` 与 `thinking=enabled/disabled`，取决于端点支持。启用 thinking 时不同时发送 temperature。尚无真实成功协议的豆包/Qoder不会因界面增加选项而被标成已验证。
+工作台创建对话框显示每个适配器的当前模型：API/Codex/Qwen/反重力/Qoder支持本次模型覆盖；Codex 可设 `reasoning_effort=xhigh` 等强度；兼容 API 可设 `reasoning_effort` 与 `thinking=enabled/disabled`，取决于端点支持。启用 thinking 时不同时发送 temperature。Qoder支持模型所提供的low/medium/high/xhigh/max强度，思考模式限auto/adaptive/disabled；实际能力仍由账户与型号决定，不自动降级。
+
+### Qoder 1.1.89 真实文件工具链路
+
+先完成官方 Qoder 登录，配置 `exe` 为实际 `qoder` 可执行入口（Windows npm可用 `qodercli.cmd` 绝对路径），不要填桌面启动器。`qoder.example.toml` 提供 API设计/审查、Qoder编码、独立命令测试的配置；会实际修改示例任务目录，运行前核对范围。离线验收只加载配置，不调用模型。
+
+已抓取裸版本 `1.1.89`、JSON成功终态及协议 `1.5.0` 的stream-json工具事件，解析器要求唯一末尾result、success/is_error=false/end_turn、非空结果及无permission_denials，非零退出仍失败。未知版本、缺失/重复/错误终态不会判通过。
+
+真实账户目录包含Ultimate及具体型号；本次实测Ultimate/high/adaptive成功。`thinking=enabled`在该版本明确要求额外thinking-budget；为保持不限制本地token的语义，本接入使用adaptive，不猜预算。控制台Qoder不展示API专属JSON审查选项。
+
+编码只开放Read/Glob/Grep/Edit/Write，使用accept_edits；报告/审查只有Read/Glob/Grep且dont_ask。禁MCP并不加载项目/用户settings，关闭会话持久化和内部请求重试；不开放shell、子代理、网络工具或跳过全部权限。测试由编排器独立执行。CLI仍不是操作系统沙箱；文件白名单及归档证据继续校验。Qoder Read/Edit及工具结果已映射既有重复读取/工具错误停止护栏。
+
+一条真实维护任务（摘要函数处理畸形元数据）完成 API设计→Qoder编码→四项保护测试→独立API审查，四阶段各attempt1，只改一个允许文件，保护测试哈希未变、主代理未补写实现；墙钟104.172秒，API已报告6362tokens，Qoder12.620490993credits。它证明该维护样本的闭环，不代表任意业务成功率。
+
+Qoder真机有实际输出/credits但token计数全0，故token永远按未完整验证处理、unknown_calls累计、保留有限预算预扣；无限token模式仍标incomplete，不能视为免费。`qoder_credits`单列写入state、阶段计量、metrics及CSV/工作台，不和美元或tokens相加。旧metrics缺字段不推测。终态失败也保留可解析的credits，超时尚无最终credits时不猜测金额。
+
+此次另对本机官方Grok Build CLI 1.0.77完成订阅账号登录与无API-Key的`grok-4.7/high`无工具调用；实际模型回显grok-4.7-build，有usage。此项仅是外部CLI试用，未注册Grok流水线适配器或声称真实编码验证；CLI报告的美元数不是已核对的订阅账单。
 
 0.5.1 增加兼容 API 的可选 `review_json_mode=true`（控制台“结构化审查 JSON”），只对 review 请求发送 `response_format={"type":"json_object"}`。高思考重放暴露了模型在合法 JSON 后附加说明而无法被严格协议接收的问题；此选项让支持的端点约束输出，解析器仍拒绝 JSON 后额外正文。端点不支持时明确失败，不隐式降级。DeepSeek v4-pro/high/thinking 的真实结构化探针已验证可生成独立 verdict 文件；这不是全面任务成功率保证。
 
@@ -45,7 +61,7 @@ python scripts/release.py --output D:/work/<全新发布目录>
 
 要求干净的已提交 HEAD、仓库外全新目录。步骤：禁用换行转换导出 Git 对象并逐文件比对 → 新源码目录完整离线验收 → 生成 ZIP/SNAPSHOT、结构化证据与最近最多30个提交的自动 CHANGELOG → 独立解压该 ZIP 再做完整验收 → 复核 HEAD/工作树及全部源码字节 → 发布正式 ZIP、`.sha256` 与 `release-result.json`。两份验证都必须 full、非零测试数、零失败/错误/跳过、指纹不变且数量一致；不提供跳过全量的 CLI 选项。第二次验收证据在包旁保存，避免修改已经复验的 ZIP。任一步失败保留候选与证据，不生成正式包；不自动推送远端、修改旧标签或覆盖旧包。
 
-发布脚本不收集工作树、凭据、状态、数据库、原始模型/回归日志；只包含该提交下跟踪源码与显式结构化发布证据。失败清理/平台边界沿用下文；此前有限平台矩阵不能当作0.5.0所有组合全量验证。豆包/Qoder成功样本与跨业务项目基线仍需补齐。
+发布脚本不收集工作树、凭据、状态、数据库、原始模型/回归日志；只包含该提交下跟踪源码与显式结构化发布证据。失败清理/平台边界沿用下文；此前有限平台矩阵不能当作本版所有组合全量验证。豆包CLI仍未核实，跨业务项目基线仍需补齐。
 
 ## 以下为先前阶段记录
 
@@ -163,7 +179,7 @@ attempt 目录分配后立即写失败占位记录；后续成功、恢复或人
 
 Qwen Code 0.26.0 已从官方 npm 固定版本安装到独立试验目录，真实 stdin 调用返回 JSON 事件数组和 7,282 tokens。版本、成功终态、用量与 provenance 已纳入离线回归；实际后端为现有 DeepSeek 兼容 API，不证明官方 Qwen 模型、工具执行或其它 0.26.x 版本。旧合成样本只保留为旧协议回归。
 
-Qoder 1.1.89 真实非交互调用返回未登录错误，只归档认证失败样本，未放宽成功协议版本。豆包 CLI 未找到；桌面应用存在不能替代 CLI。两者成功样本仍未验证，不捏造 provenance 或把未登录当成功。
+阶段四当时Qoder 1.1.89只完成未登录失败；该失败样本继续保留。当前0.5.2已新增登录后的真实成功/文件工具样本与维护闭环，范围见上文。豆包CLI仍未核实，桌面应用不能替代CLI，不捏造成功样本。
 
 真实仓库维护试点在独立项目中执行设计→编码→外部测试→独立审查，固定 DeepSeek API 后端、每任务 100,000 tokens/360 秒、零自动重启。三个既有缺口均在修改前复现，受保护测试哈希未变，首轮完整成功 **1/3**；另外两项外部测试虽通过，仍分别因补丁协议与审查失败记录为未完成。已报告 tokens 合计 62,665，未知调用为 0；API 未提供真实账单费用，费用留空。首轮没有人工补写实现。后续主代理审查并整合修复不改变首轮结果。这是三个本仓库维护任务样本，尚不是跨业务项目成功率基线。
 

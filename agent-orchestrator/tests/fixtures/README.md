@@ -7,7 +7,9 @@
 | `codex_0.167.jsonl` | **手写**，模拟 codex `--json` 事件流 | ⚠️ 合成样本，非真实抓包 |
 | `qwen_0.5.json` | **手写**，模拟 qwen `--output-format json` | ⚠️ 合成样本，版本号 0.5 与真实不符 |
 | `qwen_0.26.0_real.json` | 2026-11-17 本机 Qwen Code 0.26.0，通过 stdin 的真实调用 | 真实 JSON 事件数组及唯一成功 result，用量 7282；后端为 DeepSeek 兼容端点，不是 Qwen 模型；未验证工具执行 |
-| `qoder_1.1.89_auth_stderr.txt` | 2026-11-17 本机 Qoder 1.1.89 非交互探针 | 真实未登录失败，未获得模型成功结果；不会放开成功版本白名单 |
+| `qoder_1.1.89_auth_stderr.txt` | 2026-11-17 本机 Qoder 1.1.89 非交互探针 | 真实未登录失败，保留作认证失败回归 |
+| `qoder_1.1.89_real.json` | 2026-11-17 登录后本机 Qoder stdin调用 | 真实成功终态、credits与全零token计数，后者按未知处理 |
+| `qoder_1.1.89_tools_real.jsonl` | 2026-11-17 Qoder Ultimate/high/adaptive | 真实Read/Edit单文件修改、init协议1.5.0与成功终态，标识/路径已脱敏 |
 | `codex_0.169_real.jsonl` | 2026-11-15 本机 Codex CLI 0.169.0 实际执行 | 真实 JSONL，脱敏 thread_id |
 | `agy_1.5.9_real.jsonl` | 2026-11-15 本机反重力 CLI 1.5.9 实际执行 | 真实 stream-json，脱敏会话标识与 cwd |
 | `codex_0.169_policy_stderr.txt` | 2026-11-16 本机 Codex CLI 0.169.0 只读探针 | 真实策略拒绝日志，命令与本机路径已脱敏；命令未实际执行 |
@@ -33,7 +35,7 @@
 
 ## 待真机抓包替换（需用户环境）
 
-Qwen 已在独立试验目录安装并抓包；豆包与 Qoder 的成功 CLI 样本仍待实际登录与调用。真实 fixture 应这样获取：
+Qwen和Qoder已在独立试验目录安装并抓包；豆包独立官方CLI仍未核实，不使用猜测命令冒充真实接入。新增真实fixture需登记provenance；Qoder零token+非零credits不证明免费或用量完整。真实fixture示例：
 
 ```powershell
 # codex（本机可用）：只读分析任务，抓 --json 原始输出

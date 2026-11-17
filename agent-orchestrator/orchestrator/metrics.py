@@ -71,6 +71,7 @@ def write_metrics(engine, results: dict[str, str]) -> None:
                           'max_duration_s': config.run_budget.max_duration_s,
                           'unlimited_tokens': config.run_budget.unlimited_tokens}
     data['billing_cost_status'] = 'not_reported'
+    if 'qoder_credits' in state.usage_total:data['qoder_credits']=state.usage_total['qoder_credits']
     # 单写者持有 run 锁，先写完整临时文件，再以不覆盖的链接发布。
     temporary = path.with_suffix(".json.tmp")
     with temporary.open("w", encoding="utf-8") as stream:

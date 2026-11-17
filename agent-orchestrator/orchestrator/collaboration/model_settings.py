@@ -9,7 +9,7 @@ from pathlib import Path
 from ..config import load_config, parse_config
 from .config_copy import dump_config
 
-MODEL_TYPES = {'openai_compat', 'cli_codex', 'cli_qwen', 'cli_agy'}
+MODEL_TYPES = {'openai_compat', 'cli_codex', 'cli_qwen', 'cli_agy', 'cli_qoder'}
 EFFORTS = ('none', 'low', 'medium', 'high', 'xhigh')
 
 
@@ -22,8 +22,8 @@ def describe_models(cfg):
                            reasoning_effort=options.get('reasoning_effort') or '',
                            thinking=options.get('thinking') or '',
                            review_json_mode=options.get('review_json_mode', False),
-                           supports_effort=adapter.type in ('openai_compat','cli_codex'),
-                           supports_thinking=adapter.type=='openai_compat'))
+                           supports_effort=adapter.type in ('openai_compat','cli_codex','cli_qoder'),
+                           supports_thinking=adapter.type in ('openai_compat','cli_qoder')))
     return result
 
 
@@ -51,10 +51,12 @@ def validate_options(cfg, options):
                 if not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9._:/-]{0,159}',value):
                     raise ValueError('模型名称必须为 1..160 字符的模型标识')
             elif key=='reasoning_effort':
-                if adapter.type not in ('openai_compat','cli_codex') or value not in EFFORTS:
+                allowed=('low','medium','high','xhigh','max') if adapter.type=='cli_qoder' else EFFORTS
+                if adapter.type not in ('openai_compat','cli_codex','cli_qoder') or value not in allowed:
                     raise ValueError('该工具不支持此思考强度')
-            elif adapter.type!='openai_compat' or value not in ('enabled','disabled'):
-                raise ValueError('thinking 只适用于支持该参数的兼容 API')
+            elif (adapter.type=='cli_qoder' and value not in ('auto','adaptive','disabled')) or (
+                    adapter.type!='cli_qoder' and (adapter.type!='openai_compat' or value not in ('enabled','disabled'))):
+                raise ValueError('thinking 必须为工具支持的模式')
             row[key]=value
         if row:clean[name]=row
     return {'models':clean,'unlimited_tokens':unlimited}

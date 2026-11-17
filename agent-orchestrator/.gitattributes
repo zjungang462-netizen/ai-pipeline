@@ -3,3 +3,4 @@ tests/fixtures/codex_0.169_policy_stderr.txt -text whitespace=cr-at-eol
 tests/fixtures/*.jsonl -text whitespace=cr-at-eol
 tests/fixtures/qwen_0.26.0_real.json -text
 tests/fixtures/qoder_1.1.89_auth_stderr.txt -text whitespace=cr-at-eol
+tests/fixtures/qoder_1.1.89_real.json -text

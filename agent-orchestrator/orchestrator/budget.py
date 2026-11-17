@@ -16,10 +16,19 @@ class BudgetPolicy:
         tokens = result.usage.get('known_tokens',0) if unknown else result.usage.get('tokens') or 0
         self.state.usage_total["tokens"] += tokens
         self.state.usage_total["duration_s"] += result.usage.get("duration_s") or 0.0
+        credits=result.usage.get('qoder_credits')
+        if credits is not None:
+            import math
+            if type(credits) not in (int,float) or not math.isfinite(credits) or credits<0:
+                raise ValueError('Qoder credits 必须为有限非负数')
+            self.state.usage_total['qoder_credits']=self.state.usage_total.get('qoder_credits',0)+credits
         if stage:
             used = self.state.stage_usage.setdefault(stage, {"tokens": 0, "duration_s": 0.0})
             used['tokens'] += tokens
             used['duration_s'] += result.usage.get('duration_s') or 0
+            if credits is not None:used['qoder_credits']=used.get('qoder_credits',0)+credits
+            if result.usage.get('usage_unknown'):
+                used['unknown_calls']=used.get('unknown_calls',0)+1
         self.state.save()
 
     def _check_budget(self, spec: StageSpec, result: Result) -> None:

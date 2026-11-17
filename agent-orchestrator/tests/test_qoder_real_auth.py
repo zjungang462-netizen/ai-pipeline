@@ -16,7 +16,7 @@ class QoderRealAuth(unittest.TestCase):
         result=adapter._parse(subprocess.CompletedProcess([],1,'',stderr),root,ctx)
         self.assertFalse(result.ok)
         self.assertEqual(result.error_kind,ErrorKind.AUTH)
-        # 没有真机成功样本前不放行裸版本号上的合成成功响应。
+        # 新增真实成功协议后，只有 result 字段的合成响应仍不能冒充完整成功终态。
         result=adapter._parse(subprocess.CompletedProcess([],0,'{"result":"synthetic"}',''),root,ctx)
         self.assertFalse(result.ok)
         self.assertTrue(result.parse_unknown)

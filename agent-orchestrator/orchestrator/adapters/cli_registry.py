@@ -33,6 +33,8 @@ def build(cfg: AdapterConfig, kind: str = "report") -> Adapter:
     }
     if cls is QwenAdapter and o.get("model"):
         kwargs["model"] = o["model"]
+    if cls is QoderAdapter:
+        kwargs.update(model=o.get('model'),reasoning_effort=o.get('reasoning_effort'),thinking=o.get('thinking'))
     if cls is CodexAdapter:
         kwargs.update(model=o.get('model'), isolate_config=o.get('isolate_config', False),
                       reasoning_effort=o.get('reasoning_effort'))

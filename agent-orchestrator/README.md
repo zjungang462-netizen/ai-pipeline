@@ -30,6 +30,8 @@ python -m orchestrator.cli resume workbench.example.toml --run-id demo-1
 
 新建任务可按适配器填写账户可用的旗舰模型标识，并为支持的工具设置思考参数。Codex 可选 `xhigh`；兼容 API 可设置 `reasoning_effort` 或 `thinking`，具体值须由该端点和模型支持，拒绝时不会自动降级。Qwen/反重力可覆盖模型名，尚未验证的其它工具继续使用各自配置。工具默认/原配置同样可以保留；系统不猜测账户里哪个模型“最好”。
 
+Qoder 1.1.89 已验证 `Ultimate + high + adaptive` 真实读取/编辑与一条维护任务闭环；控制台支持 Qoder 模型、思考强度和 `auto/adaptive/disabled`。`thinking=enabled` 需要该工具额外的固定思考预算，本接入不使用它。示例见 `qoder.example.toml`。
+
 工作台新任务默认勾选“不限制 token”，取消本地运行/阶段/输出 token 限额，继续记录用量并保留时长、轮次、文件与审批约束。模型服务自身仍可能有输出/上下文上限。CLI 使用此模式需在 `[run_budget]` 显式设 `unlimited_tokens=true`，并删除运行/阶段/适配器的 `max_tokens`。
 
 支持的 API 可同时启用“结构化审查 JSON”，约束审查输出为 JSON 对象，避免高思考模型额外说明导致协议拒收；不放宽审查判据。
@@ -47,6 +49,7 @@ python -m orchestrator.cli resume workbench.example.toml --run-id demo-1
 | `unattended.example.toml` | 显式预授权的有界无人值守 |
 | `cli-mixed.example.toml` | Codex 设计/审查与反重力编码 |
 | `dsh-test.example.toml` | dsh 测试角色 |
+| `qoder.example.toml` | API 设计/审查、Qoder 文件工具编码与独立测试 |
 
 模型示例会真实调用工具或 API，并可能修改示例任务目录。用于业务项目时，先核对 `task_workdir`、测试命令、允许修改的文件及预算。工作台中的任务文字不会切换执行目录，也不会替配置增加设计或编码阶段。
 
@@ -146,7 +149,8 @@ python -m orchestrator.cli resume workbench.example.toml --run-id demo-1
 | `cli_agy` | 可设 `exe`、`model`、无凭据 `proxy_url`、`extra_env`、`timeout_s`；已有真实样本 |
 | `cli_dsh` | 可设 `exe`、`permission_mode`、无凭据 `proxy_url`、`extra_env`、`timeout_s`；已有真实样本 |
 | `cli_qwen` | Qwen Code 0.26.0 的 stdin/JSON 数组/终态用量已有真实样本；后端为 DeepSeek，工具执行与其它版本仍待验证 |
-| `cli_qoder` / `cli_doubao` | 注册不等于已验证；真实版本、stdin 与成功输出的范围见交付说明 |
+| `cli_qoder` | 1.1.89 真机 stdin/流式成功终态及 Read/Edit 已验证；Ultimate/high/adaptive 真实维护任务通过；token计数不完整、credits分列 |
+| `cli_doubao` | 未核实独立官方 CLI，属于未验证预留；调用豆包模型可使用方舟兼容API |
 | `fake` | 仅用于离线演示和确定性回归 |
 
 CLI 子进程使用环境白名单；额外凭据变量须在 `extra_env` 显式列名。Windows 的 Codex 建议配置原生 `codex.exe`，减少 npm `.cmd` 的参数转义影响。CLI 版本未知、缺少完成事件或输出无法解析时，不会按成功处理。样本来源与真实性见 [tests/fixtures/README.md](tests/fixtures/README.md)。

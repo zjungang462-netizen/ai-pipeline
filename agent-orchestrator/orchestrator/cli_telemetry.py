@@ -144,6 +144,7 @@ class CLITrace:
         self.started_tools=set()
         self.dsh_calls={}
         self.dsh_tool_names={}
+        self.qoder_tools={}
         self.codex_thread=''
         self.codex_stderr=''
         self.dropping_stderr=False
@@ -215,6 +216,29 @@ class CLITrace:
         except (ValueError,TypeError):return
         if not isinstance(event,dict):return
         self.ledger.observe(event)
+        if self.channel=='cli_qoder':
+            message=event.get('message')
+            content=message.get('content',[]) if isinstance(message,dict) else []
+            for item in content if isinstance(content,list) else []:
+                if not isinstance(item,dict):continue
+                if event.get('type')=='assistant' and item.get('type')=='tool_use' and isinstance(item.get('id'),str):
+                    name=item.get('name')
+                    # 仅映射真实抓取的读/写事件；不推断任意工具调用具有写权限。
+                    mapped={'Read':'read_file','Edit':'edit_file','Write':'write_file','Glob':'glob','Grep':'grep'}.get(name)
+                    if not mapped:continue
+                    key=('qoder',str(event.get('session_id') or ''),item['id'])
+                    parameters=item.get('input',{})
+                    if not isinstance(parameters,dict):parameters={}
+                    self.qoder_tools[item['id']]=(key,mapped)
+                    self._tool_event(ToolActivity(key,mapped,'ACTIVE',parameters,file_parameter(parameters),
+                                     read_signature(mapped,parameters) if mapped in READ_TOOLS else '',mapped in WRITE_TOOLS))
+                elif event.get('type')=='user' and item.get('type')=='tool_result':
+                    previous=self.qoder_tools.get(item.get('tool_use_id'))
+                    if previous:
+                        key,name=previous
+                        self._tool_event(ToolActivity(key,name,'ERROR' if item.get('is_error') else 'DONE',
+                                                     writes=name in WRITE_TOOLS))
+            return
         if self.channel=='cli_codex':
             if event.get('type')=='thread.started' and isinstance(event.get('thread_id'),str):
                 self.codex_thread=event['thread_id']

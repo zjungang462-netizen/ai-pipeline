@@ -49,18 +49,21 @@ def failure_categories(state, job=None, metrics=None):
     from .contracts import ErrorKind
     known = {kind.value for kind in ErrorKind} - {'none'}
     categories = set()
-    for event in state.get('events', []):
+    mapping = {'test_fail': 'test_failure', 'review_exhausted': 'review_failure',
+               'review_incomplete': 'review_incomplete', 'watch_enforce': 'write_violation',
+               'test_inputs_modified': 'test_inputs_modified', 'worktree_error': 'worktree_error',
+               'cli_retry_exhausted': 'retry_exhausted'}
+    events = state.get('events')
+    for event in events if isinstance(events, list) else []:
         if not isinstance(event, dict): continue
         error = event.get('error_kind')
-        if error in known: categories.add(error)
+        if isinstance(error, str) and error in known: categories.add(error)
         kind = event.get('kind')
-        mapping = {'test_fail': 'test_failure', 'review_exhausted': 'review_failure',
-                   'review_incomplete': 'review_incomplete', 'watch_enforce': 'write_violation',
-                   'test_inputs_modified': 'test_inputs_modified', 'worktree_error': 'worktree_error',
-                   'cli_retry_exhausted': 'retry_exhausted'}
-        if kind in mapping: categories.add(mapping[kind])
-    for reason in (metrics or {}).get('fail_reasons', []):
-        if reason in {'budget_exhausted', 'verify_nonzero', 'review_exhausted', 'review_fail', 'execution_failed'}:
+        if isinstance(kind, str) and kind in mapping: categories.add(mapping[kind])
+    reasons = (metrics or {}).get('fail_reasons')
+    for reason in reasons if isinstance(reasons, list) else []:
+        if isinstance(reason, str) and reason in {'budget_exhausted', 'verify_nonzero', 'review_exhausted',
+                                                  'review_fail', 'execution_failed'}:
             categories.add(reason)
     if (job or {}).get('status') in ('timeout', 'cancelled'):
         categories.add(job['status'])
@@ -90,10 +93,15 @@ def usage_summary(run_id, state, metrics=None):
                          model=stage.get('model'), reasoning_effort=stage.get('reasoning_effort'),
                          thinking=stage.get('thinking'),
                          tokens=number(used.get('tokens')), duration_s=number(used.get('duration_s')),
+                         qoder_credits=number(used.get('qoder_credits')),
+                         unknown_calls=number(used.get('unknown_calls')),
+                         token_status='incomplete' if used.get('unknown_calls') else 'not_recorded' if not used else 'reported',
                          billing_cost=None, currency='', cost_status='not_reported'))
     return dict(run_id=run_id, source='immutable_metrics' if frozen else 'live_state',
                 tokens=tokens, reported_tokens=reported, reserved_tokens=reserved,
                 duration_s=number(usage.get('duration_s')), unknown_calls=number(usage.get('unknown_calls', 0)),
+                qoder_credits=number(usage.get('qoder_credits')),
+                token_status='incomplete' if usage.get('unknown_calls') else 'not_recorded' if tokens is None else 'reported',
                 billing_cost=None, cost_status='not_reported', stages=rows,
                 failure_categories=failure_categories(state, metrics=metrics))
 
@@ -121,7 +129,7 @@ def export_usage(state_dir, run_id=None):
 
 
 CSV_FIELDS = ('scope', 'run_id', 'stage', 'tool', 'adapter', 'model', 'reasoning_effort', 'thinking', 'status', 'tokens',
-              'reported_tokens', 'reserved_tokens', 'duration_s', 'billing_cost', 'currency', 'cost_status')
+              'reported_tokens', 'reserved_tokens', 'unknown_calls', 'token_status', 'duration_s', 'qoder_credits', 'billing_cost', 'currency', 'cost_status')
 
 
 def csv_cell(value):

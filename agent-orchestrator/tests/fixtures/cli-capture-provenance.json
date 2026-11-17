@@ -81,5 +81,37 @@
     "source_sha256": "205d27ce46fd272d7155ec23418de5fd3b1a2678767476dcaae0955db3e1c09f",
     "fixture_sha256": "ad63e1a9e14b52bedcdf6aad512d64954f2b7f4d45492469fcfc562dc9dc844e",
     "scope": "authentication rejection only; no model or tool success verified"
+  },
+  "qoder_1.1.89_real.json": {
+    "source": "真实本机 Qoder CLI 1.1.89 stdin 无工具成功调用",
+    "version": "1.1.89",
+    "protocol_version": "final-json",
+    "captured_at": "2026-11-17T11:47:25.796422+08:00",
+    "redacted_fields": [
+      "session_id",
+      "uuid",
+      "request_id",
+      "cwd",
+      "tool file paths"
+    ],
+    "source_sha256": "b4e38dee47ac750024e120d94a1cbaf2f6e8dd715a8bcffc3f1f9e586eaf8ec3",
+    "fixture_sha256": "9eb256744ff6fc292938fb0bb5fb0060845c7cf5cce8d705ef69d019628e72e9",
+    "token_scope": "zero token counters are incomplete; credits preserved separately"
+  },
+  "qoder_1.1.89_tools_real.jsonl": {
+    "source": "真实本机 Qoder CLI 1.1.89 Read/Edit 单文件工具调用",
+    "version": "1.1.89",
+    "protocol_version": "1.5.0",
+    "captured_at": "2026-11-17T11:47:25.796952+08:00",
+    "redacted_fields": [
+      "session_id",
+      "uuid",
+      "request_id",
+      "cwd",
+      "tool file paths"
+    ],
+    "source_sha256": "040053bdef769919ba6ec7703ec69f71c6086c1ae37efc67816cc2bf86cad4fb",
+    "fixture_sha256": "8f67362be8bf2b28687fce5347a27114179d3ba3277ee62043d68ceac762f0ea",
+    "token_scope": "zero token counters are incomplete; credits preserved separately"
   }
 }

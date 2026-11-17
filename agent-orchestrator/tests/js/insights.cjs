@@ -36,6 +36,13 @@ class Element{
  nodes.get('unlimited-tokens').checked=true;
  const controls=nodes.get('model-settings').querySelectorAll();const jsonMode=controls.find(node=>node.dataset.option==='review_json_mode');assert.ok(jsonMode);jsonMode.value='true';
  const opts=vm.runInContext('executionOptions()',context);assert.equal(opts.models.api.review_json_mode,true);assert.equal(opts.unlimited_tokens,true);
+ vm.runInContext("projects.push({id:'q',config_hash:'h',models:[{name:'qoder',type:'cli_qoder',model:'Ultimate',supports_effort:true,supports_thinking:true}]});",context);
+ nodes.get('project-select').value='q';vm.runInContext('renderModelSettings()',context);
+ const qc=nodes.get('model-settings').querySelectorAll();assert.ok(!qc.some(n=>n.dataset.option==='review_json_mode'));
+ const effort=qc.find(n=>n.dataset.option==='reasoning_effort');assert.ok(effort.children.some(o=>o.value==='max'));
+ const thinking=qc.find(n=>n.dataset.option==='thinking');assert.ok(thinking.children.some(o=>o.value==='adaptive'));assert.ok(!thinking.children.some(o=>o.value==='enabled'));
+ effort.value='high';thinking.value='adaptive';const qo=vm.runInContext('executionOptions()',context);assert.equal(qo.models.qoder.thinking,'adaptive');
+
  assert.equal(requests.filter(r=>r.options?.method==='POST').length,0,'applying template must not execute');
  await nodes.get('compare-run').onclick();
  assert.ok(nodes.get('compare-result').textContent.includes('未知'));
