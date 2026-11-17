@@ -18,6 +18,8 @@ from ..collaboration.projection import read_artifact
 
 class Application:
     def __init__(self, database, configs):
+        from .._version import __version__
+        self.version = __version__
         self.service = Service(database, configs)
         self.bootstrap = secrets.token_urlsafe(32)
         self.session = secrets.token_urlsafe(32)
@@ -129,13 +131,14 @@ class Handler(BaseHTTPRequestHandler):
             parsed = urlsplit(self.path)
             path = unquote(parsed.path)
             query = parse_qs(parsed.query, keep_blank_values=True)
-            if method == 'GET' and path in ('/', '/app.js', '/style.css'):
-                name = {'/': 'index.html', '/app.js': 'app.js', '/style.css': 'style.css'}[path]
+            if method == 'GET' and path in ('/', '/app.js', '/insights.js', '/style.css'):
+                name = {'/': 'index.html', '/app.js': 'app.js', '/insights.js': 'insights.js', '/style.css': 'style.css'}[path]
                 body = (Path(__file__).parent / 'static' / name).read_bytes()
                 self.send_response(200)
                 self.headers_common()
                 self.send_header('Content-Type', {'index.html': 'text/html; charset=utf-8',
                                                   'app.js': 'text/javascript; charset=utf-8',
+                                                  'insights.js': 'text/javascript; charset=utf-8',
                                                   'style.css': 'text/css; charset=utf-8'}[name])
                 self.send_header('Content-Length', str(len(body)))
                 self.end_headers()
@@ -155,15 +158,31 @@ class Handler(BaseHTTPRequestHandler):
                 token = body.get('token')
                 if not isinstance(token, str) or not hmac.compare_digest(token, self.app.bootstrap):
                     return self.respond({'error': '请使用终端中本次启动的工作台链接'}, 401)
-                return self.respond({'csrf': self.app.csrf, 'single_user': True}, cookie=True)
+                return self.respond({'csrf': self.app.csrf, 'single_user': True, 'version': self.app.version}, cookie=True)
             if not self.authorised():
                 return self.respond({'error': '请使用本机终端中的工作台链接建立会话'}, 401)
             if method == 'POST' and not hmac.compare_digest(self.headers.get('X-Workbench-CSRF', ''), self.app.csrf):
                 return self.respond({'error': '请求令牌无效'}, 403)
             if path == '/api/session' and method == 'GET':
-                return self.respond({'csrf': self.app.csrf, 'single_user': True})
+                return self.respond({'csrf': self.app.csrf, 'single_user': True, 'version': self.app.version})
             service, store = self.app.service, self.app.service.store
+            from ..collaboration import insights
             parts = path.strip('/').split('/')
+            if path == '/api/templates':
+                if method == 'GET':
+                    return self.respond({'templates': insights.templates(service)})
+                if method == 'POST':
+                    self.idem()  # 保存为按项目+名称的幂等 upsert，不执行任务。
+                    return self.respond(insights.save_template(service, body['project_id'], body['name'],
+                                        body['task'], body['expected_config_hash']), 201)
+            if path == '/api/compare' and method == 'GET':
+                if any(len(query.get(k, [])) != 1 for k in ('left', 'right')):
+                    raise ValueError('left/right 各提供一个运行 ID')
+                return self.respond(insights.compare(service, query['left'][0], query['right'][0]))
+            if path == '/api/failures' and method == 'GET':
+                if any(len(v) != 1 for v in query.values()): raise ValueError('查询参数不可重复')
+                return self.respond(insights.failure_page(service, query.get('after', [None])[0],
+                                                         int(query.get('limit', ['50'])[0])))
             if path == '/api/projects' and method == 'GET':
                 return self.respond({'projects': service.list_projects()})
             if path == '/api/runs':
@@ -183,7 +202,7 @@ class Handler(BaseHTTPRequestHandler):
                     return self.respond(page)
                 if method == 'POST':
                     value = service.create_run(body['project_id'], body['task'], self.idem(),
-                                               body.get('parent_id'), body.get('expected_config_hash'))
+                                               body.get('parent_id'), body.get('expected_config_hash'), body.get('execution_options'))
                     return self.respond(value, 202)
             if len(parts) == 3 and parts[:2] == ['api', 'commands'] and method == 'GET':
                 return self.respond(store.command(parts[2]))
@@ -192,6 +211,8 @@ class Handler(BaseHTTPRequestHandler):
                 run = store.run(key)
                 if action == 'snapshot' and method == 'GET':
                     return self.respond(service.snapshot(key))
+                if action == 'usage' and method == 'GET':
+                    return self.respond(insights.run_summary(service, key))
                 if action == 'events' and method == 'GET':
                     service.snapshot(key)
                     if 'before' in query:

@@ -24,7 +24,8 @@ class OpenAICompatAdapter(Adapter):
 
     def __init__(self, name: str, base_url: str, model: str, api_key_env: str,
                  kind: str = "report", temperature: float = 0.2,
-                 max_tokens: int | None = None, timeout_s: int = 120):
+                 max_tokens: int | None = None, timeout_s: int = 120,
+                 reasoning_effort: str | None = None, thinking: str | None = None):
         self.name = name
         self.base_url = base_url.rstrip("/")
         self.model = model
@@ -33,6 +34,11 @@ class OpenAICompatAdapter(Adapter):
         self.temperature = temperature
         self.max_tokens = max_tokens
         self.timeout_s = timeout_s
+        if reasoning_effort is not None and reasoning_effort not in ('none', 'low', 'medium', 'high', 'xhigh'):
+            raise ValueError('reasoning_effort 非法')
+        if thinking is not None and thinking not in ('enabled', 'disabled'):
+            raise ValueError('thinking 必须为 enabled/disabled')
+        self.reasoning_effort, self.thinking = reasoning_effort, thinking
 
     def _key(self) -> str | None:
         return os.environ.get(self.api_key_env)
@@ -64,6 +70,11 @@ class OpenAICompatAdapter(Adapter):
         }
         if self.max_tokens:
             payload["max_tokens"] = self.max_tokens
+        if self.reasoning_effort is not None:
+            payload['reasoning_effort'] = self.reasoning_effort
+        if self.thinking is not None:
+            payload['thinking'] = {'type': self.thinking}
+            if self.thinking == 'enabled': payload.pop('temperature', None)
         if ctx.output_tokens is not None:
             payload['max_tokens'] = min(payload.get('max_tokens', ctx.output_tokens), ctx.output_tokens)
         req = urllib.request.Request(
@@ -119,7 +130,7 @@ class OpenAICompatAdapter(Adapter):
                    "completion_tokens": usage.get("completion_tokens", 0),
                    "duration_s": duration},
         )
-        if ctx.token_reservation and 'total_tokens' not in usage:
+        if 'total_tokens' not in usage:
             result.usage['usage_unknown'] = True
         if not isinstance(text, str):
             result.ok, result.parse_unknown = False, True

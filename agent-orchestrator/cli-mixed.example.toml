@@ -12,7 +12,7 @@ allow_yolo = false
 watch_root = "off"
 
 [run_budget]
-# schema: run_budget.max_tokens：运行累计 token 上限；无人值守时必须为正数
+# schema: run_budget.max_tokens：运行累计 token 上限；unlimited_tokens=true 时不设置
 max_tokens = 220000
 # schema: run_budget.max_duration_s：运行累计秒数上限；无人值守时必须为正数
 max_duration_s = 600
@@ -32,7 +32,7 @@ max_repair_rounds = 2
 max_stagnant_rounds = 2
 # schema: autonomy.repair_batch_size：单轮最多修改文件数
 repair_batch_size = 2
-# schema: autonomy.output_tokens：单次输出额度，CLI 不构成服务端硬限制
+# schema: autonomy.output_tokens：有限 token 模式的单次输出额度；unlimited_tokens 时不施加此本地限制
 output_tokens = 2048
 # schema: autonomy.context_chars：上下文字符数上限
 context_chars = 12000

@@ -23,7 +23,8 @@ def supervise(config_path: Path, run_id: str, task: str, max_restarts: int = 2,
     config = load_config(source)
     if not config.autonomy.enabled and not control_db:
         raise ConfigError('unattended 必须显式启用 autonomy')
-    if control_db and (not config.run_budget.max_duration_s or not config.run_budget.max_tokens):
+    if control_db and (not config.run_budget.max_duration_s or
+                       (not config.run_budget.max_tokens and not config.run_budget.unlimited_tokens)):
         raise ConfigError('工作台启动任务必须有正数 token 与时长预算')
     state = RunState(config.state_dir, run_id)
     directory = state.run_dir

@@ -123,6 +123,8 @@ class AutonomousControls:
 
     def _call_limits(self, spec, adapter, prompt):
         """按字节保守估算输入，并给输出设置剩余额度内的实际 API 上限。"""
+        if self.config.run_budget.unlimited_tokens:
+            return None, 0  # 继续跟踪 pending/未知用量，不用估算额度拦截调用。
         estimate = max(1, math.ceil(len(prompt.encode('utf8')) / 2))
         if getattr(adapter,'channel','').startswith('cli_'):
             estimate += self.config.autonomy.cli_input_overhead_tokens

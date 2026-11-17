@@ -26,6 +26,14 @@ python -m orchestrator.cli resume workbench.example.toml --run-id demo-1
 
 运行等待审批时退出 **11**，完成后退出 **0**，执行失败退出 **1**，配置或用法错误通常退出 **2**。不要把审批中当作成功；新任务使用新的 run-id。
 
+## 先选好模型与思考强度
+
+新建任务可按适配器填写账户可用的旗舰模型标识，并为支持的工具设置思考参数。Codex 可选 `xhigh`；兼容 API 可设置 `reasoning_effort` 或 `thinking`，具体值须由该端点和模型支持，拒绝时不会自动降级。Qwen/反重力可覆盖模型名，尚未验证的其它工具继续使用各自配置。工具默认/原配置同样可以保留；系统不猜测账户里哪个模型“最好”。
+
+工作台新任务默认勾选“不限制 token”，取消本地运行/阶段/输出 token 限额，继续记录用量并保留时长、轮次、文件与审批约束。模型服务自身仍可能有输出/上下文上限。CLI 使用此模式需在 `[run_budget]` 显式设 `unlimited_tokens=true`，并删除运行/阶段/适配器的 `max_tokens`。
+
+本次选择写入独立配置副本，原配置不改写；任务房间显示实际绑定的模型与思考参数。高思考/不限 token 是执行选项，不代表所有工具/复杂任务已证明能成功，实际效果需结合真实验收。
+
 ## 接入模型与项目
 
 复制一份示例，填写任务目录、命令、提示词、模型及预算，先运行 `doctor`。凭据只设置到配置指定的环境变量；真实 CLI 另需本机安装和已有登录。API 示例使用 `DEEPSEEK_API_KEY`。提示词可内联，也可引用相对配置文件目录的文件。
@@ -52,6 +60,7 @@ python -m orchestrator.cli resume workbench.example.toml --run-id demo-1
 | `unattended 配置 --task 文本 --max-restarts 次数` | 按预授权策略有限恢复 |
 | `doctor 配置 [--json]` | 本机静态诊断，不调用模型或登录探测 |
 | `clean --state-dir 目录 [--dry-run]` | 预览过期状态清理；仅 `--apply` 执行 |
+| `export-usage --state-dir 目录 --output 文件.csv` | 导出运行、阶段和工具用量；未报告的账单费用留空 |
 | `dashboard --config 配置 --port 端口` | 启动本机工作台，配置参数可重复 |
 | `tune --state-dir 目录 --config 配置` | 生成待审批的历史策略提案 |
 | `approve-tune --state-dir 目录 --output 新配置` | 批准并写入配置副本 |
@@ -95,8 +104,9 @@ python -m orchestrator.cli resume workbench.example.toml --run-id demo-1
 | stages | `test_cmd` | `list[str]` | `[]` | test 必填的非空 argv 数组，其它类型禁止设置 |
 | stages | `context_files` | `list[str]` | `[]` | 显式上下文相对文件路径列表 |
 | stages | `precheck_cmd` | `list[str]` | `[]` | 仅 code 可设，运行前真实检查命令 argv |
-| run_budget | `max_tokens` | `int | None` | `null` | >= 0；运行累计 token 上限；无人值守时必须为正数 |
+| run_budget | `max_tokens` | `int | None` | `null` | >= 0；运行累计 token 上限；unlimited_tokens=true 时不设置 |
 | run_budget | `max_duration_s` | `int | None` | `null` | >= 0；运行累计秒数上限；无人值守时必须为正数 |
+| run_budget | `unlimited_tokens` | `bool` | `false` | 显式取消运行/阶段/输出 token 限额，保留墙钟与轮次约束；模型服务仍可能有自身上限 |
 | autonomy | `enabled` | `bool` | `false` | 显式开启无人值守 |
 | autonomy | `auto_approve` | `list[str]` | `[]` | 预授权自动批准的阶段名列表 |
 | autonomy | `allowed_files` | `list[str]` | `[]` | 允许修改的相对文件路径白名单 |
@@ -104,7 +114,7 @@ python -m orchestrator.cli resume workbench.example.toml --run-id demo-1
 | autonomy | `max_repair_rounds` | `int` | `4` | >= 1，<= 20；整个反馈链的最大修复轮数 |
 | autonomy | `max_stagnant_rounds` | `int` | `2` | >= 1；连续无进展的最大轮数 |
 | autonomy | `repair_batch_size` | `int` | `1` | >= 1，<= 3；单轮最多修改文件数 |
-| autonomy | `output_tokens` | `int` | `2048` | >= 1，<= 16384；单次输出额度，CLI 不构成服务端硬限制 |
+| autonomy | `output_tokens` | `int` | `2048` | >= 1，<= 16384；有限 token 模式的单次输出额度；unlimited_tokens 时不施加此本地限制 |
 | autonomy | `context_chars` | `int` | `32000` | >= 1，<= 128000；上下文字符数上限 |
 | autonomy | `cli_input_overhead_tokens` | `int` | `32768` | >= 1；CLI 工具上下文的保守输入预留 |
 | autonomy | `cli_idle_timeout_s` | `int` | `120` | >= 1，<= 3600；CLI 无活动超时，秒 |
@@ -150,11 +160,13 @@ CLI 子进程使用环境白名单；额外凭据变量须在 `extra_env` 显式
 - code/test 审批校验申请时冻结值、attempt 归档与 evidence；report/review 仍检查实时输入变化。讨论建议不会自动成为实现或通过结论。
 - CLI 中断与恢复保留已报告用量及未知预留，续跑不重置原预算、期限和调用次数。CLI token 是观察与预扣口径，不等于实际账单，也不是服务端单次输出硬上限。
 
-无人值守须显式声明允许文件、自动审批阶段、轮数和正数预算。自动调优只为后续任务产生有界配置副本，不增加预算或写权限，不修改引擎源码。
+无人值守须显式声明允许文件、自动审批阶段、轮数及正数时长，并选择正数 token 预算或显式不限 token。自动调优只为后续任务产生有界配置副本，不增加预算或写权限，不修改引擎源码。
 
 ## 本地工作台与边界
 
 工作台支持全历史关键词/项目/状态筛选、稳定分页、SSE 活动、审批、暂停/继续、取消和有限 API 双角色会诊。创建任务绑定所选配置和配置哈希；执行范围以配置为准。固定测试流程的完成只证明配置的命令通过。
+
+可保存常用配置与任务文字为模板，再核对并启动；配置变化时旧模板禁用。运行对比展示已报告/预留用量与时长差值，不能代替实现质量审查。失败看板逐页扫描历史，只按明确错误类别和停止事件聚合；多类别可以重叠，读取失败会单独提示。预算到 80% 时提示，不自动修改限额。
 
 只监听本机 loopback，写操作需要会话、同源和 CSRF 校验。控制指令入队后仍须等待执行收据；暂停在检查点生效，关闭页面或工作台不等于取消独立任务。数据库投影可重建，原状态与 attempt 证据为权威来源。
 
@@ -175,3 +187,5 @@ CLI 子进程使用环境白名单；额外凭据变量须在 `extra_env` 显式
 | `adapters/` / `dashboard/` / `collaboration/` | 工具适配、本地工作台及控制 |
 
 开发机 `live-validation-*`、`review-*` 原始证据不入包；交付说明和包内结构化验收可独立复现。受控演示与离线回归不能代替真实业务成功率；未验证的版本和平台如实标注。
+
+本地一键打包使用 `python scripts/release.py --output <仓库外全新目录>`，必须先提交到干净 HEAD；它执行两次完整离线验收，生成原始 Git 字节源码包、快照清单、自动提交 CHANGELOG 和 SHA-256。不会推送、发布远端或覆盖已有交付。`python -m orchestrator.cli --version` 可查看源码版本。

@@ -19,6 +19,7 @@ def build_adapter(cfg: AdapterConfig, kind: str = "report") -> Adapter:
             temperature=float(o.get("temperature", 0.2)),
             max_tokens=o.get("max_tokens"),
             timeout_s=int(o.get("timeout_s", 120)),
+            reasoning_effort=o.get('reasoning_effort'), thinking=o.get('thinking'),
         )
     # CLI 适配器在第 3 阶段接入
     if t.startswith("cli_"):

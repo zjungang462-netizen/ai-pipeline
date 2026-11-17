@@ -79,8 +79,10 @@ class Service:
         for entry in self.store.projects():
             try:
                 cfg = self.config(entry['config'])
+                from .model_settings import describe_models
                 result.append({**entry, 'execution_scope': execution_scope(cfg),
-                               'config_hash': cfg.source_hash})
+                               'config_hash': cfg.source_hash, 'models': describe_models(cfg),
+                               'unlimited_tokens': cfg.run_budget.unlimited_tokens})
             except Exception as error:
                 result.append({**entry, 'execution_scope': None, 'config_hash': None,
                                'unavailable': (str(error) or error.__class__.__name__)[:200]})
@@ -125,6 +127,9 @@ class Service:
         data['last_cursor']=self.store.last_cursor(key)
         cfg = self.config(run['config'])
         data['budget'] = {'max_tokens': cfg.run_budget.max_tokens, 'max_duration_s': cfg.run_budget.max_duration_s}
+        data['budget']['unlimited_tokens'] = cfg.run_budget.unlimited_tokens
+        from .model_settings import describe_models
+        data['models'] = describe_models(cfg)
         data['code_stages'] = [s.name for s in cfg.stages if s.kind == 'code' and state.get('stages', {}).get(s.name, {}).get('commit_sha')]
         data['metrics'] = read_json(directory(run) / 'metrics.json')
         data['strategy'] = {'proposal_id': cfg.tune_proposal_id,
@@ -134,6 +139,10 @@ class Service:
         data['capabilities']['discussion'] = bool(state.get('stages')) and any(a.type == 'openai_compat' for a in cfg.adapters.values())
         data['config_integrity'] = ('not_recorded' if not job.get('config_hash') else
                                     'valid' if cfg.source_hash == job['config_hash'] else 'changed')
+        from ..reporting import budget_alerts
+        # 配置变化后不依据新限额给旧任务的运行预算作结论。
+        data['budget_alerts'] = (budget_alerts(data['usage'], data['budget'], deadline=data['deadline'])
+                                 if data['config_integrity'] != 'changed' else [])
         data['execution_scope'] = execution_scope(cfg)
         data['execution_scope']['matches_run_config'] = data['config_integrity'] == 'valid'
         if data['config_integrity'] == 'changed':
@@ -450,17 +459,22 @@ class Service:
 
         return self.redact({'runs': result, 'has_more': has_more, 'next_cursor': next_cursor})
 
-    def create_run(self, project_id, task, idem, parent=None, expected_config_hash=None):
+    def create_run(self, project_id, task, idem, parent=None, expected_config_hash=None, execution_options=None):
         if not isinstance(task, str) or not task.strip() or len(task) > 64000:
             raise ValueError('任务必须为 1 到 64000 字符')
         if expected_config_hash is not None and not isinstance(expected_config_hash, str):
             raise ValueError('expected_config_hash 必须为字符串')
         entry = self.store.project(project_id)
         cfg = load_config(entry['config'])
+        project_config_hash = cfg.source_hash
+        from .model_settings import validate_options, prepare_config, config_copy
+        overrides=validate_options(cfg,execution_options) if execution_options is not None else None
+        if overrides is not None:prepare_config(cfg,overrides)
         # 页面确认过的执行范围必须与创建时配置一致，防止会话中改配置后按新范围执行。
         if expected_config_hash is not None and expected_config_hash != cfg.source_hash:
             raise Conflict('配置已变化，请刷新后重试')
-        if not cfg.run_budget.max_tokens or not cfg.run_budget.max_duration_s:
+        if not cfg.run_budget.max_duration_s or (not cfg.run_budget.max_tokens and
+                not cfg.run_budget.unlimited_tokens and not (overrides and overrides['unlimited_tokens'])):
             raise ValueError('配置必须显式限制 token 和时长')
         if parent:
             original = self.store.run(parent)
@@ -468,7 +482,11 @@ class Service:
                 raise ValueError('后续任务必须属于同一项目')
             if expected_config_hash is not None:
                 original_cfg = load_config(original['config'])
-                if expected_config_hash != original_cfg.source_hash:
+                parent_job = read_json(directory(original) / 'job.json')
+                bound_override = (parent_job.get('execution_options') is not None and
+                                  parent_job.get('source_project_config_hash') == expected_config_hash and
+                                  parent_job.get('config_hash') == original_cfg.source_hash)
+                if expected_config_hash != original_cfg.source_hash and not bound_override:
                     raise Conflict('配置已变化，请刷新后重试')
             if self.snapshot(parent)['lifecycle'] in ('pending', 'running', 'recovering'):
                 raise ValueError('请先暂停或结束旧运行，再从固定状态创建后续任务')
@@ -481,6 +499,8 @@ class Service:
                 job = read_json(root / 'job.json')
                 if job.get('task') != task:
                     raise Conflict('同一创建标识不能用于不同任务')
+                if job.get('execution_options') != overrides:
+                    raise Conflict('同一创建标识不能更换模型或 token 选项')
             else:
                 if any(r['id'] != parent and r['project_id'] == project_id and self.snapshot(r['id'])['lifecycle'] in
                        ('pending', 'running', 'recovering', 'paused', 'waiting_approval') for r in self.store.runs()):
@@ -488,13 +508,16 @@ class Service:
                 if parent:
                     from .config_copy import derive
                     cfg = load_config(derive(original, run_id))
+                if overrides is not None:
+                    cfg=config_copy(cfg,overrides,run_id)
                 from ..state import sha256_text
                 job = {'run_id': run_id, 'task': task, 'task_hash': sha256_text(task),
                        'requested_config': str(cfg.source_path), 'config': str(cfg.source_path),
                        'config_hash': cfg.source_hash, 'started_at': time.time(),
                        'max_duration_s': cfg.run_budget.max_duration_s, 'max_restarts': 2,
                        'restarts_used': 0, 'status': 'pending', 'control_db': str(self.store.path),
-                       'run_key': project_id + ':' + run_id}
+                       'run_key': project_id + ':' + run_id, 'execution_options': overrides,
+                       'source_project_config_hash': project_config_hash}
                 atomic_write_json(root / 'job.json', job)
             key = self.store.register_run(project_id, run_id, job['config'], cfg.state_dir,
                                           managed=True, parent=parent)

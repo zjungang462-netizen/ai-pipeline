@@ -6,7 +6,7 @@ task_workdir = ".workbench/demo-workspace"
 state_dir = ".workbench/demo-state"
 
 [run_budget]
-# schema: run_budget.max_tokens：运行累计 token 上限；无人值守时必须为正数
+# schema: run_budget.max_tokens：运行累计 token 上限；unlimited_tokens=true 时不设置
 max_tokens = 12000
 # schema: run_budget.max_duration_s：运行累计秒数上限；无人值守时必须为正数
 max_duration_s = 3600

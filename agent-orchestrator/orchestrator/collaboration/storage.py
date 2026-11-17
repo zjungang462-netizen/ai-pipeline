@@ -58,6 +58,9 @@ class Store:
                     UNIQUE(run_id,idempotency));
                 CREATE TABLE IF NOT EXISTS projection_offsets (
                     run_id TEXT PRIMARY KEY, signature TEXT NOT NULL, updated REAL NOT NULL);
+                CREATE TABLE IF NOT EXISTS task_templates (
+                    id TEXT PRIMARY KEY, project_id TEXT NOT NULL, name TEXT NOT NULL,
+                    task TEXT NOT NULL, config_hash TEXT NOT NULL, UNIQUE(project_id,name));
             ''')
 
     @contextmanager

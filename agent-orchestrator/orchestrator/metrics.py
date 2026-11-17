@@ -20,6 +20,11 @@ def write_metrics(engine, results: dict[str, str]) -> None:
     for spec in config.stages:
         stage = state.stage(spec.name)
         stages[spec.name] = {"kind": spec.kind, "status": stage.status.value,
+                             'adapter': spec.adapter or 'test_cmd',
+                             'tool': config.adapters[spec.adapter].type if spec.adapter in config.adapters else 'test_cmd',
+                             'model': config.adapters[spec.adapter].options.get('model') if spec.adapter in config.adapters else None,
+                             'reasoning_effort': config.adapters[spec.adapter].options.get('reasoning_effort') if spec.adapter in config.adapters else None,
+                             'thinking': config.adapters[spec.adapter].options.get('thinking') if spec.adapter in config.adapters else None,
                              'attempts': len(stage.attempts),
                              "rounds": state.review_rounds.get(spec.name, 0),
                              "max_rounds": spec.max_rounds, "feedback_to": spec.feedback_to}
@@ -61,6 +66,11 @@ def write_metrics(engine, results: dict[str, str]) -> None:
     data['failure_history'] = state.autonomy.get('failures', {})
     data['repair_batch_size'] = config.autonomy.repair_batch_size
     data['human_interventions'] = len(state.control.get('discussion_holds', {}))
+    data['stage_usage'] = state.stage_usage
+    data['run_budget'] = {'max_tokens': config.run_budget.max_tokens,
+                          'max_duration_s': config.run_budget.max_duration_s,
+                          'unlimited_tokens': config.run_budget.unlimited_tokens}
+    data['billing_cost_status'] = 'not_reported'
     # 单写者持有 run 锁，先写完整临时文件，再以不覆盖的链接发布。
     temporary = path.with_suffix(".json.tmp")
     with temporary.open("w", encoding="utf-8") as stream:

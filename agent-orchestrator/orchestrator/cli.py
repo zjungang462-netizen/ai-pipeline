@@ -214,9 +214,31 @@ def cmd_clean(args) -> int:
     return 0 if report['ok'] else 1
 
 
+def cmd_export_usage(args) -> int:
+    from .reporting import export_usage, usage_csv
+    report = export_usage(args.state_dir, args.run_id)
+    output = Path(args.output).absolute()
+    state_root = Path(args.state_dir).resolve()
+    if output.resolve().is_relative_to(state_root):
+        raise ValueError('导出文件必须位于状态目录之外')
+    with output.open('x', encoding='utf-8-sig', newline='') as stream:
+        stream.write(usage_csv(report))
+    print(json.dumps({'output': str(output), 'runs': len(report['runs']),
+                      'errors': report['errors'], 'cost_status': 'not_reported'}, ensure_ascii=False))
+    return 1 if report['errors'] else 0
+
+
 def main(argv=None) -> int:
     p = argparse.ArgumentParser(prog="orchestrator", description="多智能体开发流水线编排器")
+    from ._version import __version__
+    p.add_argument('--version', action='version', version='%(prog)s '+__version__)
     sub = p.add_subparsers(dest="cmd", required=True)
+
+    sp = sub.add_parser('export-usage', help='导出运行/阶段/工具用量CSV；不估算真实账单')
+    sp.add_argument('--state-dir', required=True)
+    sp.add_argument('--run-id')
+    sp.add_argument('--output', required=True)
+    sp.set_defaults(func=cmd_export_usage)
 
     sp = sub.add_parser('doctor', help='只读诊断配置、路径、工具和预算；不调用模型')
     sp.add_argument('config')

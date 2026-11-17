@@ -54,8 +54,9 @@ class AdapterConfig:
 
 @dataclass
 class RunBudget:
-    max_tokens: int | None = config_field('运行累计 token 上限；无人值守时必须为正数', default=None, numeric=True, integer=True, minimum=0)
+    max_tokens: int | None = config_field('运行累计 token 上限；unlimited_tokens=true 时不设置', default=None, numeric=True, integer=True, minimum=0)
     max_duration_s: int | None = config_field('运行累计秒数上限；无人值守时必须为正数', default=None, numeric=True, minimum=0)
+    unlimited_tokens: bool = config_field('显式取消运行/阶段/输出 token 限额，保留墙钟与轮次约束；模型服务仍可能有自身上限', default=False)
 
 
 @dataclass
@@ -67,7 +68,7 @@ class Autonomy:
     max_repair_rounds: int = config_field('整个反馈链的最大修复轮数', default=4, numeric=True, integer=True, minimum=1, maximum=20, validation_order=2, limit_message='max_repair_rounds 上限为 20')
     max_stagnant_rounds: int = config_field('连续无进展的最大轮数', default=2, numeric=True, integer=True, minimum=1)
     repair_batch_size: int = config_field('单轮最多修改文件数', default=1, numeric=True, integer=True, minimum=1, maximum=3, validation_order=1, limit_message='repair_batch_size 上限为 3')
-    output_tokens: int = config_field('单次输出额度，CLI 不构成服务端硬限制', default=2048, numeric=True, integer=True, minimum=1, maximum=16384, validation_order=3, limit_message='output_tokens 上限为 16384')
+    output_tokens: int = config_field('有限 token 模式的单次输出额度；unlimited_tokens 时不施加此本地限制', default=2048, numeric=True, integer=True, minimum=1, maximum=16384, validation_order=3, limit_message='output_tokens 上限为 16384')
     context_chars: int = config_field('上下文字符数上限', default=32000, numeric=True, integer=True, minimum=1, maximum=128000, validation_order=4, limit_message='context_chars 上限为 128000')
     cli_input_overhead_tokens: int = config_field('CLI 工具上下文的保守输入预留', default=32768, numeric=True, integer=True, minimum=1)
     cli_idle_timeout_s: int = config_field('CLI 无活动超时，秒', default=120, numeric=True, integer=True, minimum=1, maximum=3600, validation_order=5, limit_message='cli_idle_timeout_s 上限为 3600')
@@ -333,11 +334,18 @@ def parse_config(raw: dict[str, Any], base_dir: Path | None = None) -> Config:
     budget = RunBudget(
         max_tokens=budget_raw.get("max_tokens"),
         max_duration_s=budget_raw.get("max_duration_s"),
+        unlimited_tokens=budget_raw.get('unlimited_tokens', False),
     )
+    _require(type(budget.unlimited_tokens) is bool, 'run_budget.unlimited_tokens 必须是布尔值')
+    if budget.unlimited_tokens:
+        _require(budget.max_tokens is None and all(s.max_tokens is None for s in stages),
+                 'unlimited_tokens=true 时请删除运行和阶段 max_tokens，避免歧义')
+        _require(all(a.options.get('max_tokens') is None for a in adapters.values()),
+                 'unlimited_tokens=true 时请删除适配器 max_tokens')
     if autonomy.enabled:
-        _require(budget.max_tokens is not None and budget.max_tokens > 0
+        _require((budget.unlimited_tokens or (budget.max_tokens is not None and budget.max_tokens > 0))
                  and budget.max_duration_s is not None and budget.max_duration_s > 0,
-                 "无人值守必须配置正数 run_budget.max_tokens 和 max_duration_s")
+                 "无人值守必须配置正数 token/时长预算，或显式 unlimited_tokens 并保留正数时长")
 
     return Config(
         task_workdir=(base_dir / task_workdir).resolve(),

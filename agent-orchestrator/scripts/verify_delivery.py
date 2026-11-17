@@ -23,9 +23,13 @@ from scripts.failure_evidence import (EvidenceResultMixin, Scrubber, RedactedLog
                                       environment_secrets)
 
 # 固定、可审计的快速集合；完整入口继续发现全部测试。
-QUICK_TESTS = ('test_stage1', 'test_budget', 'test_api_adapter', 'test_cli_adapters',
-               'test_cli_entry', 'test_execution_scope', 'test_fix_ninth.ConfigValidation',
-               'test_phase2_operations', 'test_phase2_gates', 'test_schema_docs', 'test_test_layers')
+QUICK_TESTS = ('test_stage1.TestConfig', 'test_stage1.TestState',
+               'test_stage1.TestEngine.test_resume_idempotent', 'test_stage1.TestEngine.test_approval_hash_check',
+               'test_budget', 'test_api_adapter', 'test_cli_adapters',
+               'test_cli_entry.TestCLIEntry.test_missing_run', 'test_execution_scope', 'test_fix_ninth.ConfigValidation',
+               'test_phase2_operations', 'test_phase2_gates', 'test_schema_docs', 'test_test_layers',
+               'test_phase5_reporting', 'test_phase5_http', 'test_phase5_ui',
+               'test_model_settings')
 
 
 def test_ids(suite):

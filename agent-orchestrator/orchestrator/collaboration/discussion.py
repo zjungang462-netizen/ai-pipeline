@@ -67,7 +67,8 @@ def reserve_parent(run, topic, config):
         holds = state.control.setdefault('discussion_holds', {})
         if topic['id'] in holds:
             return holds[topic['id']]['budget']
-        budget = min(topic['budget'], config.run_budget.max_tokens - state.usage_total['tokens'])
+        budget = (topic['budget'] if config.run_budget.unlimited_tokens else
+                  min(topic['budget'], config.run_budget.max_tokens - state.usage_total['tokens']))
         if budget < 1000:
             raise ValueError('父运行剩余预算不足以发起会诊，未发送请求')
         holds[topic['id']] = {'budget': budget, 'settled': False}
