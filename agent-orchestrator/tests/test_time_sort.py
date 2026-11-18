@@ -11,7 +11,6 @@ from pathlib import Path
 from urllib.parse import urlencode
 
 from orchestrator.dashboard.server import create_server
-from orchestrator.state import atomic_write_json
 
 
 class TimeSort(unittest.TestCase):
@@ -33,16 +32,24 @@ class TimeSort(unittest.TestCase):
         service = self.server.application.service
         project = service.store.projects()[0]['id']
         self.rows = []
-        with service.store.session():
-            for n in range(231):
-                run = f'run-{n:04d}'
-                key = service.store.register_run(project, run, cfg, self.root / 'state')
-                stamp = 1700000000 + n // 3
-                with service.store.connect() as db:
-                    db.execute('UPDATE runs SET created=? WHERE id=?', (stamp, key))
-                atomic_write_json(self.root / 'state/runs' / run / 'state.json', {
-                    'task': f'历史 needle {n}', 'stages': {'verify': {'status': 'done'}}, 'events': []})
-                self.rows.append((stamp, key))
+        records=[]
+        fixtures=[]
+        for n in range(231):
+            run = f'run-{n:04d}'
+            key = project + ':' + run
+            stamp = 1700000000 + n // 3
+            records.append((key,project,run,str(cfg.resolve()),str((self.root/'state').resolve()),
+                            0,None,'pipeline',stamp))
+            fixtures.append((run,stamp,key,n))
+        with service.store.connect() as db:
+            db.executemany('INSERT INTO runs VALUES(?,?,?,?,?,?,?,?,?)',records)
+        for run,stamp,key,n in fixtures:
+            state_file=self.root/'state/runs'/run/'state.json'
+            state_file.parent.mkdir(parents=True)
+            state_file.write_text(json.dumps({
+                'task': f'历史 needle {n}', 'stages': {'verify': {'status': 'done'}}, 'events': []},
+                ensure_ascii=False),encoding='utf8')
+            self.rows.append((stamp,key))
         self.cookie = ''
         status, _, headers = self.request('/api/session', {'token': self.server.application.bootstrap})
         self.assertEqual(status, 200)

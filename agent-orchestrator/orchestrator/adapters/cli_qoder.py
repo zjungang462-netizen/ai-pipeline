@@ -3,13 +3,15 @@ from __future__ import annotations
 
 import json
 import math
+import subprocess
 from pathlib import Path
 
-from ..contracts import ErrorKind, Result, RunContext
-from .cli_base import CLIAdapter
+from ..contracts import ErrorKind, PreflightReport, Result, RunContext
+from ..safety import build_subprocess_env, resolve_exe
+from .cli_base import CLIAdapter, run_cli_process
 from .cli_codex import strip_ansi
 
-KNOWN_VERSION_PREFIXES = ("qoder ",)
+SUPPORTED_VERSION = '1.1.89'
 
 
 class QoderAdapter(CLIAdapter):
@@ -31,31 +33,46 @@ class QoderAdapter(CLIAdapter):
         return {'protocol':2,'model':self.model,'reasoning_effort':self.reasoning_effort,
                 'thinking':self.thinking,'cli_protocol':'1.1.89/1.5.0'}
 
-    def _version_known(self) -> bool:
-        v = (self._version or "").lower().strip()
-        return v == '1.1.89' or any(v.startswith(p) for p in KNOWN_VERSION_PREFIXES)
+    def preflight(self) -> PreflightReport:
+        self._resolved = resolve_exe(self.exe_name, self.exe)
+        self._version = None
+        detail = '未找到 Qoder CLI（配置 exe 填实际入口的绝对路径）'
+        if self._resolved:
+            try:
+                proc = run_cli_process([self._resolved, *self.version_args], cwd=None,
+                                       env=build_subprocess_env(), input=None, timeout=30)
+                if proc.returncode == 0 and strip_ansi(proc.stdout).strip() == SUPPORTED_VERSION:
+                    self._version = SUPPORTED_VERSION
+                    detail = '已确认 Qoder CLI 版本，未检测登录状态'
+                elif proc.returncode != 0:
+                    detail = f'Qoder CLI 版本探测失败（退出码 {proc.returncode}）'
+                else:
+                    detail = f'未确认受支持的 Qoder CLI 版本 {SUPPORTED_VERSION}'
+            except subprocess.TimeoutExpired:
+                detail = 'Qoder CLI 版本探测超时（30 秒）'
+            except OSError:
+                detail = '无法启动 Qoder CLI 版本探测'
+        return PreflightReport(adapter=self.name, ok=self._version is not None,
+                               exe_path=self._resolved, tool_version=self._version, detail=detail)
 
     def run(self, prompt: str, workdir: Path, ctx: RunContext) -> Result:
-        self._ensure_resolved()
-        if (self._version or '').strip() == '1.1.89':
-            # stdout 有界流式留证；纯报告/审查只读，编码不启用 shell、MCP 或子代理。
-            tools = 'Read,Glob,Grep,Edit,Write' if ctx.kind == 'code' else 'Read,Glob,Grep'
-            args = ['--print','--output-format','stream-json','--tools',tools,
-                    '--permission-mode','accept_edits' if ctx.kind == 'code' else 'dont_ask',
-                    '--strict-mcp-config','--setting-sources','','--max-model-request-retries','0',
-                    '--no-session-persistence']
-            if self.model:args += ['--model',self.model]
-            if self.reasoning_effort:args += ['--reasoning-effort',self.reasoning_effort]
-            if self.thinking:args += ['--thinking',self.thinking]
-            args += ['-']
-            return self._finalize(self._exec(args,workdir,ctx,stdin_data=prompt,
-                                             env_overrides={'CI':'1','BROWSER':'www-browser'}),ctx)
-        args = ["-p", "-", "--output-format", "json"]
-        if ctx.allow_yolo:
-            args.append("--yolo")
-        else:
-            args += ["--permission-mode", "accept_edits"]
-        return self._finalize(self._exec_prompt(args, prompt, workdir, ctx), ctx)
+        exe = self._ensure_resolved()
+        if not exe or self._version != SUPPORTED_VERSION:
+            return Result(ok=False, exit_code=-1, channel=self.channel, parse_unknown=True,
+                          tool_version=self._version, error_kind=ErrorKind.PARSE_FAILED,
+                          stderr=f'未确认 Qoder CLI {SUPPORTED_VERSION}，没有发起模型请求')
+        # stdout 有界流式留证；纯报告/审查只读，编码不启用 shell、MCP 或子代理。
+        tools = 'Read,Glob,Grep,Edit,Write' if ctx.kind == 'code' else 'Read,Glob,Grep'
+        args = ['--print','--output-format','stream-json','--tools',tools,
+                '--permission-mode','accept_edits' if ctx.kind == 'code' else 'dont_ask',
+                '--strict-mcp-config','--setting-sources','','--max-model-request-retries','0',
+                '--no-session-persistence']
+        if self.model:args += ['--model',self.model]
+        if self.reasoning_effort:args += ['--reasoning-effort',self.reasoning_effort]
+        if self.thinking:args += ['--thinking',self.thinking]
+        args += ['-']
+        return self._finalize(self._exec(args,workdir,ctx,stdin_data=prompt,
+                                         env_overrides={'CI':'1','BROWSER':'www-browser'}),ctx)
 
     def _parse(self, proc, workdir: Path, ctx: RunContext) -> Result:
         stdout = strip_ansi(proc.stdout or "")
@@ -63,23 +80,16 @@ class QoderAdapter(CLIAdapter):
         if proc.returncode != 0:
             kind = ErrorKind.AUTH if ("auth" in stderr.lower() or "token" in stderr.lower()
                                       or "login" in stderr.lower()) else ErrorKind.CRASH
-            if (self._version or '').strip() == '1.1.89' and stdout.strip():
+            if self._version == SUPPORTED_VERSION and stdout.strip():
                 result=self._parse_1189(proc,stdout,stderr)
                 result.ok=False;result.error_kind=kind
                 return result
             return Result(ok=False, exit_code=proc.returncode, channel=self.channel,
                           stdout=stdout, stderr=stderr, text=stdout,
                           tool_version=self._version, error_kind=kind, usage={'usage_unknown':True})
-        if not self._version_known():
+        if self._version != SUPPORTED_VERSION:
             return self._unknown_version(proc, "未知 qoder 版本")
-        if (self._version or '').strip() == '1.1.89':
-            return self._parse_1189(proc, stdout, stderr)
-        text = self._extract(stdout)
-        if text is None:
-            return self._unknown_version(proc, "qoder JSON 解析失败")
-        return Result(ok=True, exit_code=0, channel=self.channel,
-                      stdout=stdout, stderr=stderr, text=text,
-                      tool_version=self._version)
+        return self._parse_1189(proc, stdout, stderr)
 
     def _parse_1189(self, proc, stdout, stderr):
         try:
@@ -131,19 +141,3 @@ class QoderAdapter(CLIAdapter):
                 if type(value) not in (int,float) or not math.isfinite(value) or value<0:raise ValueError('非法credits')
                 measured['qoder_credits']=value
         return measured
-
-    @staticmethod
-    def _extract(stdout: str) -> str | None:
-        for chunk in [stdout] + stdout.splitlines():
-            chunk = chunk.strip()
-            if not chunk.startswith("{"):
-                continue
-            try:
-                data = json.loads(chunk)
-            except ValueError:
-                continue
-            for key in ("result", "text", "response", "content", "message"):
-                v = data.get(key)
-                if isinstance(v, str) and v:
-                    return v
-        return None

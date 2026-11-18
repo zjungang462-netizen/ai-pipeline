@@ -66,6 +66,36 @@ class Qoder1189(unittest.TestCase):
         self.assertFalse(self.parse({**self.final,'permission_denials':{}}).ok)
         self.assertFalse(self.parse({'result':'claims success'}).ok)
 
+    def test_preflight_requires_successful_exact_version_from_stdout(self):
+        adapter=QoderAdapter('qoder')
+        cases=[(0,'1.1.89\n','',True),(1,'1.1.89','',False),
+               (0,'','1.1.89',False),(0,'qoder 1.1.90','',False),(0,'','',False)]
+        with mock.patch('orchestrator.adapters.cli_qoder.resolve_exe',return_value='qoder'):
+            for code,stdout,stderr,expected in cases:
+                with self.subTest(code=code,stdout=stdout,stderr=stderr), mock.patch(
+                    'orchestrator.adapters.cli_qoder.run_cli_process',
+                    return_value=subprocess.CompletedProcess([],code,stdout,stderr),
+                ) as probe:
+                    report=adapter.preflight()
+                    self.assertEqual(report.ok,expected)
+                    self.assertEqual(report.tool_version,'1.1.89' if expected else None)
+                    self.assertEqual(probe.call_args.args[0],['qoder','--version'])
+                    self.assertEqual(probe.call_args.kwargs['timeout'],30)
+
+    def test_timeout_does_not_fall_back_to_model_call(self):
+        self.adapter._resolved=None
+        self.ctx.allow_yolo=True
+        with mock.patch('orchestrator.adapters.cli_qoder.resolve_exe',return_value='qoder'), mock.patch(
+            'orchestrator.adapters.cli_qoder.run_cli_process',
+            side_effect=subprocess.TimeoutExpired(['qoder','--version'],30),
+        ) as probe, mock.patch.object(self.adapter,'_exec') as execute:
+            result=self.adapter.run('model request',self.root,self.ctx)
+        self.assertFalse(result.ok)
+        self.assertTrue(result.parse_unknown)
+        self.assertIsNone(result.tool_version)
+        probe.assert_called_once()
+        execute.assert_not_called()
+
     def test_arguments_bind_model_effort_and_only_allow_file_tools(self):
         adapter=QoderAdapter('q',model='Ultimate',reasoning_effort='high',thinking='adaptive')
         adapter._version='1.1.89';adapter._resolved='qoder'
