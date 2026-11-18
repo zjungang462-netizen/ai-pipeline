@@ -62,6 +62,10 @@ class Application:
 class WorkbenchServer(ThreadingHTTPServer):
     daemon_threads = True
 
+    def serve_forever(self, poll_interval=0.05):
+        """缩短唤醒间隔，避免本地停服额外等待 0.5 秒。"""
+        return super().serve_forever(poll_interval)
+
     def server_close(self):
         try:
             app = getattr(self, 'application', None)
