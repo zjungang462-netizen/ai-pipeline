@@ -74,7 +74,7 @@ def run_case(output, scenario, live_config=None):
     check.write_text(CHECK, encoding='utf8')
     expected_check_hash = hashlib.sha256(check.read_bytes()).hexdigest()
     prompts = {'design': '给出简短实施计划，不写代码。{task}',
-               'coding': '实际修改工作区文件，仅允许 app.py；使用文件工具或受支持代码块，不要只描述。\n{task}\n{upstream}\n{feedback}',
+               'coding': '实际修改工作区文件，仅允许 app.py。遵循引擎要求的输出协议，不要只描述，不改验收。\n{task}\n{upstream}\n{feedback}',
                'review': '独立检查变更与测试证据。只返回JSON对象verdict=pass/fail，issues=[]或file/problem/expected条目，不附散文。\n{task}\n{upstream}'}
     if live_config:
         base = tomllib.loads(Path(live_config).read_text(encoding='utf8'))
@@ -95,6 +95,7 @@ def run_case(output, scenario, live_config=None):
               for role, kind in [('design', 'report'), ('coding', 'code'), ('review', 'review')]]
     stages.insert(2, dict(name='testing', kind='test', test_cmd=[sys.executable, '-X', 'utf8', str(check)],
                          timeout_s=30, feedback_to='coding', max_rounds=2))
+    stages[1]['context_files'] = ['app.py']
     raw = dict(task_workdir=str(work), state_dir=str(case / 'state'), watch_root='off', adapters=adapters,
                run_budget=dict(unlimited_tokens=True, max_duration_s=240),
                autonomy=dict(enabled=True, allowed_files=['app.py'], baseline_paths=['app.py'],
