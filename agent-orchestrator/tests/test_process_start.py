@@ -6,6 +6,7 @@ import tempfile
 import time
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 from unittest import mock
 
 from orchestrator import process_tree
@@ -160,15 +161,22 @@ class CLIStartWindowAndTimeout(EvidenceTestCase):
                           attempt_dir=self.root/'attempt',timeout_s=15)
 
     def test_attach_time_is_not_charged_to_call_timeout(self):
-        # P2-4b：慢 attach 不得占用 CLI 调用超时预算；修复前 start 在 attach 前，必然超时。
-        real_attach=process_tree.attach
+        # 只在 CLI 时钟上模拟慢绑定，实际启动和进程树绑定仍走真实路径。
+        timeout = 5
+        attach_elapsed = 0
+        clock = SimpleNamespace(monotonic=lambda: time.monotonic() + attach_elapsed,
+                                sleep=time.sleep)
+        real_attach = process_tree.attach
+
         def slow_attach(process):
-            # 保持 attach 明确晚于调用预算，同时给 Windows 短命令启动留出抖动空间。
-            time.sleep(6)
-            return real_attach(process)
-        with mock.patch.object(process_tree,'attach',side_effect=slow_attach):
-            result=run_cli_process([sys.executable,'-c','print("BUDGET_OK")'],
-                                   cwd=str(self.root),env=build_subprocess_env(),input='',timeout=5)
+            nonlocal attach_elapsed
+            real_attach(process)
+            attach_elapsed = timeout + 1
+
+        with (mock.patch('orchestrator.adapters.cli_base.time', clock),
+              mock.patch.object(process_tree, 'attach', side_effect=slow_attach)):
+            result = run_cli_process([sys.executable, '-c', 'print("BUDGET_OK")'],
+                                     cwd=str(self.root), env=build_subprocess_env(), input='', timeout=timeout)
         self.assertEqual(result.returncode,0)
         self.assertIn('BUDGET_OK',result.stdout)
 

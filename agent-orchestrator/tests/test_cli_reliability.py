@@ -318,14 +318,17 @@ class CLIReliability(EvidenceTestCase):
         self.assertFalse((folder/'recovery/checkpoint.json').exists())
 
     def test_capture_io_failure_preserves_only_copy_and_stops_retry(self):
-        cfg,data,env=self.fixture_config('timeout')
-        e=Engine(cfg,build_all(cfg.adapters,{}),'save-failure','same task')
-        with patch_env(env),mock.patch('orchestrator.recovery.capture',side_effect=OSError('disk full')):
-            self.assertEqual(e.run()['coding'],'failed')
-        tree=e.state.stage_dir('coding')/'worktree/1'
-        self.assertEqual((tree/'module.py').read_text(encoding='utf8'),'VALUE = 1\n')
-        self.assertEqual((data/'calls.txt').read_text(encoding='utf8'),'1')
-        self.assertIn('已保留',e.state.stage('coding').error)
+        cfg, data, env = self.fixture_config('crash_after_edit')
+        engine = Engine(cfg, build_all(cfg.adapters, {}), 'save-failure', 'same task')
+        with (patch_env(env),
+              mock.patch('orchestrator.recovery.capture', side_effect=OSError('disk full')) as capture):
+            self.assertEqual(engine.run()['coding'], 'failed')
+        capture.assert_called_once()
+        self.assertEqual(capture.call_args.args[-1], 'crash')
+        tree = engine.state.stage_dir('coding')/'worktree/1'
+        self.assertEqual((tree/'module.py').read_text(encoding='utf8'), 'VALUE = 1\n')
+        self.assertEqual((data/'calls.txt').read_text(encoding='utf8'), '1')
+        self.assertIn('已保留', engine.state.stage('coding').error)
 
     def test_successful_code_is_captured_if_post_call_budget_rejects(self):
         cfg,data,env=self.fixture_config()

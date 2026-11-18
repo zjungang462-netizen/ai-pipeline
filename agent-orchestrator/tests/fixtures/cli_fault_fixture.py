@@ -40,7 +40,9 @@ elif mode=='normal':
 elif mode=='auth':
     print('auth failed',file=sys.stderr,flush=True)
     raise SystemExit(1)
-elif mode=='crash':
+elif mode in ('crash', 'crash_after_edit'):
+    if mode == 'crash_after_edit':
+        Path('module.py').write_text('VALUE = 1\n', encoding='utf8')
     usage(1)
     print('injected process failure',file=sys.stderr,flush=True)
     raise SystemExit(7)
