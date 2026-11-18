@@ -216,10 +216,13 @@ class AutonomousControls:
         self.state.log_event('recovery_hint', spec.name, reason=str(error)[:1000])
         self.state.save()
 
-    def _check_code_scope(self, spec, result, workdir, base):
+    def _check_code_scope(self, spec, result, workdir, base, *, observed_changes=None):
         if not self.config.autonomy.enabled:
             return ''
-        actual = artifacts.normalize_rel(workdir, artifacts.changed_files_since(workdir, base))
+        # 只复用引擎本次的 Git 扫描；适配器自己声明的清单不能代替实际检查。
+        if observed_changes is None:
+            observed_changes = artifacts.changed_files_since(workdir, base)
+        actual = artifacts.normalize_rel(workdir, observed_changes)
         allowed = set(self.config.autonomy.allowed_files)
         forbidden = set(actual) - allowed
         if forbidden:

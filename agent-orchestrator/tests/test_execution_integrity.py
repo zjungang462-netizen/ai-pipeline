@@ -316,7 +316,9 @@ class GitIntegrity(unittest.TestCase):
                     "from pathlib import Path; assert Path('coding_output.py').read_text(encoding='utf8') != 'dirty'"]}],
                 "adapters": {"fake": {"type": "fake"}}}, base_dir=Path(directory))
             engine = Engine(cfg, {"fake": FakeAdapter(kind="code")}, "r", "task")
-            self.assertEqual(engine._run_stage(cfg.stages[0], 0), StageStatus.DONE)
+            with mock.patch.object(artifacts, "tree_content_hash", wraps=artifacts.tree_content_hash) as tree_hash:
+                self.assertEqual(engine._run_stage(cfg.stages[0], 0), StageStatus.DONE)
+            tree_hash.assert_called_once_with(cfg.task_workdir, engine.state.stage("coding").commit_sha)
             file = cfg.task_workdir / "coding_output.py"
             file.write_text("dirty", encoding="utf-8")
             self.assertEqual(engine._run_stage(cfg.stages[1], 1), StageStatus.DONE)

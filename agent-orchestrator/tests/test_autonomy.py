@@ -52,7 +52,7 @@ class Check(unittest.TestCase):
  def test_a(self): self.assertEqual(A,1)
  def test_b(self): self.assertEqual(B,1)
 ''',encoding='utf8')
-    def config(self, **policy):
+    def config(self, *, approval_only=False, **policy):
         raw={'task_workdir':'ws','state_dir':'.s',
              'autonomy':{'enabled':True,'allowed_files':['a.py','b.py'],
                          'baseline_paths':['a.py','b.py','tests'],'max_repair_rounds':3,
@@ -66,6 +66,12 @@ class Check(unittest.TestCase):
                   'feedback_to':'coding','max_rounds':3},
                  {'name':'review','adapter':'api','kind':'review','prompt':'{upstream}',
                   'feedback_to':'coding','max_rounds':2}]}
+        if approval_only:
+            # 双轮返工由独立用例覆盖；此处只验证审批产物和预授权门禁。
+            stage=raw['stages'][0]
+            stage.pop('precheck_cmd')
+            stage['approval']=True
+            raw['stages']=[stage]
         return parse_config(raw,base_dir=self.root)
     def test_real_two_cycle_convergence_and_resume_without_model_calls(self):
         cfg=self.config();ad=Writer();engine=Engine(cfg,{'api':ad},'r','fix both')
@@ -80,8 +86,14 @@ class Check(unittest.TestCase):
         self.assertEqual(second.calls,0)
     def test_scope_violation_stops_and_preserves_test(self):
         cfg=self.config();before=(self.ws/'tests/test_app.py').read_bytes()
-        ad=Writer(wrong=True);engine=Engine(cfg,{'api':ad},'r','fix')
+        class UnderreportingWriter(Writer):
+            def run(self,prompt,workdir,ctx):
+                result=super().run(prompt,workdir,ctx)
+                (workdir/'tests/test_app.py').write_text('VALUE = 1\n',encoding='utf8')
+                return result
+        ad=UnderreportingWriter();engine=Engine(cfg,{'api':ad},'r','fix')
         self.assertEqual(engine.run()['coding'],'failed')
+        self.assertIn('禁止修改未预授权文件',engine.state.stage('coding').error)
         self.assertEqual(ad.calls,1);self.assertEqual((self.ws/'tests/test_app.py').read_bytes(),before)
     def test_unknown_usage_reserved_and_retry_gets_recovery_hint(self):
         cfg=self.config();ad=Writer(failures=1);engine=Engine(cfg,{'api':ad},'r','fix')
@@ -101,11 +113,18 @@ class Check(unittest.TestCase):
         self.assertEqual(engine.run()['testing'],'failed')
         self.assertIn('总返工',engine.state.stage('testing').error)
     def test_explicit_approval_policy_and_rejected_implicit_bypass(self):
-        cfg=self.config(auto_approve=['coding']);cfg.stages[0].approval=True
-        engine=Engine(cfg,{'api':Writer()},'r','fix')
-        self.assertEqual(set(engine.run().values()),{'done'})
+        with self.assertRaisesRegex(ConfigError,'预授权'):
+            self.config(approval_only=True)
+        with self.assertRaises(ConfigError):
+            self.config(allowed_files=[])
+        cfg=self.config(approval_only=True,auto_approve=['coding'])
+        adapter=Writer()
+        engine=Engine(cfg,{'api':adapter},'r','fix')
+        self.assertEqual(engine.run(),{'coding':'done'})
+        self.assertEqual(adapter.calls,1)
+        self.assertFalse(engine.state.pending_approvals)
         self.assertTrue(any(e['kind']=='policy_approved' for e in engine.state.events))
-        with self.assertRaises(ConfigError):self.config(allowed_files=[])
+        self.assertTrue((engine.state.attempts_dir('coding')/'1/approval.json').is_file())
     def test_literal_template_markers_in_task_are_not_reinterpreted(self):
         cfg=self.config();engine=Engine(cfg,{'api':Writer()},'r','literal {feedback}')
         prompt=engine._render_prompt(cfg.stages[0],0)

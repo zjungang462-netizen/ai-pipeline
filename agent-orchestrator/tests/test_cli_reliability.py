@@ -36,8 +36,11 @@ class CLIReliability(EvidenceTestCase):
                           attempt_dir=self.root/'attempt',timeout_s=3,call_id='coding/1')
 
     def fixture_config(self,mode='normal',attempts=2,budget=6000):
+        # 让故障夹具在 Windows 高负载下有时间启动、写候选文件并报告用量。
+        # 夹具写完后会阻塞 30 秒，仍必须由真实调用超时终止。
+        cli_timeout=10 if mode in {'timeout','timeout_always'} else 4
         self.evidence_metadata={'fixture_mode':mode,'run_budget_tokens':budget,
-            'run_budget_duration_s':90,'cli_timeout_s':4,'test_timeout_s':10,'attempt_limit':attempts}
+            'run_budget_duration_s':90,'cli_timeout_s':cli_timeout,'test_timeout_s':10,'attempt_limit':attempts}
         fixture=Path(__file__).parent/'fixtures/cli_fault_fixture.py'
         if os.name=='nt':
             executable=self.root/'fake-agy.cmd'
@@ -58,7 +61,7 @@ class CLIReliability(EvidenceTestCase):
                         'max_repair_rounds':1,'repair_batch_size':1,'output_tokens':128,
                         'cli_input_overhead_tokens':64,'cli_idle_timeout_s':30},
             'stages':[{'name':'coding','kind':'code','adapter':'agy','prompt':'修改module.py使VALUE=2。{upstream}\n{feedback}',
-                       'context_files':['module.py'],'max_attempts':attempts,'timeout_s':4},
+                       'context_files':['module.py'],'max_attempts':attempts,'timeout_s':cli_timeout},
                       {'name':'testing','kind':'test','test_cmd':[sys.executable,'-X','utf8','-m','unittest','discover','-s','tests','-v'],
                        'feedback_to':'coding','max_rounds':2,'timeout_s':10}],
             'adapters':{'agy':{'type':'cli_agy','exe':str(executable),'extra_env':['CLI_FIXTURE_MODE','CLI_FIXTURE_DATA']}}},base_dir=self.root)
@@ -150,10 +153,13 @@ class CLIReliability(EvidenceTestCase):
         cfg,data,env=self.fixture_config('tool_loop')
         adapter=build_all(cfg.adapters,{})['agy']
         ctx=self.ctx();ctx.timeout_s=15;ctx.max_repeated_reads=2
-        start=time.monotonic()
         with mock.patch.dict(os.environ,env):result=adapter.run('fixture',self.workspace,ctx)
         self.assertEqual(result.error_kind.value,'tool_limit')
-        self.assertLess(time.monotonic()-start,10)
+        # 检查实际终止原因，避免把进程启动和清理耗时算成工具限流失败。
+        progress=json.loads((ctx.attempt_dir/'cli-progress.json').read_text(encoding='utf8'))
+        self.assertEqual(progress['status'],'stopped')
+        self.assertEqual(progress['reason'],'repeated_read_limit')
+        self.assertLess(progress['duration_s'],10)
         self.assertEqual(result.usage['known_tokens'],30)
 
     def test_budget_stop_uses_known_usage_plus_unknown_reservation(self):
@@ -168,7 +174,12 @@ class CLIReliability(EvidenceTestCase):
         cfg,data,env=self.fixture_config()
         original=sha256_file(self.workspace/'tests/test_module.py')
         engine=Engine(cfg,build_all(cfg.adapters,{}),'normal','small fixture')
-        with mock.patch.dict(os.environ,env):self.assertEqual(set(engine.run().values()),{'done'})
+        with mock.patch.dict(os.environ,env), mock.patch.object(
+            artifacts,'changed_files_since',wraps=artifacts.changed_files_since,
+        ) as scan:
+            self.assertEqual(set(engine.run().values()),{'done'})
+        worktree=engine.state.stage_dir('coding')/'worktree/1'
+        self.assertEqual(sum(Path(call.args[0])==worktree for call in scan.call_args_list),1)
         self.assertEqual((data/'calls.txt').read_text(encoding='utf8'),'1')
         self.assertEqual(sha256_file(self.workspace/'tests/test_module.py'),original)
         self.assertEqual(engine.state.usage_total['tokens'],20)
@@ -182,11 +193,18 @@ class CLIReliability(EvidenceTestCase):
         self.assertEqual(engine.state.autonomy['cli_attempts']['coding']['total'],2)
         self.assertEqual(sum(e['kind']=='test_feedback' for e in engine.state.events),1)
 
+    def assert_call_timeout(self,engine,number):
+        folder=engine.state.attempts_dir('coding')/str(number)
+        progress=json.loads((folder/'cli-progress.json').read_text(encoding='utf8'))
+        self.assertEqual(progress['reason'],'call_timeout')
+        self.assertEqual(progress['usage']['known_tokens'],30)
+
     def test_timeout_checkpoint_is_verified_and_restored_for_retry(self):
         cfg,data,env=self.fixture_config('timeout')
         engine=Engine(cfg,build_all(cfg.adapters,{}),'timeout','recover fixture')
         with mock.patch.dict(os.environ,env):self.assertEqual(set(engine.run().values()),{'done'})
         self.assertEqual((data/'calls.txt').read_text(encoding='utf8'),'2')
+        self.assert_call_timeout(engine,1)
         self.assertEqual(engine.state.usage_total['reported_tokens'],50)
         self.assertGreater(engine.state.usage_total['reserved_tokens'],0)
         self.assertEqual(engine.state.usage_total['tokens'],50+engine.state.usage_total['reserved_tokens'])
@@ -239,6 +257,8 @@ class CLIReliability(EvidenceTestCase):
         with mock.patch.dict(os.environ,env):self.assertEqual(resumed.run()['coding'],'failed')
         self.assertEqual((data/'calls.txt').read_text(encoding='utf8'),'2')
         self.assertEqual(resumed.state.usage_total,original)
+        for number in (1,2):
+            self.assert_call_timeout(engine,number)
         self.assertEqual(original['reported_tokens'],60)
         self.assertEqual(original['unknown_calls'],2)
         self.assertEqual(resumed.state.control['cli_deadline'],deadline)

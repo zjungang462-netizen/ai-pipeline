@@ -326,9 +326,11 @@ class StageExecutor:
             # 代码阶段：检测实际变更文件（评审 B4），归一化为相对路径供按清单提交
             bad_paths: list[str] = []
             if spec.kind == "code" and self._git_ready and result.ok:
+                comparison_base = base_sha or artifacts.head_sha(workdir)
+                observed_changes = None
                 if not result.changed_files:
-                    result.changed_files = artifacts.changed_files_since(
-                        workdir, base_sha or artifacts.head_sha(workdir))
+                    observed_changes = artifacts.changed_files_since(workdir, comparison_base)
+                    result.changed_files = observed_changes
                 result.changed_files = artifacts.normalize_rel(workdir, result.changed_files)
                 bad_paths = artifacts.unsafe_rel_paths(result.changed_files)
                 if bad_paths:
@@ -337,8 +339,8 @@ class StageExecutor:
                     result.error_kind = ErrorKind.REJECTED
                     result.stderr = (result.stderr + f" [拒绝越界或 .git 路径: {bad_paths[:5]}]").strip()
                 if not bad_paths:
-                    scope_error = self._check_code_scope(spec, result, workdir,
-                                                         base_sha or artifacts.head_sha(workdir))
+                    scope_error = self._check_code_scope(spec, result, workdir, comparison_base,
+                                                         observed_changes=observed_changes)
                     if scope_error:
                         bad_paths = [scope_error]
                         result.ok = False

@@ -68,10 +68,7 @@ class ArchiveOperations:
         路径/时间戳，保证续跑时内容相同则哈希相同（评审 S1）。commit SHA 单独
         存为产物指针（代码类产物 = commit/branch，评审 B3）。
         """
-        import shutil
-        from .state import sha256_file
         commit_sha = None
-        content_hashes: dict[str, str] = {}
         if spec.kind == "code" and self._git_ready:
             repo = self.config.task_workdir
             # 按变更清单提交（评审 B4），不用 git add -A 全仓
@@ -93,16 +90,13 @@ class ArchiveOperations:
                     raise StageArchiveError("代码未发生变化，无法视为一次修复")
                 result.branch = f"stage/{spec.name}"
             result.commit_sha = commit_sha
-            # 代码产物内容哈希：基于主线该 commit 的树对象（与基线/时间戳无关）
-            content_hashes["__tree__"] = artifacts.tree_content_hash(repo, commit_sha)
-        # 报告文件复制进 attempt 目录留证，并按内容计哈希
+        # 先归档最终文件；seal 统一对最终文件和提交树计算哈希。
         for rf in result.report_files:
             rf = Path(rf)
             if rf.is_file():
                 dest = attempt_dir / rf.name
                 if rf.resolve() != dest.resolve():
                     shutil.copy2(rf, dest)
-                content_hashes[rf.name] = sha256_file(dest)
         # 原始输出留证
         (attempt_dir / "stdout.txt").write_text(result.stdout or result.text, encoding="utf-8")
         (attempt_dir / "final_text.txt").write_text(result.text, encoding="utf-8")
