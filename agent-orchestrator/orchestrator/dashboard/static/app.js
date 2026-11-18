@@ -106,18 +106,22 @@ function renderRuns(){
 }
 
 async function select(key){
- rememberFeedView();const generation=++selectGeneration;++feedRequestGeneration;
- if(reloadTimer){clearTimeout(reloadTimer);reloadTimer=null;}if(stream)stream.close();
- const selected=await api(`/runs/${encodeURIComponent(key)}/snapshot`);if(generation!==selectGeneration)return;
+ const generation=++selectGeneration;++feedRequestGeneration;
+ historyBusy=false;latestBusy=false;updateFeedNavigation();
+ let selected,history;
+ // 两次读取都成功后再替换房间，失败时保留原动态与实时连接。
+ try{selected=await api(`/runs/${encodeURIComponent(key)}/snapshot`);if(generation!==selectGeneration)return;
+  history=await api(`/runs/${encodeURIComponent(key)}/events?before=${(selected.last_cursor||0)+1}&limit=100`);if(generation!==selectGeneration)return;
+ }catch(error){if(generation===selectGeneration)toast('任务读取失败，可重试：'+error.message);return;}
+ rememberFeedView();++feedRequestGeneration;if(reloadTimer){clearTimeout(reloadTimer);reloadTimer=null;}if(stream)stream.close();
  current=selected;$('app').classList.toggle('sidebar-open',false);$('sidebar-toggle').ariaExpanded='false';writeListURL(key);
  events.clear();pendingFeedEvents.clear();renderedFeed=[];unseenEvents=0;historyBusy=false;historyExhausted=false;historyViewing=false;latestBusy=false;latestFeedCursor=current.last_cursor||0;firstCursor=latestFeedCursor+1;
  show($('welcome'),false);show($('room'));renderSnapshot();renderRuns();
- const history=await api(`/runs/${encodeURIComponent(key)}/events?before=${firstCursor}&limit=100`);if(generation!==selectGeneration)return;
  history.events.forEach(e=>events.set(e.cursor,e));firstCursor=history.events[0]?.cursor||firstCursor;historyExhausted=history.events.length===0;renderFeed(true);openStream(key,current.last_cursor);
 }
 function openStream(key,cursor){
- const generation=selectGeneration,source=new EventSource(`/api/runs/${encodeURIComponent(key)}/stream?after=${cursor}`);stream=source;
- const owns=()=>current?.id===key&&generation===selectGeneration&&stream===source;
+ const source=new EventSource(`/api/runs/${encodeURIComponent(key)}/stream?after=${cursor}`);stream=source;
+ const owns=()=>current?.id===key&&stream===source;
  source.onopen=()=>{if(owns())setConnection(true,'实时动态已连接');};source.onerror=()=>{if(owns())setConnection(false,'重连实时动态…');};
  source.addEventListener('update',event=>{
   if(!owns())return;let value;try{value=JSON.parse(event.data);}catch{return;}

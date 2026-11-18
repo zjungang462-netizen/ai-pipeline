@@ -160,11 +160,11 @@ type = "fake"
     def test_cli_adapter_reacquires_version_after_approval(self):
         import subprocess
         cfg = parse_config({"task_workdir": "ws", "state_dir": ".s", "stages": [
-            {"name": "design", "adapter": "qwen", "kind": "report", "prompt": "p", "approval": True},
-            {"name": "next", "adapter": "qwen", "kind": "report", "prompt": "p"}],
-            "adapters": {"qwen": {"type": "cli_qwen", "exe": sys.executable}}}, base_dir=self.base)
-        version = PreflightReport("qwen", True, sys.executable, "qwen-code 0.5.0")
-        response = subprocess.CompletedProcess([], 0, '{"result":"body"}', "")
+            {"name": "design", "adapter": "dsh", "kind": "report", "prompt": "p", "approval": True},
+            {"name": "next", "adapter": "dsh", "kind": "report", "prompt": "p"}],
+            "adapters": {"dsh": {"type": "cli_dsh", "exe": sys.executable}}}, base_dir=self.base)
+        version = PreflightReport("dsh", True, sys.executable, "0.2.2-rc.3")
+        response = subprocess.CompletedProcess([], 0, '{"type":"final","reason":{"kind":"completed"},"text":"body"}\n', "")
         with mock.patch("orchestrator.cli.load_config", return_value=cfg), \
                 mock.patch("orchestrator.engine.artifacts.git_available", return_value=False), \
                 mock.patch("orchestrator.adapters.cli_base.preflight_cli", return_value=version), \

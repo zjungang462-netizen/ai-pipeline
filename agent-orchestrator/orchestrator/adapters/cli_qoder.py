@@ -28,12 +28,12 @@ class QoderAdapter(CLIAdapter):
         return any(v.startswith(p) for p in KNOWN_VERSION_PREFIXES)
 
     def run(self, prompt: str, workdir: Path, ctx: RunContext) -> Result:
-        args = ["-p", "-", "--output-format", "json"]
+        args = ["-p", "--output-format", "json"]
         if ctx.allow_yolo:
             args.append("--yolo")
         else:
             args += ["--permission-mode", "accept_edits"]
-        return self._finalize(self._exec_prompt(args, prompt, workdir, ctx), ctx)
+        return self._finalize(self._exec(args, workdir, ctx, stdin_data=prompt), ctx)
 
     def _parse(self, proc, workdir: Path, ctx: RunContext) -> Result:
         stdout = strip_ansi(proc.stdout or "")

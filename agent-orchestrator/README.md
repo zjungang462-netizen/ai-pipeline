@@ -1,6 +1,6 @@
 # 多智能体开发流水线编排器
 
-把 **Codex、千问 Qwen Code、豆包、Antigravity、Qoder、dsh（DeepSeek Harness）** 等真实编码工具按角色分工，串成「需求 → 设计 → 编码 → 测试 → 审查」自动化流水线。
+把 **Codex、豆包、Antigravity、dsh（DeepSeek Harness）** 等真实编码工具按角色分工，串成「需求 → 设计 → 编码 → 测试 → 审查」自动化流水线。
 
 核心是**轻量编排引擎 + 可插拔适配器**，而非再包一层 LLM 框架。每个工具一个适配器，按配置把角色映射到工具，发挥各自所长。
 
@@ -317,15 +317,13 @@ max_rounds = 3           # 最多 3 轮（含首轮审查），超限判失败
 ## 各工具接入与登录
 
 > **默认示例通道仍是 `openai_compat`**。Codex 0.169.0 与反重力 1.5.9 已完成上文所述混合链路真机验收，使用 `cli-mixed.example.toml` 显式启用。
-> dsh 0.2.2-rc.3 已验证 headless JSON 和实际前端测试，见 `dsh-test.example.toml`。千问、豆包、Qoder 仍需真实版本和成功输出样本，不能因注册表中有适配器就认定已经验证。
+> dsh 0.2.2-rc.3 已验证 headless JSON 和实际前端测试，见 `dsh-test.example.toml`。豆包仍需真实版本和成功输出样本，不能因注册表中有适配器就认定已经验证。
 
 | 工具 | 适配器 type | 无头命令 | 认证 |
 |---|---|---|---|
 | Codex | `cli_codex` | `codex exec ... --json` | `CODEX_API_KEY`（CI）或交互登录 |
-| 千问 Qwen Code | `cli_qwen` | `qwen -p ... --output-format json` | `OPENAI_API_KEY/BASE_URL/MODEL` |
 | 豆包 | `cli_doubao` | `doubao -p ...` | `doubao login` 扫码（无 API-key） |
 | Antigravity | `cli_agy` | `agy -p ... --output-format json` | 需先交互式登录一次 |
-| Qoder | `cli_qoder` | `qoder -p ... --output-format json` | `QODER_PERSONAL_ACCESS_TOKEN` |
 | dsh | `cli_dsh` | `dsh --profile headless --json ... -` | 本机凭据服务或显式 `DEEPSEEK_API_KEY` |
 | 百炼/方舟 API | `openai_compat` | HTTP | `DASHSCOPE_API_KEY` / `ARK_API_KEY` |
 
@@ -367,7 +365,7 @@ python -m unittest discover -s tests -v
 **需真实环境联调**（离线测试不覆盖，不假装已验证）：
 - 真实 Key 冒烟（百炼/方舟）。
 - 各 CLI 安装与登录（豆包扫码/agy 登录）。
-- **CLI fixture 的真实性按文件区分**（见 `tests/fixtures/README.md` 与 `cli-capture-provenance.json`）：`codex_0.167.jsonl`、`qwen_0.5.json` 是手写合成样本，只用于旧解析回归；Codex 0.169.0、反重力 1.5.9、dsh 0.2.2-rc.3 的样本为真实抓包（dsh 原始副本未保留独立字节，已在 provenance 注明）。qwen 真实版本为 0.26.x，合成样本标 0.5 仅为占位；qwen/豆包/Qoder 仍需真机抓包核对。
+- **CLI fixture 的真实性按文件区分**（见 `tests/fixtures/README.md` 与 `cli-capture-provenance.json`）：`codex_0.167.jsonl` 是手写合成样本，只用于旧解析回归；Codex 0.169.0、反重力 1.5.9、dsh 0.2.2-rc.3 的样本为真实抓包（dsh 原始副本未保留独立字节，已在 provenance 注明）。豆包仍需真机抓包核对。
 
 ## 设计依据
 
@@ -382,7 +380,6 @@ python -m unittest discover -s tests -v
 - **M2** 可写根守卫真正接入（执行前校验 + 执行后扫描根外改动）。
 - **M3** 时长预算实现（阶段级 + run 级）。
 - **M4** 版本白名单收紧为工具名前缀；fixture 如实标注为合成样本待真机抓包。
-- **M5** qwen prompt 改走 stdin，避免撞 Windows 命令行长度上限。
 - **M6** 429/5xx 归为限流并指数退避；API 编码阶段提取代码块写盘。
 
 L2 审查反馈环（`审查报告-L2反馈环.md` 实测三条通过）后，第三轮实测硬缺陷已修：
@@ -390,7 +387,6 @@ L2 审查反馈环（`审查报告-L2反馈环.md` 实测三条通过）后，�
 - **G2** 越界检测改为执行前后**可写根快照对比**，真正捕获 git diff 清单之外的根外写入。
 - **G3** 审查结论不可解析 => **待人工确认**（AWAITING），不再默认放行。
 - **G5** CLI 适配器按 `ctx.kind` 为 report/review 阶段写报告文件，同一适配器可兼任 coding 与 review。
-- **G7**（qwen `-p -` 的 stdin 语义）仍标注为待真机验证，离线无法证明。
 
 第四轮复验（G1/G2/G3/G5 全部确认真生效，零跳过）后修复：
 - **N1** `rerun-from` 现在会清未决审批 **并递增失效计数**——只清 pending 不够，否则 `adopt_successful` 会重新采纳旧 success.json，把"没结论的审查"静默当通过。修复后 awaiting 的审查可经 `rerun-from` 真正再审一遍。
@@ -443,8 +439,6 @@ prompt = "prompts/review_existing.md"   # 无 feedback_to：只出报告不自�
 - **裸 JSON 丢问题清单**：`_BARE_OBJ` 正则不允许嵌套括号，对象数组形式的 `issues` 匹配失败 => 反馈退化成"请全面自查"。改用 `json.JSONDecoder().raw_decode` 从每个 `{` 扫描，嵌套问题自然解决。
 - **G4 护栏静默中止**：`feedback_loop_guard` 触发此前只记事件后 `break`，留下部分 `done` 像跑完了。现置 **FAILED** 并写明原因。
 - 附带防御：`REVIEW_FEEDBACK` 但未配 `feedback_to` 时判失败，不再抛 `ConfigError` 崩溃。
-
-**仍开放**：G7（`qwen -p -` 的 stdin 语义）待真机验证。
 
 ## 确定性改造（当前版本核心）
 

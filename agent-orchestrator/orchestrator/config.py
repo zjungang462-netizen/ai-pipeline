@@ -22,8 +22,6 @@ KNOWN_ADAPTER_TYPES = {
     "fake",
     "openai_compat",
     "cli_codex",
-    "cli_qwen",
-    "cli_qoder",
     "cli_dsh",
     "cli_doubao",
     "cli_agy",

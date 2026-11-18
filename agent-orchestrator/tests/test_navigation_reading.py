@@ -12,7 +12,7 @@ class NavigationReading(unittest.TestCase):
         result = subprocess.run([node, str(Path(__file__).parent / 'js/navigation_reading.cjs')],
                                 capture_output=True, text=True, encoding='utf8', timeout=40)
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-        self.assertIn('NAVIGATION_READING_OK: 8 scenarios', result.stdout)
+        self.assertIn('NAVIGATION_READING_OK: 10 scenarios', result.stdout)
 
 
 if __name__ == '__main__':

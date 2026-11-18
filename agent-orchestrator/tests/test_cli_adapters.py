@@ -8,7 +8,6 @@ from pathlib import Path
 from unittest import mock
 
 from orchestrator.adapters.cli_codex import CodexAdapter, parse_codex_jsonl, strip_ansi
-from orchestrator.adapters.cli_qwen import QwenAdapter
 from orchestrator.adapters.cli_dsh import DshAdapter
 from orchestrator.adapters.cli_doubao import DoubaoAdapter
 from orchestrator.contracts import ErrorKind, RunContext
@@ -65,26 +64,6 @@ class TestCodexParse(unittest.TestCase):
     def test_malformed_jsonl_no_crash(self):
         text, ok = parse_codex_jsonl("{bad json\nnot json at all\n")
         self.assertFalse(ok)
-
-
-class TestQwenParse(unittest.TestCase):
-    def test_fixture(self):
-        ad = QwenAdapter(name="qwen")
-        ad._version = "qwen-code 0.5.0"
-        ad._resolved = "qwen"
-        raw = (FIXTURES / "qwen_0.5.json").read_text(encoding="utf-8")
-        with tempfile.TemporaryDirectory() as d:
-            res = ad._parse(proc(stdout=raw), Path(d), make_ctx(Path(d)))
-        self.assertTrue(res.ok)
-        self.assertIn("模块划分", res.text)
-
-    def test_unknown_version(self):
-        ad = QwenAdapter(name="qwen")
-        ad._version = "some-other-tool 1.0"
-        ad._resolved = "qwen"
-        with tempfile.TemporaryDirectory() as d:
-            res = ad._parse(proc(stdout='{"result":"x"}'), Path(d), make_ctx(Path(d)))
-        self.assertTrue(res.parse_unknown)
 
 
 class TestTextAdapters(unittest.TestCase):

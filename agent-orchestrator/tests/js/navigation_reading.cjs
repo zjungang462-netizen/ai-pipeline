@@ -25,7 +25,7 @@ async function boot(){
  nodes=new Map(ids.map(id=>[id,new Element()]));nodes.get('status-filter').value='all';nodes.get('time-sort').value='newest';
  const tabs=['all','chat'].map(tab=>{const n=new Element();n.dataset.tab=tab;return n;});
  const rows=Array.from({length:8},(_,i)=>({id:'run-'+i,run_id:'run-'+i,created:1700000000+Math.floor(i/3)*86400,task:'任务 '+i,project_id:i%2?'b':'a',lifecycle:i%2?'done':'failed'}));
- const state={requests:[],streams:[],hold:null,failHistory:false,data:new Map(rows.map(r=>[r.id,Array.from({length:160},(_,i)=>event(i+1,r.id))])),timers:[]};
+ const state={requests:[],streams:[],hold:null,failHistory:false,failSnapshot:false,data:new Map(rows.map(r=>[r.id,Array.from({length:160},(_,i)=>event(i+1,r.id))])),timers:[]};
  const location={href:'http://local/',pathname:'/',search:'',hash:''},response=(data,status=200)=>({ok:status<400,status,json:async()=>data});
  const fetch=async(address)=>{
   const u=new URL(address,'http://local');state.requests.push(u.pathname+u.search);
@@ -38,7 +38,7 @@ async function boot(){
   }
   const match=u.pathname.match(/^\/api\/runs\/([^/]+)\/(snapshot|events)$/);assert.ok(match,'不允许请求 '+u.pathname);
   const key=decodeURIComponent(match[1]),row=rows.find(r=>r.id===key),data=state.data.get(key);
-  if(match[2]==='snapshot')return response({...row,last_cursor:data.at(-1)?.cursor||0,stages:{testing:{status:'done'}},capabilities:{},pending_approvals:{},usage:{},rounds:{},threads:[],artifacts:[],cli_activity:[],config_integrity:'valid'});
+  if(match[2]==='snapshot'){if(state.failSnapshot){state.failSnapshot=false;return response({error:'fixture snapshot unavailable'},503);}return response({...row,last_cursor:data.at(-1)?.cursor||0,stages:{testing:{status:'done'}},capabilities:{},pending_approvals:{},usage:{},rounds:{},threads:[],artifacts:[],cli_activity:[],config_integrity:'valid'});}
   if(state.failHistory){state.failHistory=false;return response({error:'fixture history unavailable'},503);}
   const before=Number(u.searchParams.get('before')),events=data.filter(e=>e.cursor<before).slice(-100),held=state.hold;
   if(held&&held.before===before){state.hold=null;held.started.resolve();await held.release.promise;}
@@ -104,5 +104,18 @@ async function test(name,fn){await fn();console.log('PASS '+name);}
   assert.equal(b.read('events.size'),100);assert.equal(b.read('pendingFeedEvents.size'),500);assert.equal(b.read('unseenEvents'),600);
   await b.nodes.get('jump-latest').onclick();assert.ok(b.read('events.size')<=500);assert.equal(b.read('events.has(760)'),true);assert.equal(b.read('pendingFeedEvents.size'),0);assert.ok(b.state.requests.every(p=>p.startsWith('/api/')));
  });
- console.log('NAVIGATION_READING_OK: 8 scenarios');
+ await test('任务读取失败保留原房间与实时连接，初次读取失败可以重试',async()=>{
+  const b=await boot();b.state.failHistory=true;await b.open('run-6');assert.equal(b.read('current'),null);assert.equal(b.state.streams.length,0);assert.ok(b.nodes.get('toast').textContent.includes('任务读取失败'));
+  await b.open('run-7');const stream=b.source(),node=b.nodes.get('events').children.at(-1);b.nodes.get('feed').scrollTop=340;
+  for(const failure of ['failSnapshot','failHistory']){b.state[failure]=true;await b.open('run-6');assert.equal(b.read('current.id'),'run-7');assert.equal(b.source(),stream);assert.ok(!stream.closed);assert.equal(b.nodes.get('events').children.at(-1),node);assert.equal(b.nodes.get('feed').scrollTop,340);assert.ok(b.read('location.search').includes('run=run-7'));}
+  stream.emit(event(161));assert.equal(b.read('pendingFeedEvents.has(161)'),true);
+  await b.open('run-6');assert.equal(b.read('current.id'),'run-6');assert.equal(stream.closed,true);assert.notEqual(b.source(),stream);
+ });
+ await test('连续切换以最后选择为准，加载期间原房间继续接收动态',async()=>{
+  const b=await boot();await b.open('run-7');const stream=b.source();b.nodes.get('feed').scrollTop=340;
+  const held={before:161,started:deferred(),release:deferred()};b.state.hold=held;const first=b.open('run-6');await held.started.promise;
+  stream.emit(event(161));assert.equal(b.read('pendingFeedEvents.has(161)'),true);assert.ok(!stream.closed);assert.equal(b.read('current.id'),'run-7');
+  await b.open('run-5');held.release.resolve();await first;assert.equal(b.read('current.id'),'run-5');assert.equal(b.read('events.has(161)'),false);assert.equal(b.state.streams.length,2);assert.equal(stream.closed,true);
+ });
+ console.log('NAVIGATION_READING_OK: 10 scenarios');
 })().catch(error=>{console.error(error.stack);process.exitCode=1;});
