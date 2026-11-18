@@ -46,6 +46,24 @@ def run_cli_process(command, *, cwd, env, input, capture_output=True, text=True,
                                stdout=subprocess.PIPE, stderr=subprocess.PIPE, start_new_session=os.name != 'nt',
                                creationflags=creation_flags())
 
+    # 线程接管管道后负责关闭。主线程只关闭尚未接管的管道，避免等待阻塞读写释放缓冲锁。
+    pipe_lock = threading.Lock()
+    unclaimed_pipes = {'stdin': process.stdin, 'stdout': process.stdout, 'stderr': process.stderr}
+
+    def claim_pipe(name):
+        with pipe_lock:
+            return unclaimed_pipes.pop(name, None)
+
+    def close_unclaimed_pipes(cleanup_errors):
+        with pipe_lock:
+            pipes = list(unclaimed_pipes.values())
+            unclaimed_pipes.clear()
+        for pipe in pipes:
+            try:
+                pipe.close()
+            except BaseException as error:
+                cleanup_errors.append(error)
+
     def discard_suspended():
         """P3-6：Popen 之后、attach 之前出现异常时，不能留下挂起的孤儿进程。"""
         try:
@@ -66,9 +84,12 @@ def run_cli_process(command, *, cwd, env, input, capture_output=True, text=True,
         output_limit=4*1024*1024
         buffers={name:TextTail(output_limit) for name in ('stdout','stderr')}
         failures=[]
-        def drain(pipe,name):
-            decoder=codecs.getincrementaldecoder(encoding)(errors=errors)
+        def drain(name):
+            pipe = claim_pipe(name)
+            if pipe is None:
+                return
             try:
+                decoder=codecs.getincrementaldecoder(encoding)(errors=errors)
                 while chunk:=pipe.read1(4096):
                     value=decoder.decode(chunk)
                     buffers[name].append(value)
@@ -81,25 +102,29 @@ def run_cli_process(command, *, cwd, env, input, capture_output=True, text=True,
                 failures.append(error)
             finally:pipe.close()
         def send():
+            pipe = claim_pipe('stdin')
+            if pipe is None:
+                return
             try:
                 value=input if isinstance(input,bytes) else (input or '').encode(encoding)
-                process.stdin.write(value)
-                process.stdin.flush()
+                pipe.write(value)
+                pipe.flush()
             except (BrokenPipeError,OSError):pass
-            finally:process.stdin.close()
-        readers=[threading.Thread(target=drain,args=(process.stdout,'stdout'),daemon=True),
-                 threading.Thread(target=drain,args=(process.stderr,'stderr'),daemon=True)]
+            finally:pipe.close()
+        readers=[threading.Thread(target=drain,args=(name,),daemon=True)
+                 for name in ('stdout','stderr')]
         writer=threading.Thread(target=send,daemon=True)
         attach(process)
     except BaseException:
         # 从 Popen 到 attach 的任何异常都不能留下仍挂起的创建窗口孤儿。
         discard_suspended()
+        close_unclaimed_pipes([])
         raise
-    # P2-4：超时预算只覆盖 CLI 执行本身，不含 Job 绑定与挂起恢复的启动开销。
-    start=time.monotonic()
     stopped=''
     status='exited'
     try:
+        # P2-4：超时预算只覆盖 CLI 执行本身，不含 Job 绑定与挂起恢复的启动开销。
+        start=time.monotonic()
         for thread in readers:thread.start()
         writer.start()
         while True:
@@ -159,6 +184,7 @@ def run_cli_process(command, *, cwd, env, input, capture_output=True, text=True,
             except BaseException as error:
                 cleanup_errors.append(error)
             finally:
+                close_unclaimed_pipes(cleanup_errors)
                 for thread in [*readers,writer]:
                     if thread.ident is not None:
                         try:thread.join(2)

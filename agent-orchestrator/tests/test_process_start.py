@@ -3,6 +3,7 @@ import os
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 import unittest
 from pathlib import Path
@@ -113,7 +114,10 @@ class ProcessStart(EvidenceTestCase):
         captured=[]
         real_start=subprocess.Popen
         def start(*args,**kwargs):
-            p=real_start(*args,**kwargs);captured.append(p);return p
+            process=real_start(*args,**kwargs)
+            captured.append(process)
+            self.addCleanup(dispose,process)
+            return process
         with mock.patch('orchestrator.adapters.cli_base.subprocess.Popen',side_effect=start), \
                 mock.patch.object(process_tree,'_resume_process_handle',return_value=False), \
                 mock.patch.object(process_tree,'_resume_initial_thread',side_effect=OSError('injected resume error')):
@@ -123,6 +127,8 @@ class ProcessStart(EvidenceTestCase):
         self.assertEqual(len(captured),1)
         self.assertIsNotNone(captured[0].poll())
         self.assertNotIn('_workbench_job',captured[0].__dict__)
+        self.assertTrue(all(pipe.closed for pipe in
+                            (captured[0].stdin,captured[0].stdout,captured[0].stderr)))
 
     def test_failed_resume_closes_job_and_kills_suspended_process(self):
         # P3-5：两条恢复路径都失败时，只能靠关闭 Job（KILL_ON_JOB_CLOSE）杀死挂起进程；
@@ -181,11 +187,14 @@ class CLIStartWindowAndTimeout(EvidenceTestCase):
         self.assertIn('BUDGET_OK',result.stdout)
 
     def test_exception_between_popen_and_attach_kills_suspended_process(self):
-        # P3-6：Popen 与 attach 之间的异常不能留下永不退出的挂起进程。
+        # 绑定失败时没有 I/O 线程接管，调用方必须关闭全部管道。
         captured=[]
         real_start=subprocess.Popen
         def start(*args,**kwargs):
-            process=real_start(*args,**kwargs);captured.append(process);return process
+            process=real_start(*args,**kwargs)
+            captured.append(process)
+            self.addCleanup(dispose,process)
+            return process
         with mock.patch('orchestrator.adapters.cli_base.subprocess.Popen',side_effect=start), \
                 mock.patch.object(process_tree,'attach',side_effect=RuntimeError('injected attach error')):
             with self.assertRaisesRegex(RuntimeError,'injected attach error'):
@@ -193,11 +202,76 @@ class CLIStartWindowAndTimeout(EvidenceTestCase):
                                 cwd=str(self.root),env=build_subprocess_env(),input='',timeout=10)
         self.assertEqual(len(captured),1)
         self.assertIsNotNone(captured[0].poll(),'创建窗口异常后进程必须已终止')
-        for stream in (captured[0].stdin,captured[0].stdout,captured[0].stderr):
-            try:
-                stream.close()
-            except (AttributeError,OSError):
-                pass
+        self.assert_process_pipes_closed(captured[0])
+
+    def test_io_thread_start_failure_closes_unclaimed_pipes(self):
+        captured=[]
+        real_popen=subprocess.Popen
+        real_thread_start=threading.Thread.start
+        started=[]
+
+        def popen(*args,**kwargs):
+            process=real_popen(*args,**kwargs)
+            captured.append(process)
+            self.addCleanup(dispose,process)
+            return process
+
+        def start_thread(thread):
+            if started:
+                raise RuntimeError('injected thread start error')
+            real_thread_start(thread)
+            started.append(thread)
+
+        # 第一个读取线程已启动，其他管道尚未移交。
+        script='import time; time.sleep(60)'
+        with mock.patch('orchestrator.adapters.cli_base.subprocess.Popen',side_effect=popen), \
+                mock.patch.object(threading.Thread,'start',new=start_thread):
+            with self.assertRaisesRegex(RuntimeError,'injected thread start error'):
+                run_cli_process([sys.executable,'-c',script],cwd=str(self.root),
+                                env=build_subprocess_env(),input='',timeout=10)
+        self.assertEqual(len(started),1)
+        self.assertFalse(started[0].is_alive())
+        self.assertEqual(len(captured),1)
+        self.assertIsNotNone(captured[0].poll())
+        self.assert_process_pipes_closed(captured[0])
+
+    def assert_process_pipes_closed(self,process):
+        for name in ('stdin','stdout','stderr'):
+            with self.subTest(pipe=name):
+                self.assertTrue(getattr(process,name).closed)
+
+    def test_pipe_close_failure_keeps_attach_error_and_closes_other_pipes(self):
+        captured=[]
+        real_popen=subprocess.Popen
+        attach_error=RuntimeError('injected attach error')
+
+        def popen(*args,**kwargs):
+            process=real_popen(*args,**kwargs)
+            captured.append(process)
+            self.addCleanup(dispose,process)
+            return process
+
+        def fail_attach(process):
+            close_stdin=process.stdin.close
+
+            def close_then_fail():
+                close_stdin()
+                raise OSError('injected pipe close error')
+
+            patcher=mock.patch.object(process.stdin,'close',side_effect=close_then_fail)
+            self.addCleanup(patcher.stop)
+            patcher.start()
+            raise attach_error
+
+        with mock.patch('orchestrator.adapters.cli_base.subprocess.Popen',side_effect=popen), \
+                mock.patch.object(process_tree,'attach',side_effect=fail_attach):
+            with self.assertRaises(RuntimeError) as raised:
+                run_cli_process([sys.executable,'-c','print("MUST_NOT_RUN")'],
+                                cwd=str(self.root),env=build_subprocess_env(),input='',timeout=10)
+        self.assertIs(raised.exception,attach_error)
+        self.assertEqual(len(captured),1)
+        self.assertIsNotNone(captured[0].poll())
+        self.assert_process_pipes_closed(captured[0])
 
     def test_cleanup_failure_keeps_primary_error_and_finishes_trace(self):
         # P3-7：terminate 抛异常时，close(process) 与 trace.finish 仍须执行，
