@@ -10,10 +10,12 @@ GitHub 的 `main` 是后续开发主线，产品源码在 [agent-orchestrator](a
 
 | 目录或分支 | 用途 |
 | --- | --- |
-| `C:/Users/张军刚/.codex/worktrees/phase3-maintenance/ai-pipeline/agent-orchestrator` | 当前完整开发源码，对应 `main` 发布来源 |
-| `D:/work/ai-pipeline/agent-orchestrator` / `codex/release-stabilization` | 较早稳定线及其本地改动检查点，不代表最新功能全集 |
+| `D:/work/ai-pipeline/agent-orchestrator` | 唯一保留的开发源码目录，对应 GitHub `main` |
+| `codex/release-stabilization` | Git 中保留的较早稳定线检查点，无单独展开副本 |
 | `review-*`、`live-validation-*`、`repair-*`、`workbench-*` | 本地验收、运行和诊断目录，不是开发主线 |
 | `*/runtime` 与旧 ZIP 发布包 | 固定历史快照，不能凭文件时间当作最新源码 |
+
+2026-11-18 已将主线迁回以上 D 盘目录，移除重复工作树。旧验收、发布目录与两份过时工作台运行快照归档在 `D:/work/ai-pipeline-archives/2026-11-18`，逐文件 SHA-256 校验后移除展开副本；保留当前运行快照和真实任务证据。归档含历史本机数据，仅供本地恢复，不上传 GitHub。
 
 本机 8766 工作台仍运行固定验收快照，不能据其页面推断已部署 main 的全部功能。本次整理不更换运行引擎，不迁移历史状态，不改写旧失败记录。
 
