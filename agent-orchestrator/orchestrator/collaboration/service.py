@@ -170,7 +170,7 @@ class Service:
 
     # ── 游标格式：URL-safe Base64(JSON {"v":1,"ch":"<created.hex()>","id":"<id>","bh":"<before.hex()|null>",
     #                                       "qh":"<q_normalized|null>","pi":"<project_id|null>","st":"<status>"})
-    _CURSOR_VERSION = 2
+    _CURSOR_VERSION = 3
     _CURSOR_MAX_LEN = 8192  # 容纳 200 个 Unicode 字符编码后的合法查询
 
     # 合法 status 值及其对应的底层 lifecycle 集合
@@ -184,7 +184,8 @@ class Service:
     }
 
     def _encode_cursor(self, created: float, run_id: str, before: float | None,
-                       q: str = '', project_id: str = '', status: str = 'all') -> str:
+                       q: str = '', project_id: str = '', status: str = 'all',
+                       sort: str = 'newest') -> str:
         payload = json.dumps({
             'v': self._CURSOR_VERSION,
             'ch': float(created).hex(),
@@ -193,11 +194,12 @@ class Service:
             'qh': q if q else None,
             'pi': project_id if project_id else None,
             'st': status,
+            'sort': sort,
         }, separators=(',', ':')).encode('utf-8')
         return base64.urlsafe_b64encode(payload).decode('ascii')
 
-    def _decode_cursor(self, cursor: str) -> tuple[float, str, float | None, str, str, str]:
-        """返回 (created, id, before_or_None, q, project_id, status)；非法时抛 ValueError。"""
+    def _decode_cursor(self, cursor: str) -> tuple[float, str, float | None, str, str, str, str]:
+        """游标绑定筛选和时间方向；旧版本保持最新在前。"""
         if not isinstance(cursor, str) or not 1 <= len(cursor) <= self._CURSOR_MAX_LEN:
             raise ValueError('游标格式无效')
         try:
@@ -227,9 +229,12 @@ class Service:
             import math
             if not math.isfinite(created) or (before is not None and not math.isfinite(before)):
                 raise ValueError('游标时间戳无效')
-            return created, run_id, before, '', '', 'all'
-        elif obj['v'] == self._CURSOR_VERSION:
-            if set(obj) != {'v', 'ch', 'id', 'bh', 'qh', 'pi', 'st'}:
+            return created, run_id, before, '', '', 'all', 'newest'
+        elif obj['v'] in (2, self._CURSOR_VERSION):
+            fields = {'v', 'ch', 'id', 'bh', 'qh', 'pi', 'st'}
+            if obj['v'] == self._CURSOR_VERSION:
+                fields.add('sort')
+            if set(obj) != fields:
                 raise ValueError('游标版本不支持')
             try:
                 if not isinstance(obj['ch'], str) or not isinstance(obj['id'], str):
@@ -251,6 +256,9 @@ class Service:
                 st = obj.get('st', 'all')
                 if not isinstance(st, str) or st not in self._STATUS_GROUPS:
                     raise ValueError('游标状态无效')
+                sort = obj.get('sort', 'newest')
+                if not isinstance(sort, str) or sort not in ('newest', 'oldest'):
+                    raise ValueError('游标排序无效')
             except (KeyError, ValueError, TypeError, OverflowError):
                 raise ValueError('游标字段无效')
             if not isinstance(run_id, str) or not run_id:
@@ -258,13 +266,13 @@ class Service:
             import math
             if not math.isfinite(created) or (before is not None and not math.isfinite(before)):
                 raise ValueError('游标时间戳无效')
-            return created, run_id, before, q, project_id, st
+            return created, run_id, before, q, project_id, st, sort
         else:
             raise ValueError('游标版本不支持')
 
     def list_runs_page(self, limit: int = 50, before: float | None = None, cursor: str | None = None,
                        q: str | None = None, project_id: str | None = None,
-                       status: str | None = None):
+                       status: str | None = None, sort: str | None = None):
         """稳定游标分页，支持全历史筛选；返回 {runs, has_more, next_cursor}。"""
         import math
 
@@ -273,6 +281,10 @@ class Service:
         q = '' if q is None else q
         project_id = '' if project_id is None else project_id
         status = 'all' if status is None else status
+        supplied_sort = sort is not None
+        sort = 'newest' if sort is None else sort
+        if not isinstance(sort, str) or sort not in ('newest', 'oldest'):
+            raise ValueError('sort 必须为 newest/oldest 之一')
 
         # 验证筛选参数
         if not isinstance(q, str):
@@ -304,7 +316,7 @@ class Service:
         # 若显式传了筛选参数但与游标不一致，则返回400。
         caller_has_filters = supplied_q or supplied_project or supplied_status
         if cursor is not None:
-            cur_created, cur_id, cursor_before, cursor_q, cursor_project_id, cursor_status = self._decode_cursor(cursor)
+            cur_created, cur_id, cursor_before, cursor_q, cursor_project_id, cursor_status, cursor_sort = self._decode_cursor(cursor)
             # 遗漏范围参数时继承游标；显式改变任何已绑定参数都必须重置分页。
             if before is not None and before != cursor_before:
                 raise ValueError('游标与当前时间范围不一致，请重置分页')
@@ -312,11 +324,16 @@ class Service:
             cursor_q_norm = cursor_q.strip().casefold() if cursor_q else ''
             if ((supplied_q and q_norm != cursor_q_norm)
                     or (supplied_project and project_id != cursor_project_id)
-                    or (supplied_status and status != cursor_status)):
+                    or (supplied_status and status != cursor_status)
+                    or (supplied_sort and sort != cursor_sort)):
                 raise ValueError('游标与当前筛选条件不一致，请重置分页')
             q_norm = cursor_q_norm
             project_id = cursor_project_id
             status = cursor_status
+            sort = cursor_sort
+
+        # 排序方向仅来自已验证枚举，禁止把请求值直接拼进 SQL。
+        direction, comparison = ('ASC', '>') if sort == 'oldest' else ('DESC', '<')
 
         result = []
         # 构建基础 SQL：按 created DESC, id DESC 遍历全部历史
@@ -330,7 +347,7 @@ class Service:
 
         if cur_created is not None and cur_id is not None:
             where_parts.append(
-                '(created < ? OR (created = ? AND id < ?))'
+                f'(created {comparison} ? OR (created = ? AND id {comparison} ?))'
             )
             params.extend([cur_created, cur_created, cur_id])
 
@@ -354,7 +371,7 @@ class Service:
                     SELECT *
                     FROM runs
                     {where_sql}
-                    ORDER BY created DESC, id DESC
+                    ORDER BY created {direction}, id {direction}
                     LIMIT ?
                 """
                 fetch_params = params + [limit + 1]
@@ -387,7 +404,7 @@ class Service:
                     if scan_created is not None and scan_id is not None:
                         # 续批：从上一批最后一条之后继续
                         batch_where_parts.append(
-                            '(created < ? OR (created = ? AND id < ?))'
+                            f'(created {comparison} ? OR (created = ? AND id {comparison} ?))'
                         )
                         batch_params.extend([scan_created, scan_created, scan_id])
                     # 移除已被 cur_created/cur_id 替代的游标续页条件（避免重复）
@@ -403,7 +420,7 @@ class Service:
                         batch_params2.append(project_id)
                     if scan_created is not None and scan_id is not None:
                         batch_where_parts2.append(
-                            '(created < ? OR (created = ? AND id < ?))'
+                            f'(created {comparison} ? OR (created = ? AND id {comparison} ?))'
                         )
                         batch_params2.extend([scan_created, scan_created, scan_id])
                     batch_where_sql = ('WHERE ' + ' AND '.join(batch_where_parts2)) if batch_where_parts2 else ''
@@ -412,7 +429,7 @@ class Service:
                         SELECT *
                         FROM runs
                         {batch_where_sql}
-                        ORDER BY created DESC, id DESC
+                        ORDER BY created {direction}, id {direction}
                         LIMIT ?
                     """
                     with self.store.connect() as db:
@@ -461,7 +478,7 @@ class Service:
         if has_more and result:
             last = result[-1]
             next_cursor = self._encode_cursor(last['created'], last['id'], before,
-                                              q_norm, project_id, status)
+                                              q_norm, project_id, status, sort)
 
         return self.redact({'runs': result, 'has_more': has_more, 'next_cursor': next_cursor})
 

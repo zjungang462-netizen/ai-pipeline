@@ -187,7 +187,7 @@ class Handler(BaseHTTPRequestHandler):
                 return self.respond({'projects': service.list_projects()})
             if path == '/api/runs':
                 if method == 'GET':
-                    for name in ('limit', 'before', 'cursor', 'q', 'project_id', 'status'):
+                    for name in ('limit', 'before', 'cursor', 'q', 'project_id', 'status', 'sort'):
                         if name in query and len(query[name]) != 1:
                             raise ValueError(f'{name} 不可重复提供')
                     raw_limit = int(query.get('limit', ['50'])[0])
@@ -196,9 +196,10 @@ class Handler(BaseHTTPRequestHandler):
                     raw_q = query['q'][0] if 'q' in query else None
                     raw_project_id = query['project_id'][0] if 'project_id' in query else None
                     raw_status = query['status'][0] if 'status' in query else None
+                    raw_sort = query['sort'][0] if 'sort' in query else None
                     # 非法参数或游标不一致由 service 层抛 ValueError → 400
                     page = service.list_runs_page(raw_limit, raw_before, raw_cursor,
-                                                  raw_q, raw_project_id, raw_status)
+                                                  raw_q, raw_project_id, raw_status, raw_sort)
                     return self.respond(page)
                 if method == 'POST':
                     value = service.create_run(body['project_id'], body['task'], self.idem(),

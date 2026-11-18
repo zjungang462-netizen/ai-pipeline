@@ -61,15 +61,15 @@ class Element{
  const open=app.slice(app.indexOf('function openStream('),app.indexOf('function renderCLIActivity('));
  const connections=[],streams=[];
  class Source{constructor(){this.listeners={};streams.push(this);}addEventListener(name,fn){this.listeners[name]=fn;}}
- const replay=vm.createContext({EventSource:Source,Map,Math,JSON,Number,encodeURIComponent,setTimeout:()=>1,setConnection:(ok,text)=>connections.push(text),renderFeed(){},api(){}});
- vm.runInContext("let stream=null,current={id:'old'},events=new Map(),reloadTimer=null;",replay);
+ const replay=vm.createContext({EventSource:Source,Map,Math,JSON,Number,encodeURIComponent,setTimeout:()=>1,setConnection:(ok,text)=>connections.push(text),renderFeed(){},api(){},feedNearEnd:()=>true,trimEvents(){},updateFeedNavigation(){}});
+ vm.runInContext("let stream=null,current={id:'old'},events=new Map(),reloadTimer=null,selectGeneration=0,latestFeedCursor=0,historyViewing=false,firstCursor=0;const pendingFeedEvents=new Map();",replay);
  vm.runInContext(open,replay);
  vm.runInContext("openStream('old',0);current={id:'new'};openStream('new',4)",replay);
  streams[0].onerror();assert.equal(connections.length,0);
  streams[1].onopen();assert.equal(connections.length,1);
- streams[0].listeners.update({data:JSON.stringify({cursor:1})});
+ streams[0].listeners.update({data:JSON.stringify({cursor:1,kind:'message',payload:{}})});
  streams[1].listeners.update({data:'broken JSON'});
- streams[1].listeners.update({data:JSON.stringify({cursor:5})});
+ streams[1].listeners.update({data:JSON.stringify({cursor:5,kind:'message',payload:{}})});
  assert.equal(vm.runInContext('events.size',replay),1);
  console.log('INSIGHTS_UI_OK');
 })().catch(error=>{console.error(error);process.exitCode=1;});
