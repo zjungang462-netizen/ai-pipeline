@@ -163,11 +163,12 @@ class CLIStartWindowAndTimeout(EvidenceTestCase):
         # P2-4b：慢 attach 不得占用 CLI 调用超时预算；修复前 start 在 attach 前，必然超时。
         real_attach=process_tree.attach
         def slow_attach(process):
-            time.sleep(4)
+            # 保持 attach 明确晚于调用预算，同时给 Windows 短命令启动留出抖动空间。
+            time.sleep(6)
             return real_attach(process)
         with mock.patch.object(process_tree,'attach',side_effect=slow_attach):
             result=run_cli_process([sys.executable,'-c','print("BUDGET_OK")'],
-                                   cwd=str(self.root),env=build_subprocess_env(),input='',timeout=3)
+                                   cwd=str(self.root),env=build_subprocess_env(),input='',timeout=5)
         self.assertEqual(result.returncode,0)
         self.assertIn('BUDGET_OK',result.stdout)
 
