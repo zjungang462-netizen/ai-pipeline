@@ -19,8 +19,9 @@ from .execution_scope import execution_scope
 
 
 class Service:
-    def __init__(self, database, configs):
+    def __init__(self, database, configs, *, recover=True):
         self.store = Store(database)
+        self.recover = recover
         self.operations = threading.RLock()
         self.active = {}
         self.active_topics = {}
@@ -38,7 +39,7 @@ class Service:
             # 只登记路径，不在启动阶段解析配置：单个配置损坏/被删除时服务仍须可用。
             self.store.register_project(path)
         try:
-            self.sync(recover=True)
+            self.sync(recover=self.recover)
         except Exception as error:
             # 单个坏配置/畸形运行目录不应阻止工作台启动；房间仍可打开，错误留给诊断。
             self.last_sync_error = self.redact(str(error) or error.__class__.__name__)

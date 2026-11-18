@@ -1,0 +1,64 @@
+name: Offline Checks
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: checks-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  quick:
+    runs-on: windows-latest
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        python: ['3.11', '3.13']
+    env:
+      PYTHONUTF8: '1'
+      PYTHONIOENCODING: utf-8
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: Check configuration and incremental credentials
+        working-directory: agent-orchestrator
+        env:
+          BEFORE: ${{ github.event.before }}
+          BASE_BRANCH: ${{ github.base_ref }}
+        run: |
+          $base = $env:BEFORE
+          if ($env:BASE_BRANCH) { $base = git merge-base HEAD "origin/$env:BASE_BRANCH" }
+          if (-not $base -or $base -match '^0+$') { $base = git rev-parse HEAD^ }
+          python scripts/precommit.py --checks-only --base-ref $base
+      - name: Quick offline acceptance
+        working-directory: agent-orchestrator
+        run: python scripts/verify_delivery.py --quick --redact-logs --output ../ci-evidence
+      - name: Navigation regressions
+        working-directory: agent-orchestrator
+        run: |
+          python -m unittest discover -s tests -p test_navigation_reading.py
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          python -m unittest discover -s tests -p test_time_sort.py
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          python -m unittest discover -s tests -p test_workbench_service.py
+      - name: Deterministic convergence benchmark (no model calls)
+        working-directory: agent-orchestrator
+        run: python scripts/benchmark.py --output ../ci-benchmark
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: offline-${{ matrix.python }}-${{ github.sha }}
+          path: |
+            ci-evidence/
+            ci-benchmark/
+          retention-days: 14

@@ -4,6 +4,8 @@
 
 当前版本、验收数字、升级步骤和未验证边界统一见 [DELIVERY.md](DELIVERY.md)。变更摘要见 [RELEASE_NOTES.md](RELEASE_NOTES.md)，各轮历史与旧数字归档到 [HISTORY.md](HISTORY.md)。
 
+主线自动检查、双重完整验收发布、网页进程守护与固定自动修复任务集见 [OPERATIONS.md](OPERATIONS.md)。
+
 ## 开始使用
 
 需要 Python 3.11+。在 `agent-orchestrator` 目录运行离线示例：

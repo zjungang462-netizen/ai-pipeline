@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import hmac
 import json
+import os
 import secrets
 import threading
 import time
@@ -17,10 +18,10 @@ from ..collaboration.projection import read_artifact
 
 
 class Application:
-    def __init__(self, database, configs):
+    def __init__(self, database, configs, *, recover=True):
         from .._version import __version__
         self.version = __version__
-        self.service = Service(database, configs)
+        self.service = Service(database, configs, recover=recover)
         self.bootstrap = secrets.token_urlsafe(32)
         self.session = secrets.token_urlsafe(32)
         self.csrf = secrets.token_urlsafe(24)
@@ -35,7 +36,7 @@ class Application:
         def loop():
             while not self.closed.wait(.75):
                 try:
-                    self.service.sync(recover=True, incremental=True)
+                    self.service.sync(recover=self.service.recover, incremental=True)
                 except Exception as error:
                     # 单轮投影失败（含畸形状态/坏配置/数据库瞬时错误）不得结束线程；
                     # 保留最后错误供诊断，并在页面上不做成“同步成功”。
@@ -131,6 +132,8 @@ class Handler(BaseHTTPRequestHandler):
             parsed = urlsplit(self.path)
             path = unquote(parsed.path)
             query = parse_qs(parsed.query, keep_blank_values=True)
+            if path == '/api/health' and method == 'GET':
+                return self.respond({'status': 'ok', 'pid': os.getpid(), 'version': self.app.version})
             if method == 'GET' and path in ('/', '/app.js', '/insights.js', '/style.css'):
                 name = {'/': 'index.html', '/app.js': 'app.js', '/insights.js': 'insights.js', '/style.css': 'style.css'}[path]
                 body = (Path(__file__).parent / 'static' / name).read_bytes()
@@ -294,8 +297,8 @@ class Handler(BaseHTTPRequestHandler):
         self.handle_request('POST')
 
 
-def create_server(database, configs, port=8765):
-    app = Application(database, configs)
+def create_server(database, configs, port=8765, *, recover=True):
+    app = Application(database, configs, recover=recover)
     server = WorkbenchServer(('127.0.0.1', port), Handler)
     server.application = app
     app.origin = f'http://127.0.0.1:{server.server_port}'

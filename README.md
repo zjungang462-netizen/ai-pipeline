@@ -2,7 +2,7 @@
 
 ## 当前开发入口
 
-GitHub 的 `main` 是后续开发主线，产品源码在 [agent-orchestrator](agent-orchestrator/README.md)，当前功能版本为 **0.5.3 + 工作台导航修复**。
+GitHub 的 `main` 是后续开发主线，产品源码在 [agent-orchestrator](agent-orchestrator/README.md)，当前功能版本为 **0.5.4**。自动检查、守护运行与基准使用见 [OPERATIONS.md](agent-orchestrator/OPERATIONS.md)。
 
 已包含 Claude Code/DeepSeek、Qoder、模型与思考设置、用量导出，以及工作台时间排序、日期折叠、筛选重置、历史阅读保护和任务切换失败恢复。版本号表示功能基线；具体代码以 Git 提交为准。
 
@@ -17,7 +17,7 @@ GitHub 的 `main` 是后续开发主线，产品源码在 [agent-orchestrator](a
 
 2026-11-18 已将主线迁回以上 D 盘目录，移除重复工作树。旧验收、发布目录与两份过时工作台运行快照归档在 `D:/work/ai-pipeline-archives/2026-11-18`，逐文件 SHA-256 校验后移除展开副本；保留当前运行快照和真实任务证据。归档含历史本机数据，仅供本地恢复，不上传 GitHub。
 
-本机 8766 工作台仍运行固定验收快照，不能据其页面推断已部署 main 的全部功能。本次整理不更换运行引擎，不迁移历史状态，不改写旧失败记录。
+本机 8766 工作台运行独立固定验收快照，部署版本以本地进程收据为准，不能仅据当前源码版本推断已经上线。历史状态与旧失败记录保留。
 
 ## 验证与运行
 

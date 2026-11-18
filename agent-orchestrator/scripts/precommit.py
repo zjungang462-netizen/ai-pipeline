@@ -103,10 +103,20 @@ def check_repository(repo: Path) -> dict:
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--checks-only', action='store_true', help='只做静态检查；不替代完整提交前门禁')
+    parser.add_argument('--base-ref', help='CI 检查该提交以来已经提交的改动，补足干净检出场景')
     parser.add_argument('--output', help='quick 验收输出目录，须在项目外')
     args = parser.parse_args(argv)
     repo = Path(git(ROOT, 'rev-parse', '--show-toplevel').stdout.decode('utf8').strip())
     report = check_repository(repo)
+    if args.base_ref:
+        base = git(repo, 'rev-parse', '--verify', args.base_ref+'^{commit}').stdout.decode('ascii').strip()
+        changed = git(repo, 'diff', '--name-only', '--diff-filter=ACMR', '-z', base, 'HEAD').stdout
+        for raw in changed.split(b'\0'):
+            if raw:
+                name = raw.decode('utf8')
+                data = git(repo, 'show', 'HEAD:'+name).stdout
+                report['issues'].extend(credential_findings(data, name, 'committed_diff'))
+        report['ok'] = not report['issues']
     from scripts.generate_config_docs import check_generated
     try:
         for name in check_generated(ROOT):
