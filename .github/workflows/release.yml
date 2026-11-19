@@ -13,9 +13,12 @@ jobs:
     env:
       PYTHONUTF8: '1'
       PYTHONIOENCODING: utf-8
-      TEMP: ${{ runner.temp }}
-      TMP: ${{ runner.temp }}
     steps:
+      - name: Use runner temporary directory
+        shell: pwsh
+        run: |
+          "TEMP=$env:RUNNER_TEMP" >> $env:GITHUB_ENV
+          "TMP=$env:RUNNER_TEMP" >> $env:GITHUB_ENV
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0

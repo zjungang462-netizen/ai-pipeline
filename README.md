@@ -4,6 +4,8 @@
 
 GitHub 的 `main` 是后续开发主线，产品源码在 [agent-orchestrator](agent-orchestrator/README.md)，当前开发版本为 **0.5.5**。自动检查、守护运行与基准使用见 [OPERATIONS.md](agent-orchestrator/OPERATIONS.md)。
 
+2026-11-20 的发布、工作台升级、状态恢复、自身维护基准与后续阻塞见 [WORK_STATUS.md](WORK_STATUS.md)。冻结包以实际发布提交和 SHA-256 为准，根目录 CI 修正与产品源码验收分开记录。
+
 已包含 Claude Code/DeepSeek、Qoder、模型与思考设置、用量导出，以及工作台时间排序、日期折叠、筛选重置、历史阅读保护和任务切换失败恢复。版本号表示功能基线；具体代码以 Git 提交为准。
 
 本地目录说明：
