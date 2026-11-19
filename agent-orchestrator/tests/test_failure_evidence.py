@@ -75,14 +75,16 @@ class FailureEvidence(unittest.TestCase):
     def test_redaction_covers_known_credentials_json_escapes_and_token_urls(self):
         secret='诊断私密-value-12345'
         key='arbitrary-private-value-123456'
-        (self.root/'stderr.txt').write_text(secret+' '+key+' sk-local-fixture-private-123456789 '
-            'http://user:password@localhost '+json.dumps(secret,ensure_ascii=True),encoding='utf8')
+        token='sk-'+'local-fixture-private-123456789'
+        credential_url='http://'+'user:password@localhost'
+        (self.root/'stderr.txt').write_text(secret+' '+key+' '+token+' '
+            +credential_url+' '+json.dumps(secret,ensure_ascii=True),encoding='utf8')
         atomic_write_json(self.root/'cli-progress.json',{'reason':'call_timeout','file':secret,
                                                         'usage':{'api_key':key,'tokens':30}})
         with mock.patch.dict(os.environ,{'CAPTURE_API_KEY':key}):
             path,data=self.collect(secrets=[secret],failure='assert '+secret)
         text=path.read_text(encoding='utf8')
-        for value in (secret,key,'sk-local-fixture-private-123456789','user:password'):
+        for value in (secret,key,token,'user:password'):
             self.assertNotIn(value,text)
         self.assertNotIn(json.dumps(secret,ensure_ascii=True)[1:-1],text)
         self.assertIn('[REDACTED]',text)
@@ -218,16 +220,21 @@ class FailureEvidence(unittest.TestCase):
         def fake_scandir(path):
             if Path(path)==locked:raise PermissionError('injected unreadable dir')
             return real_scandir(path)
-        with mock.patch('scripts.failure_evidence.os.scandir',side_effect=fake_scandir):
-            path,data=self.collect(roots=[first,second])
-        issues=[issue for issue in data['issues'] if issue['reason']=='unreadable_dir']
-        self.assertTrue(any('locked' in issue['path'] for issue in issues))
-        records={record['path']:record['data'] for record in data['records']}
-        # 不可读目录之前/之后收集到的记录都必须保留：单目录失败不得中止整包。
-        self.assertTrue(any(record['path'].endswith('state.json') for record in data['records']))
-        self.assertIn('SECOND_ROOT_TAIL',records['root-1/stderr.txt']['tail'])
-        self.assertFalse(any('locked' in name for name in records))
-        self.assertNotIn('LOCKED_TAIL',bundle_text(data))
+        for secrets,label in (([], 'root-1/stderr.txt'), (['root'], '[REDACTED]-1/stderr.txt')):
+            with self.subTest(secrets=secrets), \
+                 mock.patch('scripts.failure_evidence.environment_secrets',return_value=secrets), \
+                 mock.patch('scripts.failure_evidence.os.scandir',side_effect=fake_scandir):
+                path,data=self.collect(roots=[first,second])
+            issues=[issue for issue in data['issues'] if issue['reason']=='unreadable_dir']
+            self.assertTrue(any('locked' in issue['path'] for issue in issues))
+            records={record['path']:record['data'] for record in data['records']}
+            # 单目录失败后仍采集其它根；路径标签也必须服从凭据脱敏。
+            self.assertTrue(any(record['path'].endswith('state.json') for record in data['records']))
+            self.assertIn('SECOND_ROOT_TAIL',records[label]['tail'])
+            self.assertFalse(any('locked' in name for name in records))
+            self.assertNotIn('LOCKED_TAIL',bundle_text(data))
+            if secrets:
+                self.assertNotIn('root-1/stderr.txt',records)
 
     def test_unreadable_directory_does_not_abort_capture_test(self):
         root=self.root.parent/'testcase-root';root.mkdir()
@@ -403,9 +410,10 @@ class DeliveryVerification(unittest.TestCase):
     def test_verification_tracebacks_are_redacted_without_changing_exit_code(self):
         secret='CAPTURE_API_KEY_VALUE_123456'
         token='sk-'+'z'*24
+        credential_url='http://'+'alice:pw123@host'
         proof={'tests_run':2,
                'failures':[{'test':'suite.test_a',
-                            'traceback':f'AssertionError: {secret} {token} http://alice:pw123@host'}],
+                            'traceback':f'AssertionError: {secret} {token} {credential_url}'}],
                'errors':[{'test':'suite.test_b','traceback':'RuntimeError: '+secret}],
                'skipped':[{'test':'suite.test_c','reason':secret}],
                'source_unchanged':False,'exit_code':1}
