@@ -221,6 +221,41 @@ class CLIReliability(EvidenceTestCase):
         self.assertEqual(trace.tick(),'budget_limit')
         trace.finish('stopped')
 
+    def test_final_cli_result_without_newline_rechecks_budget(self):
+        adapter=AgyAdapter('fixture')
+        adapter._resolved=sys.executable;adapter._version='1.5.9'
+        for limit,tokens in ((40,40),(40,41),(None,41)):
+            with self.subTest(limit=limit,tokens=tokens):
+                ctx=self.ctx();ctx.remaining_tokens=limit;ctx.token_reservation=20
+                accepted=limit is None or tokens<=limit
+                event={'event':'result','result':{'status':'SUCCESS','response':'done',
+                                                 'usage':{'total_tokens':tokens}}}
+                # 保留真实进程的退出码 0；最后一个 JSON 刻意没有换行。
+                script='import sys; sys.stdout.write('+repr(json.dumps(event))+')'
+                result=adapter._exec(['-u','-c',script],self.workspace,ctx)
+                progress=json.loads((ctx.attempt_dir/'cli-progress.json').read_text(encoding='utf8'))
+                self.assertEqual(result.exit_code,0)
+                self.assertEqual(result.ok,accepted)
+                self.assertEqual(result.error_kind,ErrorKind.NONE if accepted else ErrorKind.REJECTED)
+                self.assertEqual(result.usage['known_tokens'],tokens)
+                self.assertEqual(progress['status'],'exited' if accepted else 'stopped')
+                self.assertEqual(progress['reason'],'' if accepted else 'budget_limit')
+                self.assertTrue(progress['usage']['usage_complete'])
+
+    def test_finish_checks_partial_usage_without_overwriting_existing_stop(self):
+        ctx=self.ctx();ctx.remaining_tokens=40;ctx.token_reservation=20
+        event={'event':'step_update','step_update':{'conversation_id':'c','step_index':1,
+               'step_type':'agent_response','state':'DONE','usage':{'total_tokens':25}}}
+        for reason in ('','call_timeout'):
+            with self.subTest(reason=reason):
+                trace=CLITrace(ctx)
+                trace.feed('stdout',json.dumps(event))
+                self.assertEqual(trace.tick(),'')
+                trace.finish('stopped' if reason else 'exited',reason)
+                self.assertEqual(trace.reason,reason or 'budget_limit')
+                self.assertEqual(trace.status,'stopped')
+                self.assertEqual(trace.ledger.snapshot()['known_tokens'],25)
+
     def test_normal_cli_fixture_finishes_with_real_tests(self):
         cfg,data,env=self.fixture_config()
         original=sha256_file(self.workspace/'tests/test_module.py')

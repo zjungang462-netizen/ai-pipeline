@@ -348,13 +348,16 @@ class CLITrace:
             self.directory.mkdir(parents=True,exist_ok=True)
             atomic_write_json(self.directory/'cli-progress.json',self.snapshot())
 
+    def _check_token_budget(self):
+        limit=self.ctx.remaining_tokens
+        if limit is not None and not self.reason:
+            usage=self.ledger.snapshot()
+            charge=usage['tokens']+(0 if usage['usage_complete'] else self.ctx.token_reservation)
+            if charge>limit:self.reason='budget_limit'
+
     def tick(self):
         with self.lock:
-            usage=self.ledger.snapshot()
-            limit=self.ctx.remaining_tokens
-            if limit is not None:
-                charge=usage['tokens']+(0 if usage['usage_complete'] else self.ctx.token_reservation)
-                if charge>limit:self.reason=self.reason or 'budget_limit'
+            self._check_token_budget()
             if time.time()-self.last_output>self.ctx.idle_timeout_s:self.reason=self.reason or 'idle_timeout'
             if self.dirty or time.monotonic()-self.last_save>=2:self._save(force=not self.dirty)
             return self.reason
@@ -364,11 +367,13 @@ class CLITrace:
             if self.closed:return
             failures=[]
             try:
+                self.reason=self.reason or reason
                 if self.lines and not self.dropping_line:self._event(self.lines)
                 if self.channel=='cli_codex':self._codex_stderr('',final=True)
                 for name,redactor in self.redactors.items():self._write(name,redactor.feed('',final=True))
+                # EOF 处可能才得到完整的用量事件；不再做空闲超时判定。
+                self._check_token_budget()
                 self.status='stopped' if status=='exited' and self.reason else status
-                self.reason=self.reason or reason
                 self._save(force=True)
             except BaseException as error:
                 failures.append(error)
