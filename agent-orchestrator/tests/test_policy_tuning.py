@@ -101,6 +101,23 @@ type = "fake"
         self.assertEqual(proposal["changes"], [])
         self.assertIn("不足", proposal["reason"])
 
+    def test_failed_run_with_successful_stage_does_not_reduce_rounds(self):
+        self.records()
+        path = self.state / 'runs/r2/metrics.json'
+        record = json.loads(path.read_text(encoding='utf8'))
+        record.update(status='failed', fail_reasons=['review_exhausted'])
+        atomic_write_json(path, record)
+        proposal = propose(self.state, self.config)
+        self.assertEqual(proposal['changes'], [])
+
+    def test_nonterminal_run_does_not_reduce_rounds(self):
+        self.records()
+        path = self.state / 'runs/r2/metrics.json'
+        record = json.loads(path.read_text(encoding='utf8'))
+        record['status'] = 'running'
+        atomic_write_json(path, record)
+        self.assertEqual(propose(self.state, self.config)['changes'], [])
+
     def test_cost_regression_stops_new_suggestions(self):
         identifier = "tune-000000000001"
         original = self.config.read_text(encoding="utf-8")

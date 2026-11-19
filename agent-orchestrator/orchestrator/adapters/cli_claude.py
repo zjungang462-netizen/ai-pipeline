@@ -1,14 +1,18 @@
-"""Claude Code 2.1.325真实协议；工具身份与用户的兼容API模型后端分开记录。"""
+"""Claude Code已验证版本的真实协议；工具身份与兼容API后端分开记录。"""
 from __future__ import annotations
 
 import json
 import os
+import subprocess
 from pathlib import Path
 from urllib.parse import urlsplit
 
-from .cli_base import CLIAdapter
+from .cli_base import CLIAdapter, run_cli_process
 from .cli_codex import strip_ansi
-from ..contracts import ErrorKind,Result
+from ..contracts import ErrorKind,Result,PreflightReport
+from ..safety import build_subprocess_env, resolve_exe
+
+SUPPORTED_VERSIONS = frozenset(('2.1.325', '2.1.328'))
 
 CONNECTION_KEYS=frozenset(('ANTHROPIC_API_KEY','ANTHROPIC_AUTH_TOKEN','ANTHROPIC_BASE_URL',
     'ANTHROPIC_MODEL','ANTHROPIC_DEFAULT_OPUS_MODEL','ANTHROPIC_DEFAULT_SONNET_MODEL','ANTHROPIC_DEFAULT_HAIKU_MODEL'))
@@ -26,6 +30,24 @@ class ClaudeAdapter(CLIAdapter):
             raise ValueError('Claude Code reasoning_effort非法')
         if type(inherit_connection) is not bool:raise ValueError('inherit_connection必须为布尔值')
         self.model,self.reasoning_effort,self.inherit_connection=model,reasoning_effort,inherit_connection
+
+    def _version_known(self):
+        return self._version in {version + ' (Claude Code)' for version in SUPPORTED_VERSIONS}
+
+    def preflight(self):
+        self._resolved = resolve_exe(self.exe_name, self.exe)
+        self._version = None
+        if self._resolved:
+            try:
+                process = run_cli_process([self._resolved, '--version'], cwd=None,
+                                          env=build_subprocess_env(), input=None, timeout=30)
+                version = strip_ansi(process.stdout or '').strip()
+                if process.returncode == 0 and version in {v + ' (Claude Code)' for v in SUPPORTED_VERSIONS}:
+                    self._version = version
+            except (OSError, subprocess.TimeoutExpired):
+                pass
+        return PreflightReport(adapter=self.name, ok=self._version_known(), exe_path=self._resolved,
+                               tool_version=self._version, detail='只检查已验证版本，不探测登录')
 
     def _profile(self):
         env={};settings={}
@@ -59,11 +81,15 @@ class ClaudeAdapter(CLIAdapter):
 
     def input_fingerprint(self):
         env,model,effort=self._profile()
-        return {'protocol':1,'cli_version':'2.1.325','backend_endpoint':env.get('ANTHROPIC_BASE_URL','https://api.anthropic.com'),
+        return {'protocol':2,'supported_cli_versions':sorted(SUPPORTED_VERSIONS),'backend_endpoint':env.get('ANTHROPIC_BASE_URL','https://api.anthropic.com'),
                 'model':model,'reasoning_effort':effort,'inherit_connection':self.inherit_connection,
                 'model_aliases':{k:v for k,v in env.items() if k=='ANTHROPIC_MODEL' or k.startswith('ANTHROPIC_DEFAULT_')}}
 
     def run(self,prompt,workdir,ctx):
+        if not self._ensure_resolved() or not self._version_known():
+            return Result(ok=False, exit_code=-1, parse_unknown=True, error_kind=ErrorKind.PARSE_FAILED,
+                          channel=self.channel, tool_version=self._version,
+                          stderr='未确认已验证的 Claude Code 版本，没有发起模型请求')
         env,model,effort=self._profile()
         env.update(DISABLE_AUTOUPDATER='1',CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC='1',CI='1')
         tools='Read,Glob,Grep,Edit,Write' if ctx.kind=='code' else 'Read,Glob,Grep'
@@ -79,13 +105,13 @@ class ClaudeAdapter(CLIAdapter):
 
     def _parse(self,proc,workdir,ctx):
         stdout,stderr=strip_ansi(proc.stdout or ''),strip_ansi(proc.stderr or '')
-        if self._version!='2.1.325 (Claude Code)':
+        if not self._version_known():
             result=self._unknown_version(proc,'未验证的Claude Code版本');result.usage={'usage_unknown':True};return result
         try:
             events=[json.loads(line) for line in stdout.splitlines() if line.strip()]
             if not events or not all(isinstance(e,dict) for e in events):raise ValueError('非法事件流')
             init=next(e for e in events if e.get('type')=='system' and e.get('subtype')=='init')
-            if init.get('claude_code_version')!='2.1.325':raise ValueError('初始化版本不匹配')
+            if init.get('claude_code_version')!=self._version.split(' ',1)[0]:raise ValueError('初始化版本不匹配')
             finals=[e for e in events if e.get('type')=='result']
             if len(finals)!=1 or events[-1] is not finals[0]:raise ValueError('需要唯一末尾终态')
             final=finals[0]

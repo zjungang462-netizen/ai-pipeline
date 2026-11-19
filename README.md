@@ -2,7 +2,7 @@
 
 ## 当前开发入口
 
-GitHub 的 `main` 是后续开发主线，产品源码在 [agent-orchestrator](agent-orchestrator/README.md)，当前功能版本为 **0.5.4**。自动检查、守护运行与基准使用见 [OPERATIONS.md](agent-orchestrator/OPERATIONS.md)。
+GitHub 的 `main` 是后续开发主线，产品源码在 [agent-orchestrator](agent-orchestrator/README.md)，当前开发版本为 **0.5.5**。自动检查、守护运行与基准使用见 [OPERATIONS.md](agent-orchestrator/OPERATIONS.md)。
 
 已包含 Claude Code/DeepSeek、Qoder、模型与思考设置、用量导出，以及工作台时间排序、日期折叠、筛选重置、历史阅读保护和任务切换失败恢复。版本号表示功能基线；具体代码以 Git 提交为准。
 

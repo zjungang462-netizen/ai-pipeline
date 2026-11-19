@@ -29,7 +29,8 @@ QUICK_TESTS = ('test_stage1.TestConfig', 'test_stage1.TestState',
                'test_cli_entry.TestCLIEntry.test_missing_run', 'test_execution_scope', 'test_fix_ninth.ConfigValidation',
                'test_phase2_operations', 'test_phase2_gates', 'test_schema_docs', 'test_test_layers',
                'test_phase5_reporting', 'test_phase5_http', 'test_phase5_ui',
-               'test_model_settings', 'test_qoder_1189','test_claude_cli')
+               'test_model_settings', 'test_qoder_1189','test_claude_cli',
+               'test_state_backup', 'test_policy_tuning')
 
 
 def test_ids(suite):

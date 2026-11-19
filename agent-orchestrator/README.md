@@ -34,7 +34,7 @@ python -m orchestrator.cli resume workbench.example.toml --run-id demo-1
 
 Qoder 1.1.89 已验证 `Ultimate + high + adaptive` 真实读取/编辑与一条维护任务闭环；控制台支持 Qoder 模型、思考强度和 `auto/adaptive/disabled`。`thinking=enabled` 需要该工具额外的固定思考预算，本接入不使用它。示例见 `qoder.example.toml`。
 
-Claude Code 2.1.325 可作为文件工具代理接入你现有的 DeepSeek Anthropic 兼容连接：`cli_claude` 默认只继承 `~/.claude/settings.json` 的连接与模型字段，不改原配置。可指定 `deepseek-v4-pro[1M] + max`，控制台支持模型与思考强度；工具身份、连接配置和实报后端模型分开显示。示例见 `claude-deepseek.example.toml`。
+Claude Code 2.1.325 / 2.1.328 可作为文件工具代理接入你现有的 DeepSeek Anthropic 兼容连接：`cli_claude` 默认只继承 `~/.claude/settings.json` 的连接与模型字段，不改原配置。可指定 `deepseek-v4-pro[1M] + max`，控制台支持模型与思考强度；工具身份、连接配置和实报后端模型分开显示。未知版本在模型调用前停止。示例见 `claude-deepseek.example.toml`。
 
 工作台新任务默认勾选“不限制 token”，取消本地运行/阶段/输出 token 限额，继续记录用量并保留时长、轮次、文件与审批约束。模型服务自身仍可能有输出/上下文上限。CLI 使用此模式需在 `[run_budget]` 显式设 `unlimited_tokens=true`，并删除运行/阶段/适配器的 `max_tokens`。
 
@@ -71,6 +71,9 @@ Claude Code 2.1.325 可作为文件工具代理接入你现有的 DeepSeek Anthr
 | `doctor 配置 [--json]` | 本机静态诊断，不调用模型或登录探测 |
 | `clean --state-dir 目录 [--dry-run]` | 预览过期状态清理；仅 `--apply` 执行 |
 | `export-usage --state-dir 目录 --output 文件.csv` | 导出运行、阶段和工具用量；未报告的账单费用留空 |
+| `state-check --state-dir 目录` | 只读检查现存状态与当前 schema 的兼容性 |
+| `state-backup --state-dir 目录 --output 新目录` | 停写后备份完整状态并逐文件校验 SHA-256 |
+| `state-restore --backup 备份目录 --output 新目录` | 校验并恢复原始字节，不覆盖现有目录或自动续跑 |
 | `dashboard --config 配置 --port 端口` | 启动本机工作台，配置参数可重复 |
 | `tune --state-dir 目录 --config 配置` | 生成待审批的历史策略提案 |
 | `approve-tune --state-dir 目录 --output 新配置` | 批准并写入配置副本 |
@@ -155,7 +158,7 @@ Claude Code 2.1.325 可作为文件工具代理接入你现有的 DeepSeek Anthr
 | `cli_dsh` | 可设 `exe`、`permission_mode`、无凭据 `proxy_url`、`extra_env`、`timeout_s`；已有真实样本 |
 | `cli_qwen` | Qwen Code 0.26.0 的 stdin/JSON 数组/终态用量已有真实样本；后端为 DeepSeek，工具执行与其它版本仍待验证 |
 | `cli_qoder` | 1.1.89 真机 stdin/流式成功终态及 Read/Edit 已验证；Ultimate/high/adaptive 真实维护任务通过；token计数不完整、credits分列 |
-| `cli_claude` | Claude Code 2.1.325 的真实流式终态与文件工具；默认继承用户兼容连接，已用 DeepSeek Pro/max 跑通维护闭环，不冒充 Claude 原生模型 |
+| `cli_claude` | Claude Code 2.1.325 / 2.1.328 的真实流式终态与文件工具；默认继承用户兼容连接，已用 DeepSeek Pro/max 跑通维护闭环，不冒充 Claude 原生模型 |
 | `cli_doubao` | 未核实独立官方 CLI，属于未验证预留；调用豆包模型可使用方舟兼容API |
 | `fake` | 仅用于离线演示和确定性回归 |
 

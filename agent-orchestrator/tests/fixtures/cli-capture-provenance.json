@@ -145,5 +145,19 @@
     ],
     "source_sha256": "97894bc5422488e66caf335948ee88e3f89dccafc6f9038a98a4a6c833457cec",
     "fixture_sha256": "ad4b8d1505ecbb71226e4cffc13a3fa97b3339d7ece433036e5624172bf3ebfa"
+  },
+  "claude_2.1.328_tools_real.jsonl": {
+    "source": "真实自身维护任务的 Claude Code Read/Edit 输出；原任务因未知版本被拒绝",
+    "version": "2.1.328",
+    "captured_at": "2026-11-19T16:14:51.405431+00:00",
+    "backend": "DeepSeek Anthropic-compatible endpoint",
+    "source_sha256": "36ae3a3f6dfc6ac69b0a138b83b45064ad2ba76f883a8486d46e9312c005b51c",
+    "fixture_sha256": "8a8f2f6e06e106ddaebb75989c07cd1a50934e9766080a570130278b768f025d",
+    "redacted_fields": [
+      "IDs",
+      "paths",
+      "thinking/signature body omitted",
+      "system incremental thinking counters omitted"
+    ]
   }
 }

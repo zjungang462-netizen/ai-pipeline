@@ -8,7 +8,7 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from orchestrator.reporting import budget_alerts, export_usage, usage_csv, usage_summary
+from orchestrator.reporting import budget_alerts, export_usage, failure_categories, number, usage_csv, usage_summary
 from orchestrator.collaboration import insights
 from orchestrator.collaboration.service import Service
 from orchestrator.collaboration.storage import Conflict
@@ -17,6 +17,32 @@ from orchestrator.state import atomic_write_json
 
 
 class Phase5Reporting(unittest.TestCase):
+    def test_malformed_live_usage_stays_unknown_and_frozen_metrics_still_win(self):
+        for value in (None, [], 'invalid', 7):
+            with self.subTest(value=value):
+                row = usage_summary('case', {'usage_total': value, 'stages': {}})
+                self.assertIsNone(row['tokens'])
+                self.assertIsNone(row['reported_tokens'])
+                self.assertIsNone(row['duration_s'])
+                self.assertEqual(row['token_status'], 'not_recorded')
+        row = usage_summary('case', {'usage_total': None}, {'tokens': 19, 'duration_s': 2, 'stages': {}})
+        self.assertEqual(row['tokens'], 19)
+        self.assertEqual(row['source'], 'immutable_metrics')
+
+    def test_malformed_job_does_not_hide_explicit_failure_categories(self):
+        state = {'stages': {'coding': {'status': 'failed'}}, 'events': [{'kind': 'test_fail'}]}
+        for job in (None, [], [1], 'invalid', 4, {'status': []}, {'status': {}}):
+            with self.subTest(job=job):
+                self.assertEqual(failure_categories(state, job), ['test_failure'])
+        self.assertEqual(failure_categories({}, {'status': 'timeout'}), ['timeout'])
+        self.assertEqual(failure_categories({}, {'status': 'cancelled'}), ['cancelled'])
+
+    def test_large_integer_usage_does_not_overflow_float_conversion(self):
+        self.assertEqual(number(10 ** 400), 10 ** 400)
+        for value in (True, False, -1, -1.5, float('nan'), float('inf'), '10', None):
+            with self.subTest(value=value):
+                self.assertIsNone(number(value))
+
     def setUp(self):
         temp=tempfile.TemporaryDirectory();self.addCleanup(temp.cleanup)
         self.root=Path(temp.name);self.state=self.root/'state'

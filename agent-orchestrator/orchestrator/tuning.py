@@ -63,6 +63,7 @@ def propose(state_dir: Path, config_path: Path, last: int = 20) -> dict:
                 continue
             # 成功首轮已足够时，只降低最坏开销上限，不宣称降低已发生的成本。
             if (spec.max_rounds > 1
+                    and all(r.get('status') == 'done' for r in records)
                     and all(s.get("status") == "done" and s.get("rounds", 0) <= 1 for s in relevant)
                     and all(r.get('repair_cycles', 0) == 0 for r in records)):
                 changes.append({"stage": spec.name, "key": "max_rounds",

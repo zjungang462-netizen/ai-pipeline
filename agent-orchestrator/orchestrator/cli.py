@@ -228,11 +228,44 @@ def cmd_export_usage(args) -> int:
     return 1 if report['errors'] else 0
 
 
+def cmd_state_check(args) -> int:
+    from .state_backup import inspect_state
+    report = inspect_state(args.state_dir)
+    print(json.dumps(report, ensure_ascii=False, indent=2))
+    return 0 if report['compatible'] else 1
+
+
+def cmd_state_backup(args) -> int:
+    from .state_backup import backup_state
+    print(json.dumps(backup_state(args.state_dir, args.output), ensure_ascii=False, indent=2))
+    return 0
+
+
+def cmd_state_restore(args) -> int:
+    from .state_backup import restore_state
+    print(json.dumps(restore_state(args.backup, args.output), ensure_ascii=False, indent=2))
+    return 0
+
+
 def main(argv=None) -> int:
     p = argparse.ArgumentParser(prog="orchestrator", description="多智能体开发流水线编排器")
     from ._version import __version__
     p.add_argument('--version', action='version', version='%(prog)s '+__version__)
     sub = p.add_subparsers(dest="cmd", required=True)
+
+    sp = sub.add_parser('state-check', help='只读检查状态 schema 兼容性')
+    sp.add_argument('--state-dir', required=True)
+    sp.set_defaults(func=cmd_state_check)
+
+    sp = sub.add_parser('state-backup', help='停写后完整备份状态并校验 SHA-256')
+    sp.add_argument('--state-dir', required=True)
+    sp.add_argument('--output', required=True)
+    sp.set_defaults(func=cmd_state_backup)
+
+    sp = sub.add_parser('state-restore', help='校验备份并恢复到不存在的新目录，不自动执行任务')
+    sp.add_argument('--backup', required=True)
+    sp.add_argument('--output', required=True)
+    sp.set_defaults(func=cmd_state_restore)
 
     sp = sub.add_parser('export-usage', help='导出运行/阶段/工具用量CSV；不估算真实账单')
     sp.add_argument('--state-dir', required=True)

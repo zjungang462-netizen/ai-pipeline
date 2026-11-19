@@ -11,7 +11,13 @@ MAX_JSON_BYTES = 8 * 1024 * 1024
 
 
 def number(value):
-    return value if type(value) in (int, float) and math.isfinite(value) and value >= 0 else None
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int):
+        return value if value >= 0 else None
+    if isinstance(value, float):
+        return value if math.isfinite(value) and value >= 0 else None
+    return None
 
 
 def read_object(path):
@@ -65,8 +71,10 @@ def failure_categories(state, job=None, metrics=None):
         if isinstance(reason, str) and reason in {'budget_exhausted', 'verify_nonzero', 'review_exhausted',
                                                   'review_fail', 'execution_failed'}:
             categories.add(reason)
-    if (job or {}).get('status') in ('timeout', 'cancelled'):
-        categories.add(job['status'])
+    if isinstance(job, dict):
+        status = job.get('status')
+        if isinstance(status, str) and status in ('timeout', 'cancelled'):
+            categories.add(status)
     stages = state.get('stages')
     failed = False
     if isinstance(stages, dict):
@@ -80,6 +88,8 @@ def usage_summary(run_id, state, metrics=None):
     metrics = metrics if isinstance(metrics, dict) else {}
     frozen = bool(metrics)
     usage = metrics if frozen else state.get('usage_total', {})
+    if not isinstance(usage, dict):
+        usage = {}
     tokens = number(usage.get('tokens'))
     reserved = number(usage.get('reserved_tokens', 0))
     reported = number(usage.get('reported_tokens'))

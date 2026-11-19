@@ -34,3 +34,25 @@ python scripts/benchmark.py --output ../benchmark-live-unique --live-config clau
 `--live-config` 显式启用付费模型调用；沿用选定配置的 report/code/review 角色适配器，在新建的小型任务工作区运行，绝不续跑原任务。编码阶段注入 app.py 当前内容，输出协议由引擎统一指定，不额外要求完整文件块与补丁同时出现。独立测试由引擎执行。单样本墙钟预算 240 秒、单阶段/适配器最多 120 秒，保留最多两轮反馈；当前基准显式不限本地 token，不是费用硬上限。API 审查开启 JSON 对象约束，不支持时保留失败，不自动换工具或模型。
 
 results.json 记录模式、各阶段终态、返工事件、attempt 数、耗时、已报告/未知用量、保护测试哈希和人工实现介入数。保留原始状态、测试输出、审查文件和脱敏日志；配置只写环境变量名，禁止写凭据。离线场景与真实样本分开统计，小样本不能推断通用业务成功率，也不把预算预留或 CLI 估值当实际账单。
+
+## 状态备份与恢复
+
+先停止会向该状态根写入的工作台、worker、supervisor 和调优进程，暂停新任务创建，再执行：
+
+```powershell
+python -m orchestrator.cli state-check --state-dir D:/data/state
+python -m orchestrator.cli state-backup --state-dir D:/data/state --output D:/backups/state-before-upgrade
+python -m orchestrator.cli state-restore --backup D:/backups/state-before-upgrade --output D:/data/restored-state
+```
+
+备份包含整个状态根的 attempts、审批、metrics、失败及恢复证据，manifest 记录文件集合、空目录、大小和 SHA-256；复制前后复核原目录，变动则不发布备份。已有运行、控制、会诊或调优锁会阻止备份。源目录与备份不能互相包含，输出父目录须存在，既有目标永不覆盖。备份按原始字节保留未知 schema 和损坏状态，兼容检查单独报告失败，不把备份成功当成可续跑。
+
+恢复先校验完整文件集合和哈希，再写入全新目录；不改 schema、用量、期限、审批、失败结论或绝对路径，不自动启动任务。状态中的绝对路径仍指向原位置，新目录用于验证或离线恢复演练。实际原位恢复须先停写并另行保留当前状态，再将已校验副本部署回相同位置；工作区、Git 对象与外部 worktree 必须单独备份，不包含在状态目录恢复承诺中。现有历史样本均为 schema 2，旧字段缺省由加载器兼容；尚无有依据的跨 schema 迁移契约。
+
+## 自身维护基准
+
+```powershell
+python scripts/self_benchmark.py --output D:/benchmarks/self-maintenance-new --live-config claude-deepseek.example.toml --ref 7ee4dbd
+```
+
+该命令显式调用真实模型。固定旧提交导出三份隔离源码，复现 reporting 模块的超大整数、畸形 usage_total 和畸形 job 输入问题，逐项运行设计、编码、保护测试与独立审查。设计请求显式附源码，记录基准执行器的文件指纹。每项仅允许修改 reporting.py，现有测试及仓库外验收脚本受哈希保护；首测未复现缺陷则拒绝算作修复。单项预算为 120000 本地计量 tokens、单次输出额度 16384、600 秒、两轮返工；CLI 未知计量仍预留，不承诺等于账单硬上限。结果记录固定提交、模型用量、attempt、返工、成功和失败，保留原始证据，不修改开发主线。三个同项目小样本不能外推跨项目业务成功率。

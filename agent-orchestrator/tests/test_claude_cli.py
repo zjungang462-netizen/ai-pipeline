@@ -110,6 +110,8 @@ class ClaudeCLI(unittest.TestCase):
         secret='private-connection-value'
         self.profile({'ANTHROPIC_API_KEY':secret,'ANTHROPIC_BASE_URL':'https://api.deepseek.com/anthropic','ANTHROPIC_DEFAULT_OPUS_MODEL':'deepseek-v4-pro[1M]'})
         adapter=ClaudeAdapter('c',reasoning_effort='max')
+        adapter._resolved='fixture-claude'
+        adapter._version='2.1.325 (Claude Code)'
         with mock.patch('pathlib.Path.home',return_value=self.root),mock.patch.object(adapter,'_exec',return_value=Result(ok=False)) as execute:
             adapter.run('PRIVATE_PROMPT',self.root,self.ctx)
         args=execute.call_args.args[0];kwargs=execute.call_args.kwargs
@@ -120,6 +122,40 @@ class ClaudeCLI(unittest.TestCase):
         self.assertEqual(args[args.index('--tools')+1],'Read,Glob,Grep,Edit,Write')
         self.assertNotIn('--dangerously-skip-permissions',args)
         self.assertEqual(kwargs['env_overrides']['ANTHROPIC_BASE_URL'],'https://api.deepseek.com/anthropic')
+
+    def test_unknown_version_is_rejected_before_model_call(self):
+        adapter = ClaudeAdapter('claude')
+        with mock.patch('orchestrator.adapters.cli_claude.resolve_exe', return_value='claude'), \
+                mock.patch('orchestrator.adapters.cli_claude.run_cli_process',
+                           return_value=subprocess.CompletedProcess([], 0, '2.1.999 (Claude Code)', '')), \
+                mock.patch.object(adapter, '_exec') as execute:
+            self.assertFalse(adapter.run('request', self.root, self.ctx).ok)
+        execute.assert_not_called()
+
+    def test_preflight_requires_stdout_version_and_successful_exit(self):
+        for code, stdout, stderr, expected in (
+            (0, '2.1.325 (Claude Code)', '', True),
+            (0, '2.1.328 (Claude Code)', '', True),
+            (1, '2.1.328 (Claude Code)', '', False),
+            (0, '', '2.1.328 (Claude Code)', False),
+            (0, '2.1.329 (Claude Code)', '', False),
+        ):
+            with self.subTest(code=code, stdout=stdout, stderr=stderr), \
+                    mock.patch('orchestrator.adapters.cli_claude.resolve_exe', return_value='claude'), \
+                    mock.patch('orchestrator.adapters.cli_claude.run_cli_process',
+                               return_value=subprocess.CompletedProcess([], code, stdout, stderr)):
+                self.assertEqual(ClaudeAdapter('claude').preflight().ok, expected)
+
+    def test_real_21328_file_tools_and_usage(self):
+        path = Path(__file__).parent / 'fixtures/claude_2.1.328_tools_real.jsonl'
+        events = [json.loads(line) for line in path.read_text(encoding='utf8').splitlines()]
+        self.adapter._version = '2.1.328 (Claude Code)'
+        result = self.parse(events)
+        self.assertTrue(result.ok)
+        self.assertEqual(result.usage['tokens'], 23673)
+        names = {block.get('name') for event in events
+                 for block in event.get('message', {}).get('content', []) if isinstance(block, dict)}
+        self.assertTrue({'Read', 'Edit'} <= names)
 
     def test_trace_uses_real_file_events_and_complete_ledger(self):
         trace=CLITrace(self.ctx,channel='cli_claude')
