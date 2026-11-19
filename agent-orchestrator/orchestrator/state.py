@@ -278,6 +278,13 @@ class StageState:
 class RunState:
     """一次 run 的持久化状态。state.json 为唯一权威。"""
 
+    SCHEMA_VERSION = 2
+    STATE_FIELDS = {
+        'schema_version', 'run_id', 'task', 'stages', 'pending_approvals', 'events',
+        'usage_total', 'feedback', 'review_rounds', 'invalidate_nonce', 'stage_usage',
+        'autonomy', 'test_artifacts', 'test_artifact_hashes', 'revision', 'control',
+    }
+
     def __init__(self, state_dir: Path, run_id: str):
         if (not isinstance(run_id, str) or not re.fullmatch(r"[\w.-]+", run_id)
                 or ".." in run_id or run_id == "."):
@@ -304,32 +311,79 @@ class RunState:
         self.test_artifacts: dict[str, list[str]] = {}
         # 仅有路径不足以信任输出：内容变化或丢失时必须重新执行测试。
         self.test_artifact_hashes: dict[str, dict[str, str]] = {}
+        self._unsafe_to_save = False
+
+    def _invalid_state(self, message: str) -> ValueError:
+        self._unsafe_to_save = True
+        return ValueError(message)
 
     # ---- 持久化 ----
     def load(self) -> bool:
         if not self.state_file.is_file():
             return False
-        data = json.loads(self.state_file.read_text(encoding="utf-8"))
-        self.task = data.get("task", "")
-        self.stages = {k: StageState.from_dict(v) for k, v in data.get("stages", {}).items()}
-        self.pending_approvals = data.get("pending_approvals", {})
-        self.events = data.get("events", [])
-        self.usage_total = data.get("usage_total", {"tokens": 0, "duration_s": 0.0})
-        self.feedback = data.get("feedback", {})
-        self.review_rounds = data.get("review_rounds", {})
-        self.invalidate_nonce = data.get("invalidate_nonce", {})
-        self.stage_usage = data.get("stage_usage", {})
-        self.autonomy = data.get("autonomy", {})
-        self.revision = data.get('revision', 0)
-        self.control = data.get('control', {})
-        self.test_artifacts = data.get('test_artifacts', {})
-        self.test_artifact_hashes = data.get('test_artifact_hashes', {})
+        try:
+            data = json.loads(self.state_file.read_text(encoding="utf-8"))
+        except (OSError, UnicodeError, json.JSONDecodeError) as error:
+            raise self._invalid_state('state.json 无法安全读取') from error
+        if not isinstance(data, dict):
+            raise self._invalid_state('state.json 根节点必须是对象')
+        version = data.get('schema_version')
+        if type(version) is not int or version != self.SCHEMA_VERSION:
+            raise self._invalid_state('state.json schema_version 不受支持')
+        unknown = set(data) - self.STATE_FIELDS
+        if unknown:
+            raise self._invalid_state('state.json 含有当前版本无法安全保留的字段')
+        if data.get('run_id') != self.run_id:
+            raise self._invalid_state('state.json run_id 与目标运行不匹配')
+
+        defaults = {
+            'task': '', 'stages': {}, 'pending_approvals': {}, 'events': [],
+            'usage_total': {'tokens': 0, 'duration_s': 0.0}, 'feedback': {},
+            'review_rounds': {}, 'invalidate_nonce': {}, 'stage_usage': {},
+            'autonomy': {}, 'revision': 0, 'control': {}, 'test_artifacts': {},
+            'test_artifact_hashes': {},
+        }
+        values = {**defaults, **data}
+        if not isinstance(values['task'], str):
+            raise self._invalid_state('state.json task 字段格式错误')
+        if type(values['revision']) is not int or values['revision'] < 0:
+            raise self._invalid_state('state.json revision 字段格式错误')
+        for key in ('stages', 'pending_approvals', 'usage_total', 'feedback',
+                    'review_rounds', 'invalidate_nonce', 'stage_usage', 'autonomy',
+                    'control', 'test_artifacts', 'test_artifact_hashes'):
+            if not isinstance(values[key], dict):
+                raise self._invalid_state(f'state.json {key} 字段必须是对象')
+        if not isinstance(values['events'], list):
+            raise self._invalid_state('state.json events 字段必须是数组')
+        try:
+            stages = {name: StageState.from_dict(stage)
+                      for name, stage in values['stages'].items()}
+        except (KeyError, TypeError, ValueError) as error:
+            raise self._invalid_state('state.json stages 内容格式错误') from error
+
+        # 完整解析并校验后再替换实例字段，避免损坏/未来版本部分污染后续保存。
+        self.task = values['task']
+        self.stages = stages
+        self.pending_approvals = values['pending_approvals']
+        self.events = values['events']
+        self.usage_total = values['usage_total']
+        self.feedback = values['feedback']
+        self.review_rounds = values['review_rounds']
+        self.invalidate_nonce = values['invalidate_nonce']
+        self.stage_usage = values['stage_usage']
+        self.autonomy = values['autonomy']
+        self.revision = values['revision']
+        self.control = values['control']
+        self.test_artifacts = values['test_artifacts']
+        self.test_artifact_hashes = values['test_artifact_hashes']
         return True
 
     def save(self) -> None:
+        if self._unsafe_to_save:
+            raise ValueError('state.json 加载校验失败；拒绝覆盖原始状态')
         self.revision += 1
         atomic_write_json(self.state_file, {
-            "schema_version": 2,
+            "schema_version": self.SCHEMA_VERSION,
             "run_id": self.run_id,
             "task": self.task,
             "stages": {k: v.to_dict() for k, v in self.stages.items()},

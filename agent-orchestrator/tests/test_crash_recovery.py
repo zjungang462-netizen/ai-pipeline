@@ -8,6 +8,7 @@ kill 点：
 from __future__ import annotations
 
 import tempfile
+import json
 import unittest
 from pathlib import Path
 
@@ -96,6 +97,85 @@ class TestCrashRecovery(unittest.TestCase):
             res = eng.run()
             self.assertEqual(res["coding"], StageStatus.DONE.value)
             self.assertEqual(hashes(eng), base)
+
+    def test_state_load_rejects_future_schema_without_mutating_or_rewriting(self):
+        with tempfile.TemporaryDirectory() as d:
+            state=RunState(Path(d),'expected')
+            state.task='unchanged in-memory task'
+            state.state_file.parent.mkdir(parents=True)
+            raw=b'{"schema_version":3,"run_id":"expected","task":"future"}'
+            state.state_file.write_bytes(raw)
+
+            with self.assertRaisesRegex(ValueError,'schema_version'):
+                state.load()
+
+            self.assertEqual(state.task,'unchanged in-memory task')
+            self.assertEqual(state.state_file.read_bytes(),raw)
+            with self.assertRaisesRegex(ValueError,'拒绝覆盖'):
+                state.save()
+            self.assertEqual(state.state_file.read_bytes(),raw)
+
+    def test_state_load_rejects_mismatched_run_id_without_mutating_or_rewriting(self):
+        with tempfile.TemporaryDirectory() as d:
+            state=RunState(Path(d),'expected')
+            state.task='unchanged in-memory task'
+            state.state_file.parent.mkdir(parents=True)
+            raw=b'{"schema_version":2,"run_id":"other","task":"wrong run"}'
+            state.state_file.write_bytes(raw)
+
+            with self.assertRaisesRegex(ValueError,'run_id'):
+                state.load()
+
+            self.assertEqual(state.task,'unchanged in-memory task')
+            self.assertEqual(state.state_file.read_bytes(),raw)
+
+    def test_state_load_accepts_and_round_trips_current_schema(self):
+        with tempfile.TemporaryDirectory() as d:
+            root=Path(d)
+            state=RunState(root,'expected')
+            state.task='preserved task'
+            state.stage('coding').status=StageStatus.INTERRUPTED
+            state.save()
+
+            loaded=RunState(root,'expected')
+            self.assertTrue(loaded.load())
+            self.assertEqual(loaded.task,'preserved task')
+            self.assertEqual(loaded.stage('coding').status,StageStatus.INTERRUPTED)
+            loaded.save()
+            saved=json.loads(state.state_file.read_text(encoding='utf8'))
+            self.assertEqual(saved['schema_version'],RunState.SCHEMA_VERSION)
+            self.assertEqual(saved['run_id'],'expected')
+
+    def test_state_load_rejects_unversioned_state_without_mutating_or_rewriting(self):
+        with tempfile.TemporaryDirectory() as d:
+            state=RunState(Path(d),'expected')
+            state.task='unchanged in-memory task'
+            state.state_file.parent.mkdir(parents=True)
+            raw=b'{"run_id":"expected","task":"unversioned"}'
+            state.state_file.write_bytes(raw)
+
+            with self.assertRaisesRegex(ValueError,'schema_version'):
+                state.load()
+
+            self.assertEqual(state.task,'unchanged in-memory task')
+            self.assertEqual(state.state_file.read_bytes(),raw)
+            with self.assertRaisesRegex(ValueError,'拒绝覆盖'):
+                state.save()
+            self.assertEqual(state.state_file.read_bytes(),raw)
+
+    def test_state_load_rejects_malformed_field_before_mutating_instance(self):
+        with tempfile.TemporaryDirectory() as d:
+            state=RunState(Path(d),'expected')
+            state.task='unchanged in-memory task'
+            state.state_file.parent.mkdir(parents=True)
+            raw=b'{"schema_version":2,"run_id":"expected","task":"bad","stages":[]}'
+            state.state_file.write_bytes(raw)
+
+            with self.assertRaisesRegex(ValueError,'stages'):
+                state.load()
+
+            self.assertEqual(state.task,'unchanged in-memory task')
+            self.assertEqual(state.state_file.read_bytes(),raw)
 
 
 if __name__ == "__main__":
