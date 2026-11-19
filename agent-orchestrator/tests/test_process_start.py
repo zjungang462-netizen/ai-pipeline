@@ -273,6 +273,57 @@ class CLIStartWindowAndTimeout(EvidenceTestCase):
         self.assertIsNotNone(captured[0].poll())
         self.assert_process_pipes_closed(captured[0])
 
+    def test_successful_exit_does_not_hide_incomplete_stdin_write(self):
+        # 子进程完全不读 stdin；输入超过管道容量，必然无法完整写入。
+        with mock.patch.object(threading, 'excepthook') as thread_error:
+            with self.assertRaisesRegex(OSError, 'CLI 输入写入失败'):
+                run_cli_process([sys.executable,'-c','print("OK")'],cwd=str(self.root),
+                                env=build_subprocess_env(),input=b'x'*(1024*1024),timeout=15)
+        thread_error.assert_not_called()
+
+    def test_nonzero_exit_keeps_diagnostics_when_stdin_write_is_incomplete(self):
+        script='import sys; print("CLI_REJECTED", file=sys.stderr); sys.exit(3)'
+        with mock.patch.object(threading, 'excepthook') as thread_error:
+            result=run_cli_process([sys.executable,'-c',script],cwd=str(self.root),
+                                   env=build_subprocess_env(),input=b'x'*(1024*1024),timeout=15)
+        self.assertEqual(result.returncode,3)
+        self.assertIn('CLI_REJECTED',result.stderr)
+        thread_error.assert_not_called()
+
+    def test_timeout_keeps_stop_reason_when_stdin_is_blocked(self):
+        with mock.patch.object(threading, 'excepthook') as thread_error:
+            with self.assertRaises(subprocess.TimeoutExpired) as raised:
+                run_cli_process([sys.executable,'-c','import time; time.sleep(60)'],
+                                cwd=str(self.root),env=build_subprocess_env(),
+                                input=b'x'*(1024*1024),timeout=1)
+        self.assertEqual(raised.exception.stop_reason,'call_timeout')
+        thread_error.assert_not_called()
+
+    def test_stdin_close_error_is_reported_instead_of_escaping_writer(self):
+        real_popen=subprocess.Popen
+
+        def popen(*args,**kwargs):
+            process=real_popen(*args,**kwargs)
+            self.addCleanup(dispose,process)
+            close_stdin=process.stdin.close
+
+            def close_then_fail():
+                close_stdin()
+                raise OSError('injected stdin close error')
+
+            patcher=mock.patch.object(process.stdin,'close',side_effect=close_then_fail)
+            self.addCleanup(patcher.stop)
+            patcher.start()
+            return process
+
+        script='import sys; assert sys.stdin.buffer.read() == b"prompt"'
+        with mock.patch('orchestrator.adapters.cli_base.subprocess.Popen',side_effect=popen), \
+                mock.patch.object(threading, 'excepthook') as thread_error:
+            with self.assertRaisesRegex(OSError, 'injected stdin close error'):
+                run_cli_process([sys.executable,'-c',script],cwd=str(self.root),
+                                env=build_subprocess_env(),input=b'prompt',timeout=15)
+        thread_error.assert_not_called()
+
     def test_cleanup_failure_keeps_primary_error_and_finishes_trace(self):
         # P3-7：terminate 抛异常时，close(process) 与 trace.finish 仍须执行，
         # 且真正的主异常不能被清理异常掩盖。

@@ -84,6 +84,7 @@ def run_cli_process(command, *, cwd, env, input, capture_output=True, text=True,
         output_limit=4*1024*1024
         buffers={name:TextTail(output_limit) for name in ('stdout','stderr')}
         failures=[]
+        input_failures=[]
         def drain(name):
             pipe = claim_pipe(name)
             if pipe is None:
@@ -109,11 +110,17 @@ def run_cli_process(command, *, cwd, env, input, capture_output=True, text=True,
                 value=input if isinstance(input,bytes) else (input or '').encode(encoding)
                 pipe.write(value)
                 pipe.flush()
-            except (BrokenPipeError,OSError):pass
-            finally:pipe.close()
+            except Exception as error:
+                input_failures.append(error)
+            finally:
+                try:
+                    pipe.close()
+                except Exception as error:
+                    input_failures.append(error)
         readers=[threading.Thread(target=drain,args=(name,),daemon=True)
                  for name in ('stdout','stderr')]
         writer=threading.Thread(target=send,daemon=True)
+        io_threads=[*readers,writer]
         attach(process)
     except BaseException:
         # 从 Popen 到 attach 的任何异常都不能留下仍挂起的创建窗口孤儿。
@@ -135,7 +142,7 @@ def run_cli_process(command, *, cwd, env, input, capture_output=True, text=True,
                 stopped=stopped or 'call_timeout'
                 status='stopped'
                 break
-            if process.poll() is not None and all(not t.is_alive() for t in readers):break
+            if process.poll() is not None and all(not t.is_alive() for t in io_threads):break
             time.sleep(.05)
         if stopped:
             if not terminate(process):
@@ -145,7 +152,7 @@ def run_cli_process(command, *, cwd, env, input, capture_output=True, text=True,
                     try:os.killpg(process.pid, signal.SIGKILL)
                     except ProcessLookupError:pass
             process.wait(timeout=10)
-        for thread in [*readers,writer]:thread.join(5)
+        for thread in io_threads:thread.join(5)
         if any(t.is_alive() for t in readers):raise OSError('CLI 管道未关闭')
         if failures:raise OSError('CLI 实时日志记录失败：'+str(failures[0]))
         stdout,stderr=buffers['stdout'].getvalue(),buffers['stderr'].getvalue()
@@ -153,6 +160,10 @@ def run_cli_process(command, *, cwd, env, input, capture_output=True, text=True,
             error=subprocess.TimeoutExpired(command,timeout,output=stdout,stderr=stderr)
             error.stop_reason=stopped
             raise error
+        # 非零退出的 stdout/stderr 仍交给适配器诊断；输入未写完时不能采信零退出码。
+        if process.returncode == 0 and input_failures:
+            error=input_failures[0]
+            raise OSError(f'CLI 输入写入失败：{error}') from error
         return subprocess.CompletedProcess(command,process.returncode,
             stdout if text else stdout.encode(encoding),stderr if text else stderr.encode(encoding))
     finally:
@@ -185,7 +196,7 @@ def run_cli_process(command, *, cwd, env, input, capture_output=True, text=True,
                 cleanup_errors.append(error)
             finally:
                 close_unclaimed_pipes(cleanup_errors)
-                for thread in [*readers,writer]:
+                for thread in io_threads:
                     if thread.ident is not None:
                         try:thread.join(2)
                         except BaseException as error:cleanup_errors.append(error)
