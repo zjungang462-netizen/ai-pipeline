@@ -1,0 +1,48 @@
+{
+  "date": "2026-11-20",
+  "version": "0.5.5",
+  "verified_product_commit": "6944f045a2b5402cac58ac4532542ef8371e0e1a",
+  "ci": {
+    "run_id": 44579229092,
+    "conclusion": "success",
+    "python_3_11_tests": 160,
+    "python_3_11_duration_s": 16.406,
+    "python_3_13_tests": 160,
+    "python_3_13_duration_s": 15.103,
+    "offline_benchmark_expectations_met_each": 5
+  },
+  "package": {
+    "run_id": 44579632014,
+    "conclusion": "success",
+    "artifact_id": 14558767628,
+    "artifact_sha256": "2d90da649b2cdf01ed5caa57326e89179f0f1cfd6be9bb8823e9756177a519ca",
+    "filename": "agent-orchestrator-0.5.5-6944f045.zip",
+    "sha256": "aa7246abe00cd6da3230da1a17c04e4dae88045149305ddf1fc15b09b6e4203f",
+    "source_files_verified_against_git": 205,
+    "source_full_tests": 657,
+    "source_full_duration_s": 218.219,
+    "unpacked_full_tests": 657,
+    "unpacked_full_duration_s": 207.859,
+    "failures": 0,
+    "errors": 0,
+    "skipped": 0,
+    "source_unchanged": true,
+    "published_github_release": false
+  },
+  "deployment": {
+    "runtime_files_compared": 68,
+    "runtime_matches_remote_package": true,
+    "automatic_task_recovery": false
+  },
+  "preserved_failure": {
+    "run_id": 44576477097,
+    "commit": "ebc0b72a28673c1f42ec9b9a4f087b893cda653b",
+    "full_tests": 657,
+    "failures": 0,
+    "errors": 1,
+    "category": "test_assumed_relative_label_was_not_redacted",
+    "runtime_redaction_weakened": false
+  },
+  "local_evidence": "D:/work/ai-pipeline-delivery-20261120/remote-release/6944f045a2b5/verified.json",
+  "scope": "fixed_product_commit; subsequent_root_delivery_records_do_not_change_product_source"
+}
