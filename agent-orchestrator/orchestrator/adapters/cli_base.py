@@ -261,13 +261,22 @@ class CLIAdapter(Adapter):
                     value = value.replace(secret, '[REDACTED]')
             return value
         try:
-            proc = run_cli_process(
-                [exe, *args], cwd=str(workdir), env=env,
-                input=stdin_data,
-                capture_output=True, text=True, encoding="utf-8",
-                errors="replace", timeout=ctx.timeout_s or self.timeout_s,
-                trace=trace,
-            )
+            try:
+                proc = run_cli_process(
+                    [exe, *args], cwd=str(workdir), env=env,
+                    input=stdin_data,
+                    capture_output=True, text=True, encoding="utf-8",
+                    errors="replace", timeout=ctx.timeout_s or self.timeout_s,
+                    trace=trace,
+                )
+            except BaseException as primary:
+                # 进程未启动时也收尾；收尾失败不能覆盖启动异常或超时原因。
+                try:
+                    trace.finish('stopped' if trace.reason else 'exited')
+                except Exception as error:
+                    primary.add_note(f'CLI 遥测收尾失败：{type(error).__name__}: {error}')
+                raise
+            trace.finish('stopped' if trace.reason else 'exited')
         except subprocess.TimeoutExpired as e:
             usage=_merge_observed_usage(partial_usage(scrub(e.stdout)),trace.ledger.snapshot())
             usage['usage_unknown']=True
@@ -281,8 +290,6 @@ class CLIAdapter(Adapter):
             usage={**trace.ledger.snapshot(),'usage_unknown':True}
             return Result(ok=False, exit_code=-1, error_kind=ErrorKind.CRASH,
                           channel=self.channel, stderr=scrub(str(e)), usage=usage)
-        finally:
-            trace.finish('exited' if not trace.reason else 'stopped')
         proc.stdout, proc.stderr = scrub(proc.stdout), scrub(proc.stderr)
         result=self._parse(proc, workdir, ctx)
         # 最后一个无换行事件在 finish 才解析，护栏结论仍须覆盖退出码 0。

@@ -362,14 +362,29 @@ class CLITrace:
     def finish(self,status,reason=''):
         with self.lock:
             if self.closed:return
-            if self.lines and not self.dropping_line:self._event(self.lines)
-            if self.channel=='cli_codex':self._codex_stderr('',final=True)
-            for name,redactor in self.redactors.items():self._write(name,redactor.feed('',final=True))
-            self.status='stopped' if status=='exited' and self.reason else status
-            self.reason=self.reason or reason
-            self._save(force=True)
-            for stream in self.files.values():stream.close()
-            self.closed=True
+            failures=[]
+            try:
+                if self.lines and not self.dropping_line:self._event(self.lines)
+                if self.channel=='cli_codex':self._codex_stderr('',final=True)
+                for name,redactor in self.redactors.items():self._write(name,redactor.feed('',final=True))
+                self.status='stopped' if status=='exited' and self.reason else status
+                self.reason=self.reason or reason
+                self._save(force=True)
+            except BaseException as error:
+                failures.append(error)
+            finally:
+                # 即使持久化失败也要释放所有日志；随后再次 finish 不重放尾部事件。
+                self.closed=True
+                for stream in self.files.values():
+                    try:
+                        stream.close()
+                    except BaseException as error:
+                        failures.append(error)
+            if failures:
+                primary,*other_failures=failures
+                for error in other_failures:
+                    primary.add_note(f'关闭 CLI 日志失败：{type(error).__name__}: {error}')
+                raise primary
 
 
 def partial_usage(stdout):

@@ -15,7 +15,7 @@ from orchestrator.adapters.cli_codex import CodexAdapter
 from orchestrator.adapters.factory import build_all
 from orchestrator.cli_telemetry import CLITrace,StreamRedactor,UsageLedger,partial_usage
 from orchestrator.config import parse_config
-from orchestrator.contracts import RunContext,Result
+from orchestrator.contracts import ErrorKind,RunContext,Result
 from orchestrator.engine import Engine,BudgetExceeded
 from orchestrator import artifacts,recovery
 from orchestrator.cli_accounting import recover_pending_usage
@@ -74,6 +74,57 @@ class CLIReliability(EvidenceTestCase):
             redactor=StreamRedactor(keys)
             result=''.join(redactor.feed(text[i:i+chunk_size]) for i in range(0,len(text),chunk_size))+redactor.feed('',final=True)
             self.assertEqual(result,'prefix [REDACTED] middle [REDACTED] suffix')
+
+    def test_trace_finish_releases_both_logs_and_preserves_first_error(self):
+        for save_fails in (False,True):
+            with self.subTest(save_fails=save_fails):
+                trace=CLITrace(self.ctx())
+                trace.feed('stdout','first log\n')
+                trace.feed('stderr','second log\n')
+                stdout,stderr=trace.files['stdout'],trace.files['stderr']
+                self.addCleanup(stdout.close)
+                self.addCleanup(stderr.close)
+                close_stdout=stdout.close
+                close_error=OSError('日志关闭失败')
+                save_error=OSError('快照写入失败')
+
+                def close_then_fail():
+                    close_stdout()
+                    raise close_error
+
+                with mock.patch.object(stdout,'close',side_effect=close_then_fail) as close, \
+                        mock.patch('orchestrator.cli_telemetry.atomic_write_json',
+                                   side_effect=save_error if save_fails else None) as save:
+                    with self.assertRaises(OSError) as raised:
+                        trace.finish('exited')
+                    self.assertIs(raised.exception,save_error if save_fails else close_error)
+                    if save_fails:
+                        self.assertIn(str(close_error),'\n'.join(raised.exception.__notes__))
+                    self.assertTrue(trace.closed)
+                    self.assertTrue(stdout.closed and stderr.closed)
+                    trace.finish('exited')
+                    close.assert_called_once()
+                    save.assert_called_once()
+
+    def test_adapter_preserves_execution_failure_when_trace_finish_also_fails(self):
+        adapter=AgyAdapter('fixture')
+        adapter._resolved='fixture';adapter._version='fixture 1.0'
+        timeout=subprocess.TimeoutExpired(['fixture'],3,stderr=b'partial stderr')
+        timeout.stop_reason='idle_timeout'
+        for error,kind,message in ((FileNotFoundError('CLI 启动失败'),ErrorKind.CRASH,'CLI 启动失败'),
+                                   (timeout,ErrorKind.TIMEOUT,'idle_timeout')):
+            with self.subTest(kind=kind), \
+                    mock.patch('orchestrator.adapters.cli_base.run_cli_process',side_effect=error), \
+                    mock.patch('orchestrator.cli_telemetry.atomic_write_json',
+                               side_effect=OSError('快照写入失败')) as save:
+                result=adapter._exec([],self.workspace,self.ctx())
+                self.assertFalse(result.ok)
+                self.assertEqual(result.error_kind,kind)
+                self.assertIn(message,result.stderr)
+                if error is timeout:
+                    self.assertIn('partial stderr',result.stderr)
+                self.assertTrue(result.usage['usage_unknown'])
+                save.assert_called_once()
 
     def test_partial_ledger_deduplicates_steps_and_final_total(self):
         ledger=UsageLedger()
