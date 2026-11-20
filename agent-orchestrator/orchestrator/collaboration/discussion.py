@@ -42,11 +42,12 @@ def capture(run):
     commit = next((s['commit'] for s in reversed(list(record['stages'].values())) if s['commit']), None)
     if commit:
         from .. import artifacts
+        git = artifacts.GitContext(cfg.git_exe)
         names = sorted({name for s in cfg.stages for name in s.context_files})[:4]
         for name in names:
             if remaining <= 0:
                 break
-            result = artifacts._git(['show', f'{commit}:{name}'], cfg.task_workdir, check=False)
+            result = artifacts._git(['show', f'{commit}:{name}'], cfg.task_workdir, check=False, git=git)
             if result.returncode == 0:
                 body = result.stdout[:min(1200, remaining)]
                 remaining -= len(body)

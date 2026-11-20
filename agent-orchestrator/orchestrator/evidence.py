@@ -3,8 +3,12 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 from .state import atomic_write_json, sha256_file, sha256_text
+
+if TYPE_CHECKING:
+    from .artifacts import GitContext
 
 METADATA = {"manifest.json", "success.json", "decision.json", "approval.json", "execution.json"}
 
@@ -26,7 +30,7 @@ def digest(manifest: dict) -> str:
 
 
 def seal(directory: Path, repo: Path | None = None,
-         commit: str | None = None) -> str:
+         commit: str | None = None, *, git: GitContext | None = None) -> str:
     directory = Path(directory)
     files = {p.name: sha256_file(p) for p in sorted(directory.iterdir())
              if p.is_file() and p.name not in METADATA and ".tmp." not in p.name}
@@ -34,7 +38,7 @@ def seal(directory: Path, repo: Path | None = None,
     if commit and repo:
         from .artifacts import tree_content_hash
         manifest["code"] = {"repository": str(repo.resolve()),
-                            "commit": commit, "tree": tree_content_hash(repo, commit)}
+                            "commit": commit, "tree": tree_content_hash(repo, commit, git=git)}
     elif (directory / "manifest.json").is_file():
         old = json.loads((directory / "manifest.json").read_text(encoding="utf-8"))
         if isinstance(old, dict) and isinstance(old.get("code"), dict):
@@ -43,7 +47,7 @@ def seal(directory: Path, repo: Path | None = None,
     return digest(manifest)
 
 
-def validate(directory: Path, record: dict) -> bool:
+def validate(directory: Path, record: dict, *, git: GitContext | None = None) -> bool:
     try:
         manifest = json.loads((directory / "manifest.json").read_text(encoding="utf-8"))
         if not isinstance(manifest, dict) or not isinstance(manifest.get("files"), dict):
@@ -68,7 +72,7 @@ def validate(directory: Path, record: dict) -> bool:
             if not code or code["commit"] != record["commit_sha"]:
                 return False
             from .artifacts import tree_content_hash
-            if tree_content_hash(Path(code["repository"]), code["commit"]) != code["tree"]:
+            if tree_content_hash(Path(code["repository"]), code["commit"], git=git) != code["tree"]:
                 return False
         return True
     except (OSError, ValueError, KeyError, TypeError, RuntimeError):

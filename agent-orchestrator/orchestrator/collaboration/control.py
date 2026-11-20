@@ -96,7 +96,7 @@ class Control:
                         directory = state.current_attempt_dir(spec.name)
                         record = {'n': stage.current_attempt, 'inputs_hash': stage.inputs_hash,
                                   'outputs_hash': stage.outputs_hash, 'commit_sha': stage.commit_sha}
-                        if not directory or not approved(directory, record) or not validate(directory, record):
+                        if not directory or not approved(directory, record) or not validate(directory, record, git=engine.git):
                             raise ValueError('不存在有效的待审批产物')
                     elif not engine._approve_owned(spec.name):
                         raise ValueError('产物完整性或输入校验未通过')

@@ -51,11 +51,11 @@ class ArchiveOperations:
                 return sha
         if not self.config.task_workdir.is_dir():
             return None
-        return artifacts.head_sha(self.config.task_workdir)
+        return artifacts.head_sha(self.config.task_workdir, git=self.git)
 
     def _cleanup_worktree(self, worktree: Path | None) -> None:
         if worktree is not None and self._git_ready:
-            if not artifacts.remove_worktree(self.config.task_workdir, worktree):
+            if not artifacts.remove_worktree(self.config.task_workdir, worktree, git=self.git):
                 self.state.log_event("worktree_cleanup_failed", "",
                                      path=str(worktree))
                 self.state.save()
@@ -74,18 +74,18 @@ class ArchiveOperations:
             # 按变更清单提交（评审 B4），不用 git add -A 全仓
             files = result.changed_files
             if worktree is not None:
-                wt_sha = artifacts.commit_files(worktree, files, f"{spec.name}: {self.task[:40]}")
-                branch = artifacts._git(["rev-parse", "--abbrev-ref", "HEAD"], worktree).stdout.strip()
-                if wt_sha is None and artifacts.head_sha(worktree) == base_sha:
+                wt_sha = artifacts.commit_files(worktree, files, f"{spec.name}: {self.task[:40]}", git=self.git)
+                branch = artifacts._git(["rev-parse", "--abbrev-ref", "HEAD"], worktree, git=self.git).stdout.strip()
+                if wt_sha is None and artifacts.head_sha(worktree, git=self.git) == base_sha:
                     raise StageArchiveError("代码未发生变化，无法视为一次修复")
                 try:
-                    commit_sha = artifacts.merge_branch(repo, branch)
+                    commit_sha = artifacts.merge_branch(repo, branch, git=self.git)
                 except artifacts.GitError as e:
                     # 快进合并失败（主线已分叉）=> 本阶段失败，不中断整轮
                     raise StageArchiveError(f"合并 {branch} 失败: {e}") from e
                 result.branch = branch
             else:
-                commit_sha = artifacts.commit_files(repo, files, f"{spec.name}: {self.task[:40]}")
+                commit_sha = artifacts.commit_files(repo, files, f"{spec.name}: {self.task[:40]}", git=self.git)
                 if commit_sha is None:
                     raise StageArchiveError("代码未发生变化，无法视为一次修复")
                 result.branch = f"stage/{spec.name}"
@@ -120,4 +120,4 @@ class ArchiveOperations:
                 'scope': 'injected_prompt_files_only', 'channel': result.channel,
                 'cli_extra_reads_verified': False})
         from .evidence import seal
-        return seal(attempt_dir, self.config.task_workdir, result.commit_sha)
+        return seal(attempt_dir, self.config.task_workdir, result.commit_sha, git=self.git)

@@ -53,7 +53,8 @@ class Engine(GuardControls, StageExecutor, ReviewPolicy, BudgetPolicy, ArchiveOp
         self.adapters = adapters
         self.run_id = run_id
         self.task = task
-        self.state = RunState(config.state_dir, run_id)
+        self.git = artifacts.GitContext(config.git_exe)
+        self.state = RunState(config.state_dir, run_id, git=self.git)
         self.state.task = task
         self._adapter_factory = adapter_factory
         self.control = control
@@ -67,8 +68,7 @@ class Engine(GuardControls, StageExecutor, ReviewPolicy, BudgetPolicy, ArchiveOp
         self._review_missing: dict[str, list[str]] = {}
         self._review_context_cache = {}
         # G1：应用配置的 git 路径后再探测（PATH 无 git 时走兜底）
-        artifacts.set_git_exe(config.git_exe)
-        self._git_ready = artifacts.git_available()
+        self._git_ready = artifacts.git_available(self.git)
 
     @contextmanager
     def _ownership(self):
@@ -101,6 +101,7 @@ class Engine(GuardControls, StageExecutor, ReviewPolicy, BudgetPolicy, ArchiveOp
     def prepare(self) -> None:
         self._review_context_cache.clear()
         self._review_workspace_hash = None
+        self.git.baselines.clear()
         loaded = self.state.load()
         if not loaded:
             for s in self.config.stages:
@@ -151,11 +152,11 @@ class Engine(GuardControls, StageExecutor, ReviewPolicy, BudgetPolicy, ArchiveOp
         if self._git_ready and has_code:
             # 既有非 git 工作区首次初始化时把已有文件提交为基线，避免 coding
             # worktree 合并回主线时因 untracked 文件永久失败（P2-8）。
-            artifacts.ensure_repo(self.config.task_workdir, exclude=self.config.state_dir)
+            artifacts.ensure_repo(self.config.task_workdir, exclude=self.config.state_dir, git=self.git)
             if self.config.autonomy.enabled and not loaded:
                 self._bootstrap_declared_files()
             if not loaded:
-                self.state.control['project_baseline'] = artifacts.head_sha(self.config.task_workdir)
+                self.state.control['project_baseline'] = artifacts.head_sha(self.config.task_workdir, git=self.git)
                 self.state.save()
 
 
@@ -311,7 +312,7 @@ class Engine(GuardControls, StageExecutor, ReviewPolicy, BudgetPolicy, ArchiveOp
                 and st.status.value == deferred["outcome"]
                 and saved == deferred
                 and directory is not None
-                and validate(directory, record)
+                and validate(directory, record, git=self.git)
                 and self._inputs_hash(spec, index) == st.inputs_hash
             )
         except (OSError, ValueError, TypeError, KeyError, RuntimeError):
@@ -374,7 +375,7 @@ class Engine(GuardControls, StageExecutor, ReviewPolicy, BudgetPolicy, ArchiveOp
                      and success.get("inputs_hash") == current_hash
                      and all(decision.get(key) == success.get(key)
                              for key in ("n", "inputs_hash", "outputs_hash"))
-                     and validate(directory, record))
+                     and validate(directory, record, git=self.git))
         except (OSError, ValueError, TypeError, KeyError, RuntimeError):
             valid = False
             deferred = {}
@@ -433,7 +434,7 @@ class Engine(GuardControls, StageExecutor, ReviewPolicy, BudgetPolicy, ArchiveOp
                 or pending.get("n", st.current_attempt) != st.current_attempt
                 or pending.get("inputs_hash", st.inputs_hash) != st.inputs_hash
                 or not live_inputs_ok
-                or not validate(directory, record)):
+                or not validate(directory, record, git=self.git)):
             self.state.log_event("approval_rejected", stage_name, reason="产物已变更")
             self.state.save()
             return False

@@ -8,6 +8,7 @@ G5 CLI 适配器按 ctx.kind 为 report/review 写报告文件。
 from __future__ import annotations
 
 import tempfile
+import subprocess
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -26,16 +27,15 @@ from orchestrator.adapters.cli_dsh import DshAdapter
 class TestG1Git(unittest.TestCase):
     def test_git_fallback_when_not_in_path(self):
         # 模拟 PATH 无 git，但兜底路径有可用 git
-        artifacts.set_git_exe(None)
+        git = artifacts.GitContext()
         with mock.patch("orchestrator.artifacts.shutil.which", return_value=None), \
              mock.patch("orchestrator.artifacts._git_fallback_paths",
                         return_value=["/fake/git"]), \
              mock.patch("orchestrator.artifacts.Path.is_file", return_value=True), \
              mock.patch("orchestrator.artifacts.subprocess.run") as m:
             m.return_value = mock.Mock(returncode=0)
-            self.assertTrue(artifacts.git_available())
-            self.assertEqual(artifacts.resolve_git(), "/fake/git")
-        artifacts.set_git_exe(None)  # 复位
+            self.assertTrue(artifacts.git_available(git))
+            self.assertEqual(artifacts.resolve_git(git), "/fake/git")
 
     def test_code_stage_fails_loudly_without_git(self):
         with tempfile.TemporaryDirectory() as d:
@@ -60,6 +60,56 @@ class TestG1Git(unittest.TestCase):
                    "adapters": {"f": {"type": "fake"}}}
             cfg = parse_config(raw, base_dir=Path(d))
             self.assertEqual(cfg.git_exe, "/custom/git")
+
+    def test_interleaved_engines_use_their_own_git_for_archive_and_resume(self):
+        executable = artifacts.resolve_git()
+        if not executable:
+            self.skipTest('需要实际 Git 仓库验证证据复用')
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d)
+            aliases = [root / 'git-a.exe', root / 'git-b.exe']
+            for alias in aliases:
+                alias.touch()
+            used = []
+            execute = subprocess.run
+
+            def route(argv, **kwargs):
+                used.append(argv[0])
+                self.assertIn(argv[0], [str(alias) for alias in aliases])
+                return execute([executable, *argv[1:]], **kwargs)
+
+            def make(index):
+                cfg = parse_config({
+                    'task_workdir': f'ws{index}', 'state_dir': f'state{index}',
+                    'git_exe': str(aliases[index]),
+                    'stages': [{'name': 'coding', 'adapter': 'fake', 'prompt': 'x', 'kind': 'code'}],
+                    'adapters': {'fake': {'type': 'fake'}},
+                }, base_dir=root)
+                return Engine(cfg, {'fake': FakeAdapter(kind='code')}, 'run', 'task')
+
+            with mock.patch.object(artifacts.subprocess, 'run', side_effect=route):
+                first, second = make(0), make(1)
+                for index, engine in ((0, first), (1, second), (0, first)):
+                    used.clear()
+                    self.assertEqual(engine.run()['coding'], 'done')
+                    self.assertTrue(used)
+                    self.assertEqual(set(used), {str(aliases[index])})
+                self.assertEqual(first.adapters['fake'].calls, 1)
+                self.assertEqual(second.adapters['fake'].calls, 1)
+
+    def test_new_git_context_resolves_root_after_branch_replacement(self):
+        if not artifacts.git_available():
+            self.skipTest('需要实际 Git 仓库验证根提交')
+        with tempfile.TemporaryDirectory() as d:
+            repo = Path(d)
+            previous = artifacts.GitContext()
+            artifacts.ensure_repo(repo, git=previous)
+            first = artifacts.baseline_sha(repo, git=previous)
+            new_head = artifacts._git(['commit-tree', 'HEAD^{tree}', '-m', 'new root'], repo,
+                                      git=previous).stdout.strip()
+            artifacts._git(['update-ref', 'HEAD', new_head], repo, git=previous)
+            self.assertNotEqual(first, new_head)
+            self.assertEqual(artifacts.baseline_sha(repo, git=artifacts.GitContext()), new_head)
 
 
 class TestG2WriteRoot(unittest.TestCase):

@@ -188,10 +188,10 @@ class Round4(unittest.TestCase):
         adapter=FakeAdapter(kind='code')
         engine=Engine(cfg,{'fake':adapter},'run','task')
         original=artifacts.add_worktree
-        def add(repo,base,branch,worktree):
+        def add(repo,base,branch,worktree,*,git=None):
             if branch.startswith('verify/'):
                 raise artifacts.GitError('injected worktree setup failure')
-            return original(repo,base,branch,worktree)
+            return original(repo,base,branch,worktree,git=git)
         with mock.patch('orchestrator.engine.artifacts.add_worktree',side_effect=add),mock.patch(
                 'orchestrator.testrun.run_test_cmd',side_effect=AssertionError('must not execute fallback')):
             self.assertEqual(engine.run()['testing'],'failed')

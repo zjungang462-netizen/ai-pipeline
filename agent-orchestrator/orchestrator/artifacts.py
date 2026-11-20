@@ -20,16 +20,13 @@ class GitError(RuntimeError):
     pass
 
 
-# 可配置 git 可执行文件路径（config.git_exe）；空则自动解析
-_GIT_EXE: str | None = None
-_GIT_RESOLVED: str | None = None
+class GitContext:
+    """为一次运行或只读操作保存 Git 可执行文件与基线。"""
 
-
-def set_git_exe(path: str | None) -> None:
-    """设置 git 可执行文件路径（来自配置）。设后重新解析。"""
-    global _GIT_EXE, _GIT_RESOLVED
-    _GIT_EXE = path or None
-    _GIT_RESOLVED = None
+    def __init__(self, configured: str | None = None):
+        self.configured = configured
+        self.executable: str | None = None
+        self.baselines: dict[Path, str] = {}
 
 
 def _git_registry_paths() -> list[str]:
@@ -70,14 +67,13 @@ def _git_fallback_paths() -> list[str]:
     return cands
 
 
-def resolve_git() -> str | None:
+def resolve_git(git: GitContext | None = None) -> str | None:
     """解析 git：配置路径 > PATH > 常见安装位置。返回可用 exe 或 None。"""
-    global _GIT_RESOLVED
-    if _GIT_RESOLVED is not None:
-        return _GIT_RESOLVED
+    if git is not None and git.executable is not None:
+        return git.executable
     candidates: list[str] = []
-    if _GIT_EXE:
-        candidates.append(_GIT_EXE)
+    if git is not None and git.configured:
+        candidates.append(git.configured)
     found = shutil.which("git")
     if found:
         candidates.append(found)
@@ -90,7 +86,8 @@ def resolve_git() -> str | None:
                 proc = subprocess.run([cand, "--version"], capture_output=True,
                                       text=True, timeout=15)
                 if proc.returncode == 0:
-                    _GIT_RESOLVED = cand
+                    if git is not None:
+                        git.executable = cand
                     return cand
             except (OSError, subprocess.TimeoutExpired):
                 continue
@@ -105,10 +102,11 @@ def _no_hooks_dir() -> str:
 
 
 def _git(args: list[str], cwd: Path, check: bool = True,
-         timeout: int = 120, *, stdin: str | None = None) -> subprocess.CompletedProcess:
+         timeout: int = 120, *, stdin: str | None = None,
+         git: GitContext | None = None) -> subprocess.CompletedProcess:
     """git 子进程：env 白名单（不透传 API Key）+ 超时 + 禁用 hook。"""
     from .safety import build_subprocess_env
-    exe = resolve_git() or "git"
+    exe = resolve_git(git) or "git"
     cmd = [exe, "-c", f"core.hooksPath={_no_hooks_dir()}", *args]
     try:
         proc = subprocess.run(
@@ -124,11 +122,11 @@ def _git(args: list[str], cwd: Path, check: bool = True,
     return proc
 
 
-def git_available() -> bool:
-    return resolve_git() is not None
+def git_available(git: GitContext | None = None) -> bool:
+    return resolve_git(git) is not None
 
 
-def ensure_repo(workdir: Path, exclude: Path | None = None) -> None:
+def ensure_repo(workdir: Path, exclude: Path | None = None, *, git: GitContext | None = None) -> None:
     """确保 workdir 是一个 git 仓库（含初始提交）。
 
     首次初始化时把工作区已有文件（跳过隐藏目录、缓存目录与 exclude）提交为
@@ -139,56 +137,56 @@ def ensure_repo(workdir: Path, exclude: Path | None = None) -> None:
     workdir = Path(workdir)
     workdir.mkdir(parents=True, exist_ok=True)
     if not (workdir / ".git").exists():
-        _git(["init", "-q"], workdir)
-        _git(["config", "user.email", "orchestrator@local"], workdir)
-        _git(["config", "user.name", "orchestrator"], workdir)
+        _git(["init", "-q"], workdir, git=git)
+        _git(["config", "user.email", "orchestrator@local"], workdir, git=git)
+        _git(["config", "user.name", "orchestrator"], workdir, git=git)
     # 无任何提交时建基线：有既有文件就提交清单，否则空提交。
-    head = _git(["rev-parse", "--verify", "HEAD"], workdir, check=False)
+    head = _git(["rev-parse", "--verify", "HEAD"], workdir, check=False, git=git)
     if head.returncode != 0:
         existing = [p.relative_to(workdir).as_posix()
                     for p in workspace_files(workdir, exclude=exclude)]
         if existing:
-            commit_files(workdir, existing, "baseline: existing workspace")
-        head = _git(["rev-parse", "--verify", "HEAD"], workdir, check=False)
+            commit_files(workdir, existing, "baseline: existing workspace", git=git)
+        head = _git(["rev-parse", "--verify", "HEAD"], workdir, check=False, git=git)
         if head.returncode != 0:
-            _git(["commit", "-q", "--allow-empty", "-m", "baseline"], workdir)
+            _git(["commit", "-q", "--allow-empty", "-m", "baseline"], workdir, git=git)
 
 
-def head_sha(workdir: Path) -> str:
-    return _git(["rev-parse", "HEAD"], workdir).stdout.strip()
+def head_sha(workdir: Path, *, git: GitContext | None = None) -> str:
+    return _git(["rev-parse", "HEAD"], workdir, git=git).stdout.strip()
 
 
-def changed_files_since(workdir: Path, base_sha: str) -> list[str]:
+def changed_files_since(workdir: Path, base_sha: str, *, git: GitContext | None = None) -> list[str]:
     """相对基线的变更文件（含工作区未提交改动）。"""
-    out = _git(["diff", "--name-only", "-z", base_sha], workdir).stdout
+    out = _git(["diff", "--name-only", "-z", base_sha], workdir, git=git).stdout
     files = [name for name in out.split("\0") if name]
     # 未跟踪文件也算变更
-    untracked = _git(["ls-files", "-z", "--others", "--exclude-standard"], workdir).stdout
+    untracked = _git(["ls-files", "-z", "--others", "--exclude-standard"], workdir, git=git).stdout
     files += [name for name in untracked.split("\0") if name]
     return sorted(set(files))
 
 
-def add_worktree(repo: Path, base_sha: str, branch: str, dest: Path) -> Path:
+def add_worktree(repo: Path, base_sha: str, branch: str, dest: Path, *, git: GitContext | None = None) -> Path:
     """基于上游 commit 拉新分支建 worktree（评审 B3：非基于主干）。"""
     dest = Path(dest)
     dest.parent.mkdir(parents=True, exist_ok=True)
-    _git(["worktree", "add", "-q", "-b", branch, str(dest), base_sha], repo)
+    _git(["worktree", "add", "-q", "-b", branch, str(dest), base_sha], repo, git=git)
     return dest
 
 
-def remove_worktree(repo: Path, dest: Path) -> bool:
+def remove_worktree(repo: Path, dest: Path, *, git: GitContext | None = None) -> bool:
     """移除 worktree；失败时 prune 失效登记并返回 False（由调用方告警）。"""
-    proc = _git(["worktree", "remove", "--force", str(dest)], repo, check=False)
+    proc = _git(["worktree", "remove", "--force", str(dest)], repo, check=False, git=git)
     if proc.returncode != 0:
-        _git(["worktree", "prune"], repo, check=False)
+        _git(["worktree", "prune"], repo, check=False, git=git)
         return False
     return True
 
 
-def merge_branch(repo: Path, branch: str) -> str:
+def merge_branch(repo: Path, branch: str, *, git: GitContext | None = None) -> str:
     """把阶段分支合并回主线（快进），返回合并后 HEAD。"""
-    _git(["merge", "--ff-only", "-q", branch], repo)
-    return head_sha(repo)
+    _git(["merge", "--ff-only", "-q", branch], repo, git=git)
+    return head_sha(repo, git=git)
 
 
 def report_hashes(files: list[Path]) -> dict[str, str]:
@@ -258,7 +256,7 @@ def _is_git_dir_part(part: str) -> bool:
     return is_git_component(part)
 
 
-def commit_files(workdir: Path, files: list[str], message: str) -> str | None:
+def commit_files(workdir: Path, files: list[str], message: str, *, git: GitContext | None = None) -> str | None:
     """按清单提交（评审 B4）：只 git add 指定文件，不用 add -A 全仓。
 
     files 为相对 workdir 的路径。清单为空或无实际改动返回 None。
@@ -269,20 +267,20 @@ def commit_files(workdir: Path, files: list[str], message: str) -> str | None:
     bad = unsafe_rel_paths(files)
     if bad:
         raise GitError(f"拒绝提交越界或 .git 路径: {bad[:5]}")
-    _git(["add", "--", *files], workdir)
+    _git(["add", "--", *files], workdir, git=git)
     # 只检查清单内文件是否真的有暂存改动；索引里其它无关暂存不能让
     # “声明文件无改动”也走到 commit（否则 git commit --only 会报错）。
-    staged = _git(["diff", "--cached", "--name-only", "--", *files], workdir).stdout.strip()
+    staged = _git(["diff", "--cached", "--name-only", "--", *files], workdir, git=git).stdout.strip()
     if not staged:
         return None
-    _git(["commit", "-q", "--only", "-m", message, "--", *files], workdir)
-    return head_sha(workdir)
+    _git(["commit", "-q", "--only", "-m", message, "--", *files], workdir, git=git)
+    return head_sha(workdir, git=git)
 
 
-def untracked_outside(workdir: Path, declared: list[str]) -> list[str]:
+def untracked_outside(workdir: Path, declared: list[str], *, git: GitContext | None = None) -> list[str]:
     """检测清单之外的未跟踪/改动文件（评审 B4：越界改动告警）。"""
     declared_set = {f.replace("\\", "/") for f in declared}
-    changed = changed_files_since(workdir, head_sha(workdir))
+    changed = changed_files_since(workdir, head_sha(workdir, git=git), git=git)
     return [f for f in changed if f.replace("\\", "/") not in declared_set]
 
 
@@ -313,12 +311,12 @@ def snapshot_files(workdir: Path) -> set[str]:
     return out
 
 
-def diff_summary(workdir: Path, commit_sha: str, max_lines: int = 200) -> str:
+def diff_summary(workdir: Path, commit_sha: str, max_lines: int = 200, *, git: GitContext | None = None) -> str:
     """上游代码变更摘要（评审 B1）：相对父提交的 diff，截断防超长。"""
-    proc = _git(["diff", f"{commit_sha}~1", commit_sha], workdir, check=False)
+    proc = _git(["diff", f"{commit_sha}~1", commit_sha], workdir, check=False, git=git)
     if proc.returncode != 0:
         # 无父提交（首个 commit）=> 用 show
-        proc = _git(["show", "--format=", commit_sha], workdir, check=False)
+        proc = _git(["show", "--format=", commit_sha], workdir, check=False, git=git)
     lines = (proc.stdout or "").splitlines()
     if len(lines) > max_lines:
         lines = lines[:max_lines] + [f"...（diff 截断，共 {len(proc.stdout.splitlines())} 行）"]
@@ -382,16 +380,16 @@ def workspace_hash(workdir: Path, exclude: Path | None = None,
     return sha256_text(repr(values))
 
 
-def verified_workspace_tree(workdir: Path, exclude: Path | None = None) -> str | None:
+def verified_workspace_tree(workdir: Path, exclude: Path | None = None, *, git: GitContext | None = None) -> str | None:
     """仅当工作区范围及原始文件字节均与提交树一致时采用树指纹。"""
     root = Path(workdir).resolve()
     if not (root / ".git").exists():
         return None
     try:
-        tree = _git(["rev-parse", "--verify", "HEAD^{tree}"], root).stdout.strip()
+        tree = _git(["rev-parse", "--verify", "HEAD^{tree}"], root, git=git).stdout.strip()
         if not re.fullmatch(r"[0-9a-f]{40}|[0-9a-f]{64}", tree):
             return None
-        listing = _git(["ls-tree", "-r", "-z", "--full-tree", tree], root).stdout
+        listing = _git(["ls-tree", "-r", "-z", "--full-tree", tree], root, git=git).stdout
         blobs = {}
         excluded = Path(exclude).resolve() if exclude else None
         for row in listing.split("\0"):
@@ -415,7 +413,7 @@ def verified_workspace_tree(workdir: Path, exclude: Path | None = None) -> str |
         if paths:
             # 批量重读原文。不使用 Git 的 stat 缓存、ignore 或换行转换来证明内容。
             actual = _git(["hash-object", "--no-filters", "--stdin-paths"], root,
-                          stdin="".join(path.as_posix() + "\n" for path in paths.values()))
+                          stdin="".join(path.as_posix() + "\n" for path in paths.values()), git=git)
             if actual.stdout.splitlines() != [blobs[name] for name in paths]:
                 return None
         return tree
@@ -477,47 +475,42 @@ def existing_code_context_info(workdir: Path, max_file_bytes: int = 12000,
     return "\n\n".join(parts), skipped
 
 
-_BASELINE_CACHE: dict[str, str | None] = {}
-
-
-def baseline_sha(workdir: Path) -> str | None:
-    """项目基线 = 首个（根）提交。累积 diff 以此为起点。
-
-    根提交在仓库生命周期内不变，故缓存以免每次 diff 都跑一次 rev-list。
-    """
-    key = str(Path(workdir).resolve())
-    if key in _BASELINE_CACHE:
-        return _BASELINE_CACHE[key]
-    proc = _git(["rev-list", "--max-parents=0", "HEAD"], workdir, check=False)
+def baseline_sha(workdir: Path, *, git: GitContext | None = None) -> str | None:
+    """没有固定基线时，在当前运行内复用首个根提交。"""
+    key = Path(workdir).resolve()
+    if git is not None and key in git.baselines:
+        return git.baselines[key]
+    proc = _git(["rev-list", "--max-parents=0", "HEAD"], workdir, check=False, git=git)
     result: str | None = None
     if proc.returncode == 0:
         roots = [l.strip() for l in proc.stdout.splitlines() if l.strip()]
         result = roots[0] if roots else None
-    _BASELINE_CACHE[key] = result
+    if git is not None and result is not None:
+        git.baselines[key] = result
     return result
 
 
 def cumulative_diff(workdir: Path, commit_sha: str, max_lines: int = 600,
-                    base_sha: str | None = None) -> str:
+                    base_sha: str | None = None, *, git: GitContext | None = None) -> str:
     """相对项目基线的累积全量 diff + 文件清单（修复 M0）。
 
     审查阶段必须看到完整实现，而非仅末次提交（commit~1..commit）。
     否则返工轮次里审查员只看到增量测试改动，会误判"实现代码缺失"。
     """
     return cumulative_diff_info(workdir, commit_sha, max_lines=max_lines,
-                                base_sha=base_sha)[0]
+                                base_sha=base_sha, git=git)[0]
 
 
 def cumulative_diff_info(workdir: Path, commit_sha: str, max_lines: int = 600,
-                         base_sha: str | None = None) -> tuple[str, int, bool]:
+                         base_sha: str | None = None, *, git: GitContext | None = None) -> tuple[str, int, bool]:
     """同 cumulative_diff，另返回 (文本, diff 总行数, 是否被截断)。"""
-    base = base_sha or baseline_sha(workdir)
+    base = base_sha or baseline_sha(workdir, git=git)
     if base and base != commit_sha:
-        listing = _git(["diff", "--stat", base, commit_sha], workdir, check=False).stdout
-        proc = _git(["diff", base, commit_sha], workdir, check=False)
+        listing = _git(["diff", "--stat", base, commit_sha], workdir, check=False, git=git).stdout
+        proc = _git(["diff", base, commit_sha], workdir, check=False, git=git)
     else:
-        listing = _git(["ls-tree", "-r", "--name-only", commit_sha], workdir, check=False).stdout
-        proc = _git(["show", "--format=", commit_sha], workdir, check=False)
+        listing = _git(["ls-tree", "-r", "--name-only", commit_sha], workdir, check=False, git=git).stdout
+        proc = _git(["show", "--format=", commit_sha], workdir, check=False, git=git)
     body = proc.stdout or ""
     lines = body.splitlines()
     truncated = len(lines) > max_lines
@@ -528,19 +521,19 @@ def cumulative_diff_info(workdir: Path, commit_sha: str, max_lines: int = 600,
     return head + "\n".join(lines), len(body.splitlines()), truncated
 
 
-def changed_files_at(workdir: Path, commit_sha: str, base_sha: str | None = None) -> list[str]:
+def changed_files_at(workdir: Path, commit_sha: str, base_sha: str | None = None, *, git: GitContext | None = None) -> list[str]:
     """相对基线在该 commit 中变更的文件（含新增/修改/删除）。"""
-    base = base_sha or baseline_sha(workdir)
+    base = base_sha or baseline_sha(workdir, git=git)
     if base and base != commit_sha:
-        out = _git(["diff", "--name-only", "-z", base, commit_sha], workdir, check=False).stdout
+        out = _git(["diff", "--name-only", "-z", base, commit_sha], workdir, check=False, git=git).stdout
     else:
-        out = _git(["ls-tree", "-r", "-z", "--name-only", commit_sha], workdir, check=False).stdout
+        out = _git(["ls-tree", "-r", "-z", "--name-only", commit_sha], workdir, check=False, git=git).stdout
     return [name for name in out.split("\0") if name]
 
 
 def review_file_context(workdir: Path, commit_sha: str, paths: list[str],
                         per_file_bytes: int = 24000, total_bytes: int = 180000,
-                        max_files: int = 60) -> tuple[str, list[str]]:
+                        max_files: int = 60, *, git: GitContext | None = None) -> tuple[str, list[str]]:
     """审查上下文：按 commit 读取变更文件全文，返回 (文本, 未纳入文件清单)。
 
     当累积 diff 被截断时使用，避免默认 API 通道（无法读取工作区文件）的
@@ -555,7 +548,7 @@ def review_file_context(workdir: Path, commit_sha: str, paths: list[str],
         if included >= max_files or used >= total_bytes:
             missing.append(rel)
             continue
-        proc = _git(["show", f"{commit_sha}:{rel}"], workdir, check=False)
+        proc = _git(["show", f"{commit_sha}:{rel}"], workdir, check=False, git=git)
         if proc.returncode != 0:
             # 该 commit 中已删除/不可读：由 diff 表达，不算覆盖缺失。
             continue
@@ -577,7 +570,7 @@ def review_file_context(workdir: Path, commit_sha: str, paths: list[str],
     return "\n\n".join(parts), missing
 
 
-def tree_content_hash(workdir: Path, commit_sha: str) -> str:
+def tree_content_hash(workdir: Path, commit_sha: str, *, git: GitContext | None = None) -> str:
     """基于 commit 树对象的内容哈希（评审 B3/S1）。
 
     用 git ls-tree -r -z 列出所有条目的 (mode,type,object) 并排序后哈希，
@@ -585,7 +578,7 @@ def tree_content_hash(workdir: Path, commit_sha: str) -> str:
     时间戳/基线、git 的 core.quotePath 配置无关 => 重跑内容相同则哈希相同。
     """
     out = _git(["ls-tree", "-r", "-z", "--full-tree", commit_sha], workdir,
-               check=False).stdout
+               check=False, git=git).stdout
     entries = []
     for entry in out.split("\0"):
         if not entry or "\t" not in entry:

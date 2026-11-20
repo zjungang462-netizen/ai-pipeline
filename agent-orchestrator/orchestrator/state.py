@@ -16,10 +16,13 @@ import uuid
 import re
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import Any, TYPE_CHECKING
 
 from .contracts import StageStatus
 from .event_journal import append_events, read_events
+
+if TYPE_CHECKING:
+    from .artifacts import GitContext
 
 
 def sha256_text(text: str) -> str:
@@ -286,12 +289,13 @@ class RunState:
         'autonomy', 'test_artifacts', 'test_artifact_hashes', 'revision', 'control',
     }
 
-    def __init__(self, state_dir: Path, run_id: str):
+    def __init__(self, state_dir: Path, run_id: str, *, git: GitContext | None = None):
         if (not isinstance(run_id, str) or not re.fullmatch(r"[\w.-]+", run_id)
                 or ".." in run_id or run_id == "."):
             raise ValueError("run_id 必须是不含路径分隔符的标识符")
         self.state_dir = Path(state_dir)
         self.run_id = run_id
+        self.git = git
         self.run_dir = self.state_dir / "runs" / run_id
         self.state_file = self.run_dir / "state.json"
         self.stages: dict[str, StageState] = {}
@@ -542,7 +546,7 @@ class RunState:
             from .evidence import validate, approved
             n, data = best
             directory = adir / str(n)
-            if not validate(directory, data):
+            if not validate(directory, data, git=self.git):
                 return None
             try:
                 decision = json.loads((directory / "decision.json").read_text(encoding="utf-8"))

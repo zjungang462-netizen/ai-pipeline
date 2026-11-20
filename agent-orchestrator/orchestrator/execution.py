@@ -66,7 +66,7 @@ class StageExecutor:
                 if upstream_sha and self._git_ready:
                     worktree = self.state.stage_dir(spec.name) / "worktree" / str(n)
                     artifacts.add_worktree(workdir, upstream_sha,
-                                           f"verify/{spec.name}/{self.run_id}/{n}", worktree)
+                                           f"verify/{spec.name}/{self.run_id}/{n}", worktree, git=self.git)
                     workdir = worktree
                 record = run_test_cmd(spec.test_cmd, workdir, timeout_s=timeout)
                 if before_workspace is not None:
@@ -191,7 +191,7 @@ class StageExecutor:
                 branch = f"stage/{spec.name}/{self.run_id}/{n}"
                 worktree = self.state.stage_dir(spec.name) / "worktree" / str(n)
                 try:
-                    artifacts.add_worktree(self.config.task_workdir, base_sha, branch, worktree)
+                    artifacts.add_worktree(self.config.task_workdir, base_sha, branch, worktree, git=self.git)
                     workdir = worktree
                 except artifacts.GitError as e:
                     last_error = f"worktree 隔离失败: {e}"
@@ -322,10 +322,10 @@ class StageExecutor:
             # 代码阶段：检测实际变更文件（评审 B4），归一化为相对路径供按清单提交
             bad_paths: list[str] = []
             if spec.kind == "code" and self._git_ready and result.ok:
-                comparison_base = base_sha or artifacts.head_sha(workdir)
+                comparison_base = base_sha or artifacts.head_sha(workdir, git=self.git)
                 observed_changes = None
                 if not result.changed_files:
-                    observed_changes = artifacts.changed_files_since(workdir, comparison_base)
+                    observed_changes = artifacts.changed_files_since(workdir, comparison_base, git=self.git)
                     result.changed_files = observed_changes
                 result.changed_files = artifacts.normalize_rel(workdir, result.changed_files)
                 bad_paths = artifacts.unsafe_rel_paths(result.changed_files)

@@ -39,7 +39,7 @@ def capture(engine,spec,worktree,base,number,attempt_dir,reason):
     if not base or not worktree or not Path(worktree).is_dir():return None
     folder=Path(attempt_dir)/'recovery'
     root=Path(worktree).resolve()
-    names=artifacts.changed_files_since(root,base)
+    names=artifacts.changed_files_since(root,base, git=engine.git)
     if not names:return None
     if len(names)>engine.config.autonomy.repair_batch_size or set(names)-set(engine.config.autonomy.allowed_files):
         raise RecoveryError('未保存恢复点：变更超出本轮白名单或文件批量')
@@ -55,7 +55,7 @@ def capture(engine,spec,worktree,base,number,attempt_dir,reason):
         body=target.read_bytes() if target.is_file() else None
         size+=len(body or b'')
         if size>MAX_TOTAL:raise RecoveryError('恢复点超过6MiB')
-        before=artifacts._git(['rev-parse',f'{base}:{name}'],root,check=False)
+        before=artifacts._git(['rev-parse',f'{base}:{name}'],root,check=False, git=engine.git)
         blob=before.stdout.strip() if before.returncode==0 else None
         filename=f'file-{index}.bin' if body is not None else None
         records.append({'path':name,'before_blob':blob,'content':filename,
@@ -102,7 +102,7 @@ def restore(engine,spec,worktree,base,number,attempt_dir):
     except (OSError,ValueError) as error:raise RecoveryError('恢复点元数据不可读') from error
     if metadata.get('binding')!=binding(engine,spec,base):raise RecoveryError('恢复点的任务、配置、基线或权限已经变化')
     root=Path(worktree).resolve()
-    if artifacts.head_sha(root)!=base or artifacts.changed_files_since(root,base):raise RecoveryError('恢复目标不是干净的原始基线')
+    if artifacts.head_sha(root, git=engine.git)!=base or artifacts.changed_files_since(root,base, git=engine.git):raise RecoveryError('恢复目标不是干净的原始基线')
     items=metadata.get('files')
     if not isinstance(items,list) or not 1<=len(items)<=engine.config.autonomy.repair_batch_size:raise RecoveryError('恢复文件批量无效')
     prepared=[]
@@ -114,7 +114,7 @@ def restore(engine,spec,worktree,base,number,attempt_dir):
         seen.add(name)
         target=relative_target(root,name)
         if target!=(root/Path(name)).absolute() or (root/Path(name)).is_symlink():raise RecoveryError('恢复目标含链接')
-        before=artifacts._git(['rev-parse',f'{base}:{name}'],root,check=False)
+        before=artifacts._git(['rev-parse',f'{base}:{name}'],root,check=False, git=engine.git)
         blob=before.stdout.strip() if before.returncode==0 else None
         if blob!=item.get('before_blob'):raise RecoveryError('恢复目标的源文件版本变化')
         if item.get('deleted'):

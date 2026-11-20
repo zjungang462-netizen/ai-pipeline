@@ -114,11 +114,11 @@ class AutonomousControls:
                     files.append(file.relative_to(self.config.task_workdir).as_posix())
         if files:
             changed = set(artifacts.changed_files_since(self.config.task_workdir,
-                                                       artifacts.head_sha(self.config.task_workdir)))
+                                                       artifacts.head_sha(self.config.task_workdir, git=self.git), git=self.git))
             selected = sorted(changed.intersection(files))
             if selected:
-                artifacts.commit_files(self.config.task_workdir, selected, 'baseline: declared unattended inputs')
-        self.state.autonomy['base_commit'] = artifacts.head_sha(self.config.task_workdir)
+                artifacts.commit_files(self.config.task_workdir, selected, 'baseline: declared unattended inputs', git=self.git)
+        self.state.autonomy['base_commit'] = artifacts.head_sha(self.config.task_workdir, git=self.git)
         self.state.save()
 
     def _call_limits(self, spec, adapter, prompt):
@@ -221,7 +221,7 @@ class AutonomousControls:
             return ''
         # 只复用引擎本次的 Git 扫描；适配器自己声明的清单不能代替实际检查。
         if observed_changes is None:
-            observed_changes = artifacts.changed_files_since(workdir, base)
+            observed_changes = artifacts.changed_files_since(workdir, base, git=self.git)
         actual = artifacts.normalize_rel(workdir, observed_changes)
         allowed = set(self.config.autonomy.allowed_files)
         forbidden = set(actual) - allowed
@@ -246,7 +246,7 @@ class AutonomousControls:
         tracker = self.state.autonomy.setdefault('convergence', {}).setdefault(
             target, {'repairs': 0, 'stagnant': 0, 'last_tree': None})
         code = self.state.stage(target).commit_sha
-        tree = artifacts.tree_content_hash(self.config.task_workdir, code) if code else self.state.stage(target).outputs_hash
+        tree = artifacts.tree_content_hash(self.config.task_workdir, code, git=self.git) if code else self.state.stage(target).outputs_hash
         if tree == tracker['last_tree']:
             tracker['stagnant'] += 1
         else:

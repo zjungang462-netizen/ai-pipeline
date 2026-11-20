@@ -236,6 +236,7 @@ def code_diff(run, stage_name, mode='previous'):
     from .. import artifacts
     from ..evidence import validate
     cfg = load_config(run['config'])
+    git = artifacts.GitContext(cfg.git_exe)
     spec = cfg.stage(stage_name)
     if spec.kind != 'code' or mode not in ('previous', 'project'):
         raise ValueError('请选择代码阶段及支持的比较范围')
@@ -248,7 +249,7 @@ def code_diff(run, stage_name, mode='previous'):
     record = read_json(attempt / 'success.json')
     manifest = read_json(attempt / 'manifest.json')
     repository = manifest.get('code', {}).get('repository') if isinstance(manifest.get('code'), dict) else None
-    if repository is None or Path(repository).resolve() != cfg.task_workdir.resolve() or not validate(attempt, record):
+    if repository is None or Path(repository).resolve() != cfg.task_workdir.resolve() or not validate(attempt, record, git=git):
         raise ValueError('代码产物完整性未通过，不能作为已验证差异展示')
     base = None
     if mode == 'previous':
@@ -257,14 +258,14 @@ def code_diff(run, stage_name, mode='previous'):
         if prior:
             base = prior[-1]
         else:
-            value = artifacts._git(['rev-parse', head + '^'], cfg.task_workdir, check=False)
+            value = artifacts._git(['rev-parse', head + '^'], cfg.task_workdir, check=False, git=git)
             if value.returncode == 0:
                 base = value.stdout.strip()
     else:
-        base = state.get('control', {}).get('project_baseline') or artifacts.baseline_sha(cfg.task_workdir)
+        base = state.get('control', {}).get('project_baseline') or artifacts.baseline_sha(cfg.task_workdir, git=git)
     if base and not re.fullmatch(r'[0-9a-f]{40}|[0-9a-f]{64}', base):
         raise ValueError('代码比较基线非法')
     args = ['diff', '--no-ext-diff', '--no-textconv', base, head, '--'] if base else ['show', '--no-ext-diff', '--no-textconv', '--format=', head, '--']
-    text = artifacts._git(args, cfg.task_workdir, timeout=15).stdout
+    text = artifacts._git(args, cfg.task_workdir, timeout=15, git=git).stdout
     return {'stage': stage_name, 'mode': mode, 'base': base, 'head': head,
             'body': text[:200000], 'truncated': len(text) > 200000, 'integrity': 'valid'}

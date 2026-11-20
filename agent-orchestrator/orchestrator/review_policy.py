@@ -67,23 +67,23 @@ class ReviewPolicy:
                 if current_kind == "review":
                     diff, total_lines, truncated = artifacts.cumulative_diff_info(
                         self.config.task_workdir, st.commit_sha,
-                        base_sha=self.state.control.get('project_baseline'), max_lines=policy.diff_lines)
+                        base_sha=self.state.control.get('project_baseline'), max_lines=policy.diff_lines, git=self.git)
                     label = "代码全量（相对项目基线累积）"
                     if truncated:
                         changed = artifacts.changed_files_at(
                             self.config.task_workdir, st.commit_sha,
-                            base_sha=self.state.control.get('project_baseline'))
+                            base_sha=self.state.control.get('project_baseline'), git=self.git)
                         body, missing = artifacts.review_file_context(
                             self.config.task_workdir, st.commit_sha, changed,
                             per_file_bytes=policy.per_file_bytes, total_bytes=policy.total_bytes,
-                            max_files=policy.max_files)
+                            max_files=policy.max_files, git=self.git)
                         if missing:
                             self._review_missing[spec.name] = sorted(set(self._review_missing[spec.name]) | set(missing))
                         if body:
                             diff = (f"{diff}\n\n...（累积 diff 超过 {policy.diff_lines} 行已截断，"
                                     f"以下为按 commit 注入的变更文件全文，共 {len(changed)} 个文件）\n\n{body}")
                 else:
-                    diff = artifacts.diff_summary(self.config.task_workdir, st.commit_sha)
+                    diff = artifacts.diff_summary(self.config.task_workdir, st.commit_sha, git=self.git)
                     label = "代码变更"
                 if diff:
                     parts.append(f"### 上游[{up.name}] {label}\n{diff}")
@@ -325,7 +325,7 @@ class ReviewPolicy:
             # 参与指纹与 autonomy 逻辑哈希，源码变化后旧 verdict 不再被采纳。
             if getattr(self, '_review_workspace_hash', None) is None:
                 tree = (artifacts.verified_workspace_tree(
-                    self.config.task_workdir, exclude=self.config.state_dir) if self._git_ready else None)
+                    self.config.task_workdir, exclude=self.config.state_dir, git=self.git) if self._git_ready else None)
                 self._review_workspace_hash = (
                     (tree, True) if tree else
                     (artifacts.workspace_hash(self.config.task_workdir, exclude=self.config.state_dir), False))

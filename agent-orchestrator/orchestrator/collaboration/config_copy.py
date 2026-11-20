@@ -46,6 +46,7 @@ def dump_config(raw):
 
 def derive(run, new_id):
     cfg = load_config(run['config'])
+    git = artifacts.GitContext(cfg.git_exe)
     state = read_json(directory(run) / 'state.json')
     commit = next((s.get('commit_sha') for s in reversed(list(state.get('stages', {}).values()))
                    if s.get('commit_sha')), None)
@@ -55,7 +56,7 @@ def derive(run, new_id):
     workspace = base / 'workspace'
     archive = base / 'source.zip'
     workspace.mkdir(parents=True, exist_ok=True)
-    artifacts._git(['archive', '--format=zip', '-o', str(archive), commit], cfg.task_workdir)
+    artifacts._git(['archive', '--format=zip', '-o', str(archive), commit], cfg.task_workdir, git=git)
     with zipfile.ZipFile(archive) as source:
         entries = source.infolist()
         if sum(e.file_size for e in entries) > 50 * 1024 * 1024:
@@ -69,10 +70,10 @@ def derive(run, new_id):
             else:
                 target.parent.mkdir(parents=True, exist_ok=True)
                 target.write_bytes(source.read(entry))
-    artifacts.ensure_repo(workspace)
+    artifacts.ensure_repo(workspace, git=git)
     inputs = [p.relative_to(workspace).as_posix() for p in workspace.rglob('*')
               if p.is_file() and '.git' not in p.relative_to(workspace).parts]
-    artifacts.commit_files(workspace, inputs, 'baseline: fixed parent snapshot')
+    artifacts.commit_files(workspace, inputs, 'baseline: fixed parent snapshot', git=git)
     raw = tomllib.loads(Path(run['config']).read_text(encoding='utf8'))
     raw['task_workdir'] = str(workspace.resolve())
     raw['state_dir'] = str(cfg.state_dir)
