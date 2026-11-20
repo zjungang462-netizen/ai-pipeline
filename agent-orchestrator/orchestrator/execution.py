@@ -68,8 +68,8 @@ class StageExecutor:
                     workdir = worktree
                 record = run_test_cmd(spec.test_cmd, workdir, timeout_s=timeout)
                 if before_workspace is not None:
-                    changed_inputs = self._record_test_artifacts(spec, before_workspace,
-                                                                 successful=record['ok'])
+                    changed_inputs = self.archive.record_test_artifacts(
+                        spec, before_workspace, successful=record['ok'])
                     if changed_inputs:
                         message = '被测输入在测试期间发生变化：' + ', '.join(changed_inputs[:20])
                         record['ok'] = False
@@ -100,7 +100,7 @@ class StageExecutor:
                                           None, None, verdict='fail', status=StageStatus.FAILED, error=message)
                 return StageStatus.FAILED
             finally:
-                self._cleanup_worktree(worktree)
+                self.archive.cleanup_worktree(worktree, git_ready=self._git_ready)
             rec_path, out_path = write_record(record, attempt_dir)
             from .evidence import seal
             outputs_hash = seal(attempt_dir)
@@ -160,7 +160,7 @@ class StageExecutor:
     def _run_attempts(self, spec: StageSpec, index: int, inputs_hash: str) -> StageStatus:
         st = self.state.stage(spec.name)
         adapter = self.adapters[spec.adapter]
-        base_sha = self._stage_base_sha(index, spec.kind)
+        base_sha = self.archive.stage_base_sha(index, spec.kind, git_ready=self._git_ready)
         last_error = ""
         violation = self.guards.write_violation_stands(spec, inputs_hash)
         if violation:
@@ -194,7 +194,7 @@ class StageExecutor:
                 except artifacts.GitError as e:
                     last_error = f"worktree 隔离失败: {e}"
                     self.state.log_event("attempt_fail", spec.name, reason=last_error)
-                    self._cleanup_worktree(worktree)
+                    self.archive.cleanup_worktree(worktree, git_ready=self._git_ready)
                     continue
             else:
                 workdir = self.config.task_workdir
@@ -209,7 +209,7 @@ class StageExecutor:
                     st.error='恢复点校验失败：'+str(error)
                     self.state.log_event('recovery_rejected',spec.name,n=n,reason=st.error)
                     self.state.save()
-                    self._cleanup_worktree(worktree)
+                    self.archive.cleanup_worktree(worktree, git_ready=self._git_ready)
                     return StageStatus.FAILED
 
             if attempt > 1 and self.config.autonomy.enabled:
@@ -228,7 +228,7 @@ class StageExecutor:
             try:
                 timeout = self.budget.before_call(spec, prompt)
             except BudgetExceeded as error:
-                self._cleanup_worktree(worktree)
+                self.archive.cleanup_worktree(worktree, git_ready=self._git_ready)
                 return self.budget.reject(spec, error)
             ctx = RunContext(
                 task=self.task, run_id=self.run_id, stage=spec.name,
@@ -250,7 +250,7 @@ class StageExecutor:
                 try:
                     ctx.output_tokens, ctx.token_reservation = self._call_limits(spec, adapter, prompt)
                 except BudgetExceeded as error:
-                    self._cleanup_worktree(worktree)
+                    self.archive.cleanup_worktree(worktree, git_ready=self._git_ready)
                     return self.budget.reject(spec, error)
             if spec.kind == "review":
                 # 兼容旧适配器的固定输出位置，但旧文件绝不能属于新 attempt。
@@ -270,7 +270,7 @@ class StageExecutor:
                 st.error = str(e)
                 self.state.log_event("rejected", spec.name, reason=str(e))
                 self.state.save()
-                self._cleanup_worktree(worktree)
+                self.archive.cleanup_worktree(worktree, git_ready=self._git_ready)
                 return StageStatus.FAILED
 
             # G2：执行前对监视域拍快照，执行后对比，捕获根外写入
@@ -357,7 +357,7 @@ class StageExecutor:
                 st.error = str(e)
                 self.state.log_event("rejected", spec.name, reason=str(e))
                 self.state.save()
-                self._cleanup_worktree(worktree)
+                self.archive.cleanup_worktree(worktree, git_ready=self._git_ready)
                 return StageStatus.FAILED
 
             # 越界不重试。重试会让下一次干净的调用把阶段判成成功，根外文件还在。
@@ -366,7 +366,7 @@ class StageExecutor:
                 st.error = result.stderr
                 self.state.log_event("rejected", spec.name, reason=result.stderr)
                 self.state.save()
-                self._cleanup_worktree(worktree)
+                self.archive.cleanup_worktree(worktree, git_ready=self._git_ready)
                 return StageStatus.FAILED
 
             # 空跑 / 解析未知 => 不得判完成（评审 B4：按 kind 收紧）
@@ -385,7 +385,7 @@ class StageExecutor:
                     if record.get('status')=='active':
                         if not self._finish_cli_worktree(spec,worktree,base_sha,n,attempt_dir,result.error_kind.value):
                             return StageStatus.FAILED
-                self._cleanup_worktree(worktree)
+                self.archive.cleanup_worktree(worktree, git_ready=self._git_ready)
                 if self.config.autonomy.enabled:
                     if result.error_kind in (ErrorKind.AUTH, ErrorKind.REJECTED):
                         break
@@ -398,7 +398,9 @@ class StageExecutor:
 
             # 成功：归档产物到 attempt 目录（代码阶段在 worktree 提交并合并回主线）
             try:
-                outputs_hash = self._archive(spec, result, attempt_dir, base_sha, worktree)
+                outputs_hash = self.archive.archive(
+                    spec, result, attempt_dir, base_sha, worktree, git_ready=self._git_ready,
+                    task=self.task, review_missing=self._review_missing.get(spec.name, []))
             except (StageArchiveError, artifacts.GitError) as e:
                 last_error = str(e)
                 self.state.log_event("attempt_fail", spec.name, n=n, error_kind="archive")
@@ -406,14 +408,14 @@ class StageExecutor:
                 if cli and spec.kind=='code':
                     if not self._finish_cli_worktree(spec,worktree,base_sha,n,attempt_dir,'archive_failed'):
                         return StageStatus.FAILED
-                self._cleanup_worktree(worktree)
+                self.archive.cleanup_worktree(worktree, git_ready=self._git_ready)
                 continue
             self.state.log_event("attempt_done", spec.name, n=n, outputs_hash=outputs_hash)
             if cli and spec.kind=='code':
                 self._finish_cli_worktree(spec,worktree,base_sha,n,attempt_dir,'archived',archived=True)
                 recovery=self.state.control.get('recoveries',{}).get(spec.name)
                 if recovery:recovery['status']='consumed'
-            self._cleanup_worktree(worktree)
+            self.archive.cleanup_worktree(worktree, git_ready=self._git_ready)
 
             if result.deferred is not None:
                 from .stage_result import validate_deferred

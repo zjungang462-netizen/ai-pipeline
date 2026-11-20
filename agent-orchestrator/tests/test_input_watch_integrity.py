@@ -113,12 +113,12 @@ class InputIntegrity(unittest.TestCase):
         source.write_text('VALUE = 1\n', encoding='utf8')
         cfg = self.config("import runpy; assert runpy.run_path('module.py')['VALUE'] == 1")
         engine = Engine(cfg, {}, run_id='verify', task='测试缓存完整性')
-        record = engine._record_test_artifacts
+        record = engine.archive.record_test_artifacts
         def editor(*args, **kwargs):
             result = record(*args, **kwargs)
             source.write_text('VALUE = 999\n', encoding='utf8')
             return result
-        with mock.patch.object(engine, '_record_test_artifacts', side_effect=editor):
+        with mock.patch.object(engine.archive, 'record_test_artifacts', side_effect=editor):
             self.assertEqual(engine.run()['testing'], 'done')
         resumed, status = self.run_engine(cfg)
         self.assertEqual(status, 'failed', '通过结果只能绑定实际测试过的输入')

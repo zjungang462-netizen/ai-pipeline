@@ -74,7 +74,7 @@ class AutonomousControls:
             if self._finish_cli_worktree(spec,tree,record['base_commit'],int(number),
                                          self.state.attempts_dir(stage)/number,'worker_interrupted',
                                          archived=record['status']=='archived'):
-                self._cleanup_worktree(tree)
+                self.archive.cleanup_worktree(tree, git_ready=self._git_ready)
         self.state.save()
 
     def _finish_cli_worktree(self,spec,tree,base,number,directory,reason,archived=False):

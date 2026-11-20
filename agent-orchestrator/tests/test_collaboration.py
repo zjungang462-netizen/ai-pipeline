@@ -273,6 +273,48 @@ class Collaboration(unittest.TestCase):
         kinds = [row['payload']['kind'] for row in payload['events'] if row['kind'] == 'engine_event']
         self.assertEqual(kinds, ['fixture_published', 'next_fixture'])
 
+    def test_http_command_replay_after_lost_reply_delivers_once(self):
+        from orchestrator.state import atomic_write_json
+        cfg = load_config(self.config)
+        server = create_server(self.root / 'replay.sqlite3', [self.config], 0, recover=False)
+        serving = threading.Thread(target=server.serve_forever, daemon=True)
+        serving.start()
+        self.addCleanup(server.server_close)
+        self.addCleanup(server.shutdown)
+        app = server.application
+        store = app.service.store
+        key = store.register_run(store.projects()[0]['id'], 'replay', self.config,
+                                 cfg.state_dir, managed=True)
+        atomic_write_json(directory(store.run(key)) / 'job.json', {'status': 'running'})
+        connection = http.client.HTTPConnection('127.0.0.1', server.server_port, timeout=10)
+        self.addCleanup(connection.close)
+        headers = {'Cookie': f'workbench_session={app.session}', 'Origin': app.origin,
+                   'X-Workbench-CSRF': app.csrf, 'Content-Type': 'application/json',
+                   'Idempotency-Key': 'lost-http-receipt-001', 'Connection': 'close'}
+
+        def request(intent):
+            connection.request('POST', f'/api/runs/{key}/commands',
+                               json.dumps({'intent': intent, 'payload': {}}), headers)
+
+        def send(intent):
+            request(intent)
+            response = connection.getresponse()
+            payload = json.loads(response.read())
+            connection.close()
+            return response.status, payload
+
+        with mock.patch.object(app.service, 'launch') as launch:
+            request('pause')
+            initial, = eventually(lambda: store.commands(key))
+            connection.close()
+            store.finish(initial['id'], 'applied', {'checkpoint': True})
+            status, replay = send('pause')
+            self.assertEqual((status, replay['id'], replay['status']), (202, initial['id'], 'applied'))
+            self.assertEqual(send('cancel')[0], 409)
+            launch.assert_called_once_with(key)
+        self.assertEqual(len([event for event in store.events(key)
+                              if event['kind'] == 'command_queued']), 1)
+
     def test_projection_recovers_after_state_committed_but_message_not_written(self):
         from orchestrator.engine import Engine
         from orchestrator.collaboration.projection import project

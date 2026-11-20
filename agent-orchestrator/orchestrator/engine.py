@@ -44,7 +44,7 @@ from .guards import GuardControls
 from .execution import StageExecutor
 
 
-class Engine(StageExecutor, ReviewPolicy, ArchiveOperations, AutonomousControls):
+class Engine(StageExecutor, ReviewPolicy, AutonomousControls):
     def __init__(self, config: Config, adapters: dict[str, Adapter],
                  run_id: str, task: str,
                  adapter_factory: Callable[[str], Adapter] | None = None,
@@ -57,6 +57,7 @@ class Engine(StageExecutor, ReviewPolicy, ArchiveOperations, AutonomousControls)
         self.state = RunState(config.state_dir, run_id, git=self.git)
         self.guards = GuardControls(config, self.state)
         self.budget = BudgetPolicy(config.run_budget, self.state, self._settle_call)
+        self.archive = ArchiveOperations(config, self.state, self.git)
         self.state.task = task
         self._adapter_factory = adapter_factory
         self.control = control
