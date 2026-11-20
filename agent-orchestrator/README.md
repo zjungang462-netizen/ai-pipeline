@@ -155,7 +155,7 @@ Claude Code 2.1.325 / 2.1.328 可作为文件工具代理接入你现有的 Deep
 |---|---|
 | `openai_compat` | `base_url`、`model`、`api_key_env` 必填；可设 `temperature`、`max_tokens`、`timeout_s` |
 | `cli_codex` | 可设 `exe`、`model`、`isolate_config`、`reasoning_effort`、`extra_env`、`timeout_s`；0.170.0 真实读取/修改及维护闭环通过，旧协议样本保留 |
-| `cli_agy` | 可设 `exe`、`model`、无凭据 `proxy_url`、`extra_env`、`timeout_s`；精确支持 1.5.9 / 1.5.12，沙箱与严格流式终态 |
+| `cli_agy` | 可设 `exe`、`model`、无凭据 `proxy_url`、`extra_env`、`timeout_s`；精确支持 1.5.9 / 1.5.12 / 1.5.13，沙箱与严格流式终态 |
 | `cli_dsh` | 可设 `exe`、`permission_mode`、无凭据 `proxy_url`、`extra_env`、`timeout_s`；已有真实样本 |
 | `cli_qwen` | 0.26.0 的 stdin、JSON 数组兼容与 stream-json Read/Edit 已真机验证；safe/bare 模式、文件工具、实时计量与停止护栏；其它版本未验证 |
 | `cli_qoder` | 1.1.89 真机 stdin/流式成功终态及 Read/Edit 已验证；Ultimate/high/adaptive 真实维护任务通过；token计数不完整、credits分列 |

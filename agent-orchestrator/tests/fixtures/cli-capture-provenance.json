@@ -204,5 +204,20 @@
     ],
     "user_configs_unchanged": true,
     "external_file_check_exit": 0
+  },
+  "agy_1.5.13_tools_real.jsonl": {
+    "source": "真实本机隔离单文件 Read/Edit 探针，外部断言通过；非 Engine 业务完成率",
+    "version": "1.5.13",
+    "captured_at": "2026-11-20T00:32:19.523285+00:00",
+    "source_sha256": "7f7426ac123c75b3445138aed8dc900ab8c32debe2f86dd7fc652b3bab86f886",
+    "fixture_sha256": "27b62cff574910a464158434ee56383fc56ec8093fb1bb8000fba7296fc07ee3",
+    "redacted_fields": [
+      "paths",
+      "session and tool IDs",
+      "thinking body omitted",
+      "Codex shell executable path normalized"
+    ],
+    "user_configs_unchanged": true,
+    "external_file_check_exit": 0
   }
 }

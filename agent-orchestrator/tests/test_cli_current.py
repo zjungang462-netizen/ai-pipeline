@@ -56,7 +56,8 @@ class CurrentCLI(unittest.TestCase):
 
     def test_fixtures_match_real_capture_provenance(self):
         provenance = json.loads((FIXTURES / 'cli-capture-provenance.json').read_text(encoding='utf8'))
-        for name in ('codex_0.170.0_tools_real.jsonl', 'agy_1.5.12_tools_real.jsonl', 'qwen_0.26.0_tools_real.jsonl'):
+        for name in ('codex_0.170.0_tools_real.jsonl', 'agy_1.5.12_tools_real.jsonl',
+                     'agy_1.5.13_tools_real.jsonl', 'qwen_0.26.0_tools_real.jsonl'):
             with self.subTest(name=name):
                 self.assertEqual(hashlib.sha256((FIXTURES / name).read_bytes()).hexdigest(), provenance[name]['fixture_sha256'])
                 self.assertTrue(provenance[name]['user_configs_unchanged'])
@@ -84,26 +85,28 @@ class CurrentCLI(unittest.TestCase):
         self.assertFalse(self.parse(CodexAdapter('c'), raw, 'codex-cli 0.170.1').ok)
 
     def test_agy_1512_real_tools_and_conservative_cache_accounting(self):
-        raw = self.fixture('agy_1.5.12_tools_real.jsonl')
-        result = self.parse(AgyAdapter('a'), raw, '1.5.12')
-        self.assertTrue(result.ok)
-        self.assertEqual(result.usage['tokens'], 57313)
-        self.assertEqual(result.usage['cli_reported_tokens'], 22060)
-        self.assertEqual(result.text.strip(), 'PROBE_EDIT_OK')
-        trace = CLITrace(self.ctx, channel='cli_agy')
-        try:
-            trace.feed('stdout', raw)
-            self.assertTrue(any(key for key in trace.finished_tools))
-            self.assertEqual(trace.ledger.snapshot()['tokens'], 57313)
-        finally:
-            trace.finish('exited')
+        for version, total, reported in (('1.5.12', 57313, 22060), ('1.5.13', 42782, 19739)):
+            with self.subTest(version=version):
+                raw = self.fixture('agy_' + version + '_tools_real.jsonl')
+                result = self.parse(AgyAdapter('a'), raw, version)
+                self.assertTrue(result.ok)
+                self.assertEqual(result.usage['tokens'], total)
+                self.assertEqual(result.usage['cli_reported_tokens'], reported)
+                self.assertEqual(result.text.strip(), 'PROBE_EDIT_OK')
+                trace = CLITrace(self.ctx, channel='cli_agy')
+                try:
+                    trace.feed('stdout', raw)
+                    self.assertTrue(any(key for key in trace.finished_tools))
+                    self.assertEqual(trace.ledger.snapshot()['tokens'], total)
+                finally:
+                    trace.finish('exited')
 
     def test_agy_1512_ambiguous_or_trailing_events_are_rejected(self):
         raw = self.fixture('agy_1.5.12_tools_real.jsonl')
         last = raw.splitlines()[-1]
         for value in (raw + last, raw + '{"event":"step_update"}', '\n'.join(raw.splitlines()[:-1])):
             self.assertFalse(self.parse(AgyAdapter('a'), value, '1.5.12').ok)
-        self.assertFalse(self.parse(AgyAdapter('a'), raw, '1.5.13').ok)
+        self.assertFalse(self.parse(AgyAdapter('a'), raw, '1.5.14').ok)
         self.assertFalse(self.parse(AgyAdapter('a'), raw, 'agy 9.999.0').ok)
 
     def test_qwen_real_stream_and_legacy_array_share_strict_terminal_parser(self):
@@ -175,7 +178,7 @@ class CurrentCLI(unittest.TestCase):
 
     def test_unknown_or_failed_version_prevents_model_execution(self):
         for cls, known, unknown in ((CodexAdapter, 'codex-cli 0.170.0', 'codex-cli 0.170.1'),
-                                    (AgyAdapter, '1.5.12', '1.5.13'),
+                                    (AgyAdapter, '1.5.13', '1.5.14'),
                                     (QwenAdapter, '0.26.0', 'qwen-code 9.0')):
             for code, stdout, stderr in ((0, unknown, ''), (1, known, ''), (0, '', known)):
                 with self.subTest(cls=cls.__name__, code=code, stdout=stdout), \

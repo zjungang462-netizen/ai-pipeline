@@ -14,7 +14,7 @@ from ..contracts import ErrorKind, Result, RunContext
 from .cli_base import CLIAdapter
 from .cli_codex import strip_ansi
 
-SUPPORTED_VERSIONS = frozenset(('1.5.9', '1.5.12'))
+SUPPORTED_VERSIONS = frozenset(('1.5.9', '1.5.12', '1.5.13'))
 
 
 class AgyAdapter(CLIAdapter):
