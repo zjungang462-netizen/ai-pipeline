@@ -1,14 +1,9 @@
-"""豆包 CLI 适配器（字节，命令 doubao，可由 Agent 调用）。
-
-命令模板：doubao -p "<prompt>" -C <dir> --permission-mode always_allow
-- 认证：doubao login 扫码（无 API-key 方式，needs_login=True）。
-- stdout 即结果（纯文本，无 JSON 选项）；做 ANSI 清理与超长截断。
-"""
+"""保留旧豆包输出的离线解析，实时执行等待真实 CLI 协议验证。"""
 from __future__ import annotations
 
 from pathlib import Path
 
-from ..contracts import ErrorKind, Result, RunContext
+from ..contracts import ErrorKind, PreflightReport, Result, RunContext
 from .cli_base import CLIAdapter
 from .cli_codex import strip_ansi
 
@@ -22,12 +17,14 @@ class DoubaoAdapter(CLIAdapter):
     needs_login = True
     credential_env = []
 
+    def preflight(self) -> PreflightReport:
+        return PreflightReport(adapter=self.name, ok=False,
+                               detail='缺少独立豆包 CLI 的真实协议样本')
+
     def run(self, prompt: str, workdir: Path, ctx: RunContext) -> Result:
-        # -p - 表示提示词来自 stdin，避免 Windows 命令行长度上限。
-        args = ["-p", "-", "-C", str(workdir)]
-        if ctx.allow_yolo:
-            args += ["--permission-mode", "always_allow"]
-        return self._finalize(self._exec_prompt(args, prompt, workdir, ctx), ctx)
+        return Result(ok=False, exit_code=-1, channel=self.channel, parse_unknown=True,
+                      error_kind=ErrorKind.PARSE_FAILED,
+                      stderr='缺少独立豆包 CLI 的真实协议样本，没有发起模型请求')
 
     def _parse(self, proc, workdir: Path, ctx: RunContext) -> Result:
         stdout = strip_ansi(proc.stdout or "")

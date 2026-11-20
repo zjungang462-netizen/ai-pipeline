@@ -12,7 +12,6 @@ from unittest import mock
 from orchestrator import artifacts
 from orchestrator.adapters.base import Adapter
 from orchestrator.adapters.cli_codex import CodexAdapter
-from orchestrator.adapters.cli_doubao import DoubaoAdapter
 from orchestrator.adapters.cli_dsh import DshAdapter
 from orchestrator.adapters.fake import FakeAdapter
 from orchestrator.adapters.openai_compat import OpenAICompatAdapter
@@ -461,7 +460,7 @@ class TestLockAndExit(unittest.TestCase):
 class TestPromptStdin(unittest.TestCase):
     def _assert_stdin(self, adapter, secret="SECRET_PROMPT_VALUE"):
         adapter._resolved = adapter.exe_name
-        adapter._version = 'codex-cli 0.170.0' if adapter.exe_name == 'codex' else f"{adapter.exe_name} 1.0"
+        adapter._version = 'codex-cli 0.170.0' if adapter.exe_name == 'codex' else '0.2.2-rc.3'
         ctx = RunContext(task="t", run_id="r", stage="coding",
                          workdir=Path("."), runs_dir=Path("."))
         with tempfile.TemporaryDirectory() as d, \
@@ -474,9 +473,8 @@ class TestPromptStdin(unittest.TestCase):
         self.assertEqual(run.call_args.kwargs["input"], secret)
         self.assertIn("-" if adapter.exe_name == 'codex' else "--", argv)
 
-    def test_codex_doubao_dsh_keep_prompt_off_argv(self):
+    def test_codex_and_dsh_keep_prompt_off_argv(self):
         self._assert_stdin(CodexAdapter("codex"))
-        self._assert_stdin(DoubaoAdapter("doubao"))
         self._assert_stdin(DshAdapter("dsh"))
 
 

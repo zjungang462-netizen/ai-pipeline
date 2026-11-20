@@ -37,6 +37,15 @@ class DshProtocol(unittest.TestCase):
     def test_unknown_version_and_duplicate_final_are_rejected(self):
         self.a._version='9.9';self.assertTrue(self.parse().parse_unknown)
         self.a._version='0.2.2-rc.3';self.assertFalse(self.parse(self.raw+self.raw.splitlines()[-1]).ok)
+    def test_unknown_version_stops_before_model_call(self):
+        with mock.patch('orchestrator.adapters.cli_base.resolve_exe', return_value='dsh'), \
+                mock.patch('orchestrator.adapters.cli_base.run_cli_process', return_value=
+                           subprocess.CompletedProcess([], 0, '9.9', '')) as execute:
+            self.a._version = None
+            result = self.a.run('private prompt', self.root, self.ctx)
+        self.assertTrue(result.parse_unknown)
+        execute.assert_called_once()
+        self.assertEqual(execute.call_args.args[0], ['dsh', '--version'])
     def test_stdin_flags_and_explicit_environment_remain_separate(self):
         a=build_adapter(AdapterConfig('dsh','cli_dsh',{'permission_mode':'workspace-write',
                'proxy_url':'http://127.0.0.1:7897','extra_env':['DEEPSEEK_API_KEY']}))

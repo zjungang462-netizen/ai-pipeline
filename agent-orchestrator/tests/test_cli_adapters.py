@@ -88,6 +88,14 @@ class TestQwenParse(unittest.TestCase):
 
 
 class TestTextAdapters(unittest.TestCase):
+    def test_unverified_doubao_stops_before_model_call(self):
+        adapter = DoubaoAdapter(name="doubao")
+        with tempfile.TemporaryDirectory() as d, mock.patch.object(adapter, "_exec") as execute:
+            root = Path(d)
+            self.assertFalse(adapter.preflight().ok)
+            self.assertTrue(adapter.run("prompt", root, make_ctx(root)).parse_unknown)
+            execute.assert_not_called()
+
     def test_dsh_empty_run(self):
         ad = DshAdapter(name="dsh")
         ad._version = "dsh 1.0"

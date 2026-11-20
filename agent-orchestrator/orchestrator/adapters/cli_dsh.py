@@ -12,6 +12,7 @@ from .cli_result_stream import jsonl_objects
 from ..cli_telemetry import UsageLedger
 
 MAX_TEXT = 200_000  # 超长输出截断保护
+SUPPORTED_VERSION = '0.2.2-rc.3'
 
 
 class DshAdapter(CLIAdapter):
@@ -32,9 +33,19 @@ class DshAdapter(CLIAdapter):
         self.proxy_url=proxy_url
 
     def input_fingerprint(self):
-        return {'protocol':2,'version':'0.2.2-rc.3','permission_mode':self.permission_mode,'proxy_url':self.proxy_url}
+        return {'protocol':2,'version':SUPPORTED_VERSION,'permission_mode':self.permission_mode,'proxy_url':self.proxy_url}
+
+    def _version_known(self) -> bool:
+        return self._version == SUPPORTED_VERSION
+
+    def preflight(self):
+        return self.verified_preflight()
 
     def run(self, prompt: str, workdir: Path, ctx: RunContext) -> Result:
+        if not self._ensure_resolved() or not self._version_known():
+            return Result(ok=False, exit_code=-1, channel=self.channel, tool_version=self._version,
+                          parse_unknown=True, error_kind=ErrorKind.PARSE_FAILED,
+                          stderr='未确认已验证的 DSH 版本，没有发起模型请求')
         args=['--profile','headless','--json','--permission-mode',self.permission_mode,'--approval-policy','never','--','-']
         env={}
         if self.proxy_url:
@@ -64,7 +75,7 @@ class DshAdapter(CLIAdapter):
             return Result(ok=True, exit_code=0, channel=self.channel,
                           stdout=stdout, stderr=stderr, text="",
                           tool_version=self._version,usage=usage)
-        if self._version != '0.2.2-rc.3':
+        if not self._version_known():
             result=self._unknown_version(proc,'未经验证的 dsh 版本')
             # 兼容旧纯文本执行器的诊断归档：进程正常退出可生成报告，
             # parse_unknown 仍禁止引擎把它当成有效阶段或审批证据。
