@@ -273,9 +273,9 @@ class AutonomousControls:
             return records[spec.name]['record']
         from .testrun import run_test_cmd
         from .review import format_test_feedback
-        timeout = self._before_call(spec)
+        timeout = self.budget.before_call(spec)
         record = run_test_cmd(spec.precheck_cmd, self.config.task_workdir, timeout)
-        self._account_usage(Result(ok=record['ok'], usage={'duration_s': record['duration_s']}), spec.name)
+        self.budget.account_usage(Result(ok=record['ok'], usage={'duration_s': record['duration_s']}), spec.name)
         records[spec.name] = {'nonce': nonce, 'record': record}
         self.state.log_event('precheck', spec.name, ok=record['ok'], failure_ids=record.get('failure_ids', []))
         if not record['ok']:

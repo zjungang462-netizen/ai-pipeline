@@ -419,7 +419,7 @@ class CLIReliability(EvidenceTestCase):
     def test_successful_code_is_captured_if_post_call_budget_rejects(self):
         cfg,data,env=self.fixture_config()
         e=Engine(cfg,build_all(cfg.adapters,{}),'budget-candidate','same task')
-        with patch_env(env),mock.patch.object(e,'_check_budget',side_effect=BudgetExceeded('budget exhausted')):
+        with patch_env(env),mock.patch.object(e.budget,'check',side_effect=BudgetExceeded('budget exhausted')):
             self.assertEqual(e.run()['coding'],'failed')
         self.assertTrue((e.state.attempts_dir('coding')/'1/recovery/checkpoint.json').is_file())
         self.assertEqual((e.state.attempts_dir('coding')/'1/recovery/file-0.bin').read_text(encoding='utf8'),'VALUE = 2\n')
@@ -431,7 +431,7 @@ class CLIReliability(EvidenceTestCase):
                        attempt_dir=folder,timeout_s=4,token_reservation=100,base_commit=base)
         call=e._reserve_call(spec,n,ctx)
         (tree/'module.py').write_text('VALUE = 1\n',encoding='utf8')
-        e._account_usage(Result(ok=False,usage={'usage_unknown':True,'known_tokens':30}),'coding',call)
+        e.budget.account_usage(Result(ok=False,usage={'usage_unknown':True,'known_tokens':30}),'coding',call)
         resumed=Engine(e.config,build_all(e.config.adapters,{}),e.run_id,'same task');resumed.prepare()
         self.assertTrue((folder/'recovery/checkpoint.json').is_file())
         self.assertFalse(tree.exists())

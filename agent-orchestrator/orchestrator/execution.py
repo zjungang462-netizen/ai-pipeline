@@ -2,10 +2,8 @@
 from __future__ import annotations
 
 from . import artifacts
-from .archive import ArchiveOperations, StageArchiveError
 from .archive import StageArchiveError
 from .budget import BudgetExceeded
-from .budget import BudgetPolicy, BudgetExceeded
 from .contracts import ErrorKind, Result, RunContext, StageSpec, StageStatus
 from .safety import WriteRootGuard, WriteRootViolation, relative_target
 from .state import RunState, StageLock, atomic_write_json, compute_inputs_hash, sha256_text
@@ -38,9 +36,9 @@ class StageExecutor:
         if self.state.adopt_successful(spec.name, inputs_hash) is not None:
             return self._approval_checkpoint(spec)
         try:
-            timeout = self._before_call(spec)
+            timeout = self.budget.before_call(spec)
         except BudgetExceeded as error:
-            return self._reject_budget(spec, error)
+            return self.budget.reject(spec, error)
 
         lock = StageLock(self.state.stage_dir(spec.name) / ".lock")
         if not lock.acquire():
@@ -96,7 +94,7 @@ class StageExecutor:
                 write_record(record, attempt_dir)
                 from .evidence import seal
                 outputs_hash = seal(attempt_dir)
-                self._account_usage(Result(ok=False, usage={'duration_s': record['duration_s']}), spec.name)
+                self.budget.account_usage(Result(ok=False, usage={'duration_s': record['duration_s']}), spec.name)
                 self.state.log_event('worktree_error', spec.name, n=n, reason=message)
                 self.state.commit_success(spec.name, n, attempt_dir, inputs_hash, outputs_hash,
                                           None, None, verdict='fail', status=StageStatus.FAILED, error=message)
@@ -107,11 +105,11 @@ class StageExecutor:
             from .evidence import seal
             outputs_hash = seal(attempt_dir)
             usage = Result(ok=record["ok"], usage={"duration_s": record["duration_s"]})
-            self._account_usage(usage, spec.name)
+            self.budget.account_usage(usage, spec.name)
             try:
-                self._check_budget(spec, usage)
+                self.budget.check(spec, usage)
             except BudgetExceeded as error:
-                return self._reject_budget(spec, error)
+                return self.budget.reject(spec, error)
 
             if record["ok"]:
                 self.state.log_event("test_pass", spec.name, n=n,
@@ -164,7 +162,7 @@ class StageExecutor:
         adapter = self.adapters[spec.adapter]
         base_sha = self._stage_base_sha(index, spec.kind)
         last_error = ""
-        violation = self._write_violation_stands(spec, inputs_hash)
+        violation = self.guards.write_violation_stands(spec, inputs_hash)
         if violation:
             st.status = StageStatus.FAILED
             st.error = violation
@@ -228,10 +226,10 @@ class StageExecutor:
                 prompt+='\n\n已验证恢复点已应用；以下为当前隔离工作区原文，优先于旧基线，不要重复覆盖已完成修改：\n'+'\n'.join(bodies)
                 inputs_hash=self._inputs_hash(spec,index,prompt_override=prompt)
             try:
-                timeout = self._before_call(spec, prompt)
+                timeout = self.budget.before_call(spec, prompt)
             except BudgetExceeded as error:
                 self._cleanup_worktree(worktree)
-                return self._reject_budget(spec, error)
+                return self.budget.reject(spec, error)
             ctx = RunContext(
                 task=self.task, run_id=self.run_id, stage=spec.name,
                 workdir=workdir, runs_dir=self.state.run_dir,
@@ -253,7 +251,7 @@ class StageExecutor:
                     ctx.output_tokens, ctx.token_reservation = self._call_limits(spec, adapter, prompt)
                 except BudgetExceeded as error:
                     self._cleanup_worktree(worktree)
-                    return self._reject_budget(spec, error)
+                    return self.budget.reject(spec, error)
             if spec.kind == "review":
                 # 兼容旧适配器的固定输出位置，但旧文件绝不能属于新 attempt。
                 for old in (self.state.run_dir / "review_verdict.json",
@@ -264,7 +262,7 @@ class StageExecutor:
             # watch_root = "off" 关闭根外扫描；其它值则改用该目录。
             # 落在可写根内部的监视域不会产生任何根外文件，静默空转等于没有
             # 保护：显式告警并禁用它（P2-6）。
-            guard = self._make_write_guard(spec)
+            guard = self.guards.make_write_guard(spec)
             try:
                 guard.check(workdir)
             except WriteRootViolation as e:
@@ -307,7 +305,7 @@ class StageExecutor:
             elif outside:
                 # 无法按目录快照归属写入者；只保存变化元数据，不移动、删除
                 # 或复制无关进程的原文件，继续保守失败并持久化违规记录。
-                evidence = self._record_outside_evidence(spec, before_snap, after_snap, outside)
+                evidence = self.guards.record_outside_evidence(spec, before_snap, after_snap, outside)
                 self.state.control.setdefault('write_violations', {})[spec.name] = {
                     'inputs_hash': inputs_hash, 'files': outside[:20],
                     'evidence': evidence, 'source_files_preserved': True, 'at': time.time()}
@@ -344,13 +342,13 @@ class StageExecutor:
                         result.stderr = scope_error
 
             # 预算（评审 S3/M3）：先入账再判断，超限的这次也算进用量
-            self._account_usage(result, spec.name, call_id)
+            self.budget.account_usage(result, spec.name, call_id)
             self._save_attempt_trace(spec, attempt_dir, prompt, result)
             if cli and spec.kind=='code' and not result.ok:
                 if not self._finish_cli_worktree(spec,worktree,base_sha,n,attempt_dir,result.error_kind.value):
                     return StageStatus.FAILED
             try:
-                self._check_budget(spec, result)
+                self.budget.check(spec, result)
             except BudgetExceeded as e:
                 if cli and spec.kind=='code' and result.ok:
                     if not self._finish_cli_worktree(spec,worktree,base_sha,n,attempt_dir,'budget_exceeded'):

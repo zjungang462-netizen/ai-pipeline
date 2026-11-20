@@ -1,8 +1,11 @@
 """调用预算检查与已报告用量结算。"""
 from __future__ import annotations
 
-from .contracts import ErrorKind, Result, RunContext, StageSpec, StageStatus
+from .config import RunBudget
+from .contracts import Result, StageSpec, StageStatus
+from .state import RunState
 import time
+from collections.abc import Callable
 
 
 class BudgetExceeded(RuntimeError):
@@ -10,9 +13,15 @@ class BudgetExceeded(RuntimeError):
 
 
 class BudgetPolicy:
-    def _account_usage(self, result: Result, stage: str = "", call_id: str | None = None) -> None:
+    def __init__(self, limits: RunBudget, state: RunState,
+                 settle_call: Callable[[Result, str, str], bool]):
+        self.limits = limits
+        self.state = state
+        self.settle_call = settle_call
+
+    def account_usage(self, result: Result, stage: str = "", call_id: str | None = None) -> None:
         """调用一旦发生就入账，失败和超限也算。续跑才能看见已经花掉的用量。"""
-        unknown = self._settle_call(result, stage, call_id) if call_id else False
+        unknown = self.settle_call(result, stage, call_id) if call_id else False
         tokens = result.usage.get('known_tokens',0) if unknown else result.usage.get('tokens') or 0
         self.state.usage_total["tokens"] += tokens
         self.state.usage_total["duration_s"] += result.usage.get("duration_s") or 0.0
@@ -33,9 +42,9 @@ class BudgetPolicy:
                 if isinstance(result.usage.get(field),str):used[field]=result.usage[field]
         self.state.save()
 
-    def _check_budget(self, spec: StageSpec, result: Result) -> None:
+    def check(self, spec: StageSpec, result: Result) -> None:
         """用量已经计入 usage_total。阶段上限仍按这一次调用判断。"""
-        b = self.config.run_budget
+        b = self.limits
         used = self.state.usage_total
         stage_used = self.state.stage_usage.get(spec.name, result.usage)
         tokens = stage_used.get("tokens") or 0
@@ -52,13 +61,12 @@ class BudgetPolicy:
             raise BudgetExceeded(
                 f"阶段 {spec.name} 时长超限: {duration:.0f}s > {spec.max_duration_s}s")
 
-    def _before_call(self, spec: StageSpec, prompt: str = "") -> float:
+    def before_call(self, spec: StageSpec, prompt: str = "") -> float:
         estimate = max(1, len(prompt) // 3) if spec.kind != "test" else 0
         run = self.state.usage_total
         stage = self.state.stage_usage.get(spec.name, {})
         for label, used, max_tokens, max_duration in (
-                ("run", run, self.config.run_budget.max_tokens,
-                 self.config.run_budget.max_duration_s),
+                ("run", run, self.limits.max_tokens, self.limits.max_duration_s),
                 (f"阶段 {spec.name}", stage, spec.max_tokens, spec.max_duration_s)):
             if max_tokens is not None and used.get("tokens", 0) + estimate > max_tokens:
                 raise BudgetExceeded(f"{label} token 预算不足，调用前拦截")
@@ -69,13 +77,13 @@ class BudgetPolicy:
         if deadline is not None:
             if deadline<=time.time():raise BudgetExceeded('原 CLI 运行有效期已过，不能通过续跑延长')
             remaining.append(deadline-time.time())
-        for used, limit in ((run, self.config.run_budget.max_duration_s),
+        for used, limit in ((run, self.limits.max_duration_s),
                             (stage, spec.max_duration_s)):
             if limit is not None:
                 remaining.append(limit - used.get("duration_s", 0))
         return min(remaining)
 
-    def _reject_budget(self, spec: StageSpec, error: Exception) -> StageStatus:
+    def reject(self, spec: StageSpec, error: Exception) -> StageStatus:
         st = self.state.stage(spec.name)
         st.status, st.error = StageStatus.FAILED, str(error)
         self.state.log_event("rejected", spec.name, reason=str(error))

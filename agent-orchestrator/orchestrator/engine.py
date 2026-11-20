@@ -44,7 +44,7 @@ from .guards import GuardControls
 from .execution import StageExecutor
 
 
-class Engine(GuardControls, StageExecutor, ReviewPolicy, BudgetPolicy, ArchiveOperations, AutonomousControls):
+class Engine(StageExecutor, ReviewPolicy, ArchiveOperations, AutonomousControls):
     def __init__(self, config: Config, adapters: dict[str, Adapter],
                  run_id: str, task: str,
                  adapter_factory: Callable[[str], Adapter] | None = None,
@@ -55,6 +55,8 @@ class Engine(GuardControls, StageExecutor, ReviewPolicy, BudgetPolicy, ArchiveOp
         self.task = task
         self.git = artifacts.GitContext(config.git_exe)
         self.state = RunState(config.state_dir, run_id, git=self.git)
+        self.guards = GuardControls(config, self.state)
+        self.budget = BudgetPolicy(config.run_budget, self.state, self._settle_call)
         self.state.task = task
         self._adapter_factory = adapter_factory
         self.control = control
@@ -189,7 +191,7 @@ class Engine(GuardControls, StageExecutor, ReviewPolicy, BudgetPolicy, ArchiveOp
                 self.state.log_event('policy_approved', spec.name)
                 self.state.save()
                 return StageStatus.DONE
-            return self._reject_budget(spec, RuntimeError('预授权审批的产物校验失败'))
+            return self.budget.reject(spec, RuntimeError('预授权审批的产物校验失败'))
         return StageStatus.AWAITING_APPROVAL
 
     def _run_stage_owned(self, spec: StageSpec, index: int) -> StageStatus:
@@ -268,7 +270,7 @@ class Engine(GuardControls, StageExecutor, ReviewPolicy, BudgetPolicy, ArchiveOp
         try:
             self._run_precheck(spec)
         except BudgetExceeded as error:
-            return self._reject_budget(spec, error)
+            return self.budget.reject(spec, error)
         inputs_hash = self._inputs_hash(spec, index)
 
         lock = StageLock(self.state.stage_dir(spec.name) / ".lock")

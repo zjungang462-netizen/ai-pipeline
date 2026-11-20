@@ -176,7 +176,7 @@ class ClaudeCLI(unittest.TestCase):
         from orchestrator.reporting import usage_summary
         engine=Engine(cfg,{'c':self.adapter},'metadata','test')
         result=self.parse(self.result);result.usage['backend_endpoint']='https://api.deepseek.com/anthropic'
-        engine._account_usage(result,'code')
+        engine.budget.account_usage(result,'code')
         summary=usage_summary('run',{'stages':{'code':{'status':'done'}},'stage_usage':engine.state.stage_usage,'usage_total':engine.state.usage_total})
         self.assertIn('deepseek-v4-pro',summary['stages'][0]['backend_model'])
         self.assertEqual(summary['stages'][0]['backend_endpoint'],'https://api.deepseek.com/anthropic')

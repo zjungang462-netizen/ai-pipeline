@@ -142,7 +142,7 @@ class Qoder1189(unittest.TestCase):
         self.assertEqual(clean['models']['q']['thinking'],'adaptive')
         with self.assertRaises(ValueError):validate_options(cfg,{'models':{'q':{'thinking':'enabled'}}})
         engine=Engine(cfg,{'q':adapter},'credits','task')
-        engine._account_usage(Result(ok=True,usage={'tokens':0,'usage_unknown':True,'qoder_credits':2.5}),'report')
+        engine.budget.account_usage(Result(ok=True,usage={'tokens':0,'usage_unknown':True,'qoder_credits':2.5}),'report')
         self.assertEqual(engine.state.usage_total['qoder_credits'],2.5)
         self.assertEqual(engine.state.stage_usage['report']['qoder_credits'],2.5)
         self.assertEqual(engine.state.stage_usage['report']['unknown_calls'],1)
