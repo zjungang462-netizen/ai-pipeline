@@ -55,6 +55,8 @@ python -m orchestrator.cli state-restore --backup D:/backups/state-before-upgrad
 
 Qwen、Qoder、Claude 共用已验证版本的流式终态表；反重力、Codex、DSH 共用其已允许的 JSONL 解码。各工具的启动参数、权限、完成判据和用量口径仍由适配器定义。
 
+工作台的事件分页和实时流只更新运行投影与 CLI 活动。房间快照按状态版本短暂复用产物清单，实际打开产物时仍实时校验哈希。指标文件和 CLI 进度按各自的文件变更刷新，无需等待运行状态提交。
+
 ## 自身维护基准
 
 ```powershell

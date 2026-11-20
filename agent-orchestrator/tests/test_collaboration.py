@@ -246,6 +246,33 @@ class Collaboration(unittest.TestCase):
         with self.assertRaises((ValueError, KeyError, RuntimeError)):
             read_artifact(service.store.run(run['id']), '../1/secret')
 
+    def test_http_event_history_does_not_build_a_room_snapshot(self):
+        from orchestrator.state import RunState
+        cfg = load_config(self.config)
+        state = RunState(cfg.state_dir, 'history')
+        state.log_event('fixture_published', 'verify')
+        state.save()
+        server = create_server(self.root / 'history.sqlite3', [self.config], 0, recover=False)
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        self.addCleanup(server.server_close)
+        self.addCleanup(server.shutdown)
+        service = server.application.service
+        entry = service.store.runs()[0]
+        # 下一条事件由 HTTP 请求同步，即使完整房间暂不可用也能读取。
+        state.log_event('next_fixture', 'verify')
+        state.save()
+        conn = http.client.HTTPConnection('127.0.0.1', server.server_port, timeout=10)
+        self.addCleanup(conn.close)
+        headers = {'Cookie': f'workbench_session={server.application.session}'}
+        with mock.patch.object(service, 'snapshot', side_effect=AssertionError('禁止构建房间')):
+            conn.request('GET', f"/api/runs/{entry['id']}/events", headers=headers)
+            response = conn.getresponse()
+            payload = json.loads(response.read())
+        self.assertEqual(response.status, 200)
+        kinds = [row['payload']['kind'] for row in payload['events'] if row['kind'] == 'engine_event']
+        self.assertEqual(kinds, ['fixture_published', 'next_fixture'])
+
     def test_projection_recovers_after_state_committed_but_message_not_written(self):
         from orchestrator.engine import Engine
         from orchestrator.collaboration.projection import project

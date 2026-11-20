@@ -222,14 +222,14 @@ class Handler(BaseHTTPRequestHandler):
                 if action == 'usage' and method == 'GET':
                     return self.respond(insights.run_summary(service, key))
                 if action == 'events' and method == 'GET':
-                    service.snapshot(key)
+                    service.sync_run_events(run)
                     if 'before' in query:
                         events = store.history(key, int(query['before'][0]), int(query.get('limit', ['100'])[0]))
                     else:
                         events = store.events(key, int(query.get('after', ['0'])[0]), int(query.get('limit', ['100'])[0]))
                     return self.respond({'events': events, 'last_cursor': store.last_cursor(key)})
                 if action == 'stream' and method == 'GET':
-                    return self.stream(key, query)
+                    return self.stream(run, query)
                 if action == 'messages' and method == 'POST':
                     return self.respond(store.message(key, body['body'], self.idem()), 201)
                 if action == 'commands' and method == 'POST':
@@ -261,7 +261,7 @@ class Handler(BaseHTTPRequestHandler):
             raise ValueError('缺少合法幂等标识')
         return value
 
-    def stream(self, key, query):
+    def stream(self, run, query):
         if not self.app.streams.acquire(blocking=False):
             return self.respond({'error': '实时连接数量已到上限'}, 429)
         try:
@@ -275,11 +275,11 @@ class Handler(BaseHTTPRequestHandler):
             self.wfile.flush()
             last_heartbeat = time.monotonic()
             while not self.app.closed.is_set():
-                self.app.service.snapshot(key)
-                events = self.app.service.store.events(key, cursor, 100)
-                for event in events:
+                self.app.service.sync_run_events(run)
+                events = self.app.service.store.events(run['id'], cursor, 100)
+                for event in self.app.service.redact(events) if events else ():
                     packet = 'id: ' + str(event['cursor']) + '\nevent: update\ndata: ' + json.dumps(
-                        self.app.service.redact(event), ensure_ascii=False) + '\n\n'
+                        event, ensure_ascii=False) + '\n\n'
                     self.wfile.write(packet.encode('utf8'))
                     cursor = event['cursor']
                 if events or time.monotonic() - last_heartbeat > 12:

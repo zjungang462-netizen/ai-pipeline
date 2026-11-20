@@ -16,6 +16,7 @@ from ..state import RunState, atomic_write_json
 from .storage import Store, Conflict, identifier
 from .projection import project, directory, lifecycle, artifact_list, read_json, stage_target, SummaryCache
 from .execution_scope import execution_scope
+from .read_cache import ReadCache, file_stamp
 
 
 class Service:
@@ -29,6 +30,9 @@ class Service:
         self._configs = {}
         self._projection_cache = {}
         self._summary_cache = SummaryCache()
+        self._room_artifacts = ReadCache(64)
+        self._room_json = ReadCache(256)
+        self._published_activity = ReadCache(512)
         self.closed = threading.Event()
         self._sync_lock = threading.RLock()
         from .background_sync import BackgroundSync
@@ -46,8 +50,7 @@ class Service:
 
     def config(self, path):
         key = str(path)
-        stat = Path(path).stat()
-        signature = (stat.st_size, stat.st_mtime_ns)
+        signature = file_stamp(Path(path))
         cached = self._configs.get(key)
         if cached is None or cached[0] != signature:
             cached = (signature, load_config(path))
@@ -96,9 +99,35 @@ class Service:
             self.last_sync_error = ''
             return stats
 
+    def sync_run_events(self, run):
+        """只同步事件消费者所需的投影和当前 CLI 活动。"""
+        state, job = project(self.store, run, self._projection_cache)
+        from ..cli_activity import read_activities
+        activities = read_activities(run, state, read_progress=self._room_json.read_json)
+        key = run['id']
+        fresh = [activity for activity in activities if self._published_activity.lookup(
+            (key, activity['call_id']), activity['revision']) is None]
+        if fresh:
+            for activity, clean in zip(fresh, self.redact(fresh)):
+                call_id, revision = activity['call_id'], activity['revision']
+                self.store.event(key+':cli:'+call_id+':'+str(revision), key, 'cli_progress', clean)
+                self._published_activity.remember((key, call_id), revision, True)
+        return state, job, activities
+
+    def _artifact_view(self, run, state, job):
+        key = (run['id'], directory(run))
+        version = (state, job)
+        cached = self._room_artifacts.lookup(key, version)
+        if cached is not None:
+            return cached
+        artifacts = artifact_list(run)
+        # 封存可能早于状态提交，离线导入也会补文件，因此定期重扫展示目录。
+        self._room_artifacts.remember(key, version, artifacts, ttl=2)
+        return artifacts
+
     def snapshot(self, key):
         run = self.store.run(key)
-        state, job = project(self.store, run, self._projection_cache)
+        state, job, activities = self.sync_run_events(run)
         status = lifecycle(state, job)
         managed = bool(run['managed'])
         active = status in ('pending', 'running', 'recovering')
@@ -118,15 +147,11 @@ class Service:
                                  'rerun': managed and status in ('paused', 'waiting_external', 'waiting_owner', 'done', 'failed'),
                                  'discussion': bool(state.get('stages'))},
                 'parent_id': run['parent_id'], 'managed': managed,
-                'last_cursor': self.store.last_cursor(key),
                 'deadline': job.get('started_at', 0) + job.get('max_duration_s', 0) if job else state.get('control',{}).get('cli_deadline'),
-                'artifacts': artifact_list(run), 'threads': self.store.threads(key)}
+                'artifacts': self._artifact_view(run, state, job), 'threads': self.store.threads(key),
+                'cli_activity': activities}
         data['usage'] = dict(data['usage'])
         data['usage'].setdefault('reported_tokens', max(0, data['usage'].get('tokens', 0) - data['usage'].get('reserved_tokens', 0)))
-        from ..cli_activity import read_activities
-        data['cli_activity']=self.redact(read_activities(run,state))
-        for activity in data['cli_activity']:
-            self.store.event(key+':cli:'+activity['call_id']+':'+str(activity['revision']),key,'cli_progress',activity)
         data['last_cursor']=self.store.last_cursor(key)
         cfg = self.config(run['config'])
         data['budget'] = {'max_tokens': cfg.run_budget.max_tokens, 'max_duration_s': cfg.run_budget.max_duration_s}
@@ -134,7 +159,11 @@ class Service:
         from .model_settings import describe_models
         data['models'] = describe_models(cfg)
         data['code_stages'] = [s.name for s in cfg.stages if s.kind == 'code' and state.get('stages', {}).get(s.name, {}).get('commit_sha')]
-        data['metrics'] = read_json(directory(run) / 'metrics.json')
+        try:
+            metrics = self._room_json.read_json(directory(run) / 'metrics.json')
+        except (OSError, ValueError):
+            metrics = None
+        data['metrics'] = metrics if isinstance(metrics, dict) else {}
         observed_usage=(data['metrics'].get('stage_usage',{}) if data['metrics'] else state.get('stage_usage',{}))
         if isinstance(observed_usage,dict):
             for model in data['models']:

@@ -7,7 +7,7 @@ from .safety import relative_target
 from .cli_telemetry import counter
 
 
-def read_activities(run,state):
+def read_activities(run, state, *, read_progress=None):
     result=[]
     for identifier,record in state.get('autonomy',{}).get('pending_calls',{}).items():
         if not record.get('channel','').startswith('cli_'):continue
@@ -16,8 +16,11 @@ def read_activities(run,state):
             if stage!=record['stage'] or not number.isdigit():continue
             root=Path(run['state_dir'])/'runs'/run['run_id']
             path=relative_target(root,f'stages/{stage}/attempts/{number}/cli-progress.json')
-            if path.stat().st_size>65536:continue
-            value=json.loads(path.read_text(encoding='utf8'))
+            if read_progress is None:
+                if path.stat().st_size>65536:continue
+                value=json.loads(path.read_text(encoding='utf8'))
+            else:
+                value = read_progress(path, max_bytes=65536)
             if (not isinstance(value,dict) or value.get('schema_version')!=1 or value.get('run_id')!=run['run_id']
                     or value.get('call_id')!=identifier or value.get('stage')!=stage):continue
             if value.get('status') not in ('running','stopped','exited','failed','interrupted'):continue

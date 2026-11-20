@@ -91,6 +91,80 @@ class HistorySummary(unittest.TestCase):
         events = [row for row in self.service.store.events(key) if row['kind'] == 'engine_event']
         self.assertEqual([row['payload']['kind'] for row in events], ['attempt_done', 'approved'])
 
+    def test_room_reuses_artifact_listing_but_sees_revision_and_metrics_changes(self):
+        key, root = self.run_record()
+        first = root / 'stages/review/attempts/1'
+        atomic_write_json(first / 'manifest.json', {'files': {'final_text.txt': 'first'}})
+        atomic_write_json(root / 'metrics.json', {'tokens': 7})
+        reads = []
+        original = Path.open
+        self.service._room_artifacts.clock = lambda: 0.0
+
+        def track(path, *args, **kwargs):
+            if path.name == 'metrics.json':
+                reads.append(path)
+            return original(path, *args, **kwargs)
+
+        with mock.patch.object(Path, 'open', track), mock.patch(
+                'orchestrator.collaboration.service.artifact_list', wraps=projection.artifact_list) as scan:
+            start = self.service.snapshot(key)
+            self.assertEqual(start['metrics']['tokens'], 7)
+            start['artifacts'].clear()
+            updated = self.service.snapshot(key)
+            self.assertEqual(len(updated['artifacts']), 1)
+            self.assertEqual(scan.call_count, 1)
+            self.assertEqual(len(reads), 1)
+
+            atomic_write_json(root / 'metrics.json', {'tokens': 8})
+            self.assertEqual(self.service.snapshot(key)['metrics']['tokens'], 8)
+            self.assertEqual(scan.call_count, 1)
+            self.assertEqual(len(reads), 2)
+
+            second = root / 'stages/review/attempts/2'
+            atomic_write_json(second / 'success.json', {})
+            atomic_write_json(second / 'manifest.json', {'files': {'final_text.txt': 'second'}})
+            state = json.loads((root / 'state.json').read_bytes())
+            atomic_write_json(root / 'state.json', {**state, 'revision': 2})
+            self.assertEqual(len(self.service.snapshot(key)['artifacts']), 2)
+            self.assertEqual(scan.call_count, 2)
+
+    def test_event_poll_reads_progress_changes_without_room_or_state_refresh(self):
+        key, root = self.run_record(status='running')
+        state_path = root / 'state.json'
+        state = json.loads(state_path.read_bytes())
+        state['autonomy'] = {'pending_calls': {'review/1': {'channel': 'cli_codex', 'stage': 'review'}}}
+        atomic_write_json(state_path, state)
+        progress = root / 'stages/review/attempts/1/cli-progress.json'
+        value = {'schema_version': 1, 'run_id': 'r', 'stage': 'review', 'call_id': 'review/1',
+                 'status': 'running', 'revision': 1, 'usage': {'known_tokens': 7}}
+        atomic_write_json(progress, value)
+        run = self.service.store.run(key)
+        original = Path.open
+        reads = []
+
+        def track(path, *args, **kwargs):
+            if path == progress:
+                reads.append(path)
+            return original(path, *args, **kwargs)
+
+        with mock.patch.object(Path, 'open', track), mock.patch.object(
+                self.service, 'config', side_effect=AssertionError('事件轮询不读取配置')), mock.patch(
+                'orchestrator.collaboration.service.artifact_list',
+                side_effect=AssertionError('事件轮询不扫描产物')), mock.patch.object(
+                self.service.store, 'event', wraps=self.service.store.event) as publish:
+            self.service.sync_run_events(run)
+            self.service.sync_run_events(run)
+            self.assertEqual(len(reads), 1)
+            self.assertEqual(publish.call_count, 1)
+            atomic_write_json(progress, {**value, 'revision': 2, 'usage': {'known_tokens': 8}})
+            state, _, activity = self.service.sync_run_events(run)
+            self.assertEqual(state['revision'], 1)
+            self.assertEqual(activity[0]['known_tokens'], 8)
+            self.assertEqual(publish.call_count, 2)
+        events = [row['payload']['known_tokens'] for row in self.service.store.events(key)
+                  if row['kind'] == 'cli_progress']
+        self.assertEqual(events, [7, 8])
+
     def test_updated_state_and_job_invalidate_summary_without_full_snapshot(self):
         key,root=self.run_record()
         self.assertEqual(self.service.list_runs_page(status='running')['runs'],[])
