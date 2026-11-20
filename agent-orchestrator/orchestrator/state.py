@@ -458,6 +458,27 @@ class RunState:
             return None
         return self.attempts_dir(name) / str(st.current_attempt)
 
+    def failure_reason(self, name: str) -> str | None:
+        """仅从与当前失败 attempt 绑定的结论读取原因码。"""
+        stage = self.stage(name)
+        directory = self.current_attempt_dir(name)
+        if (stage.status != StageStatus.FAILED or directory is None
+                or not stage.inputs_hash or not stage.outputs_hash):
+            return None
+        try:
+            decision = json.loads((directory / "decision.json").read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return None
+        if not isinstance(decision, dict):
+            return None
+        if (decision.get("status"), decision.get("verdict"), decision.get("n"),
+                decision.get("inputs_hash"), decision.get("outputs_hash")) != (
+                StageStatus.FAILED.value, "fail", stage.current_attempt,
+                stage.inputs_hash, stage.outputs_hash):
+            return None
+        reason = decision.get("reason_code")
+        return reason if isinstance(reason, str) else None
+
     def scan_interrupted(self) -> list[str]:
         """启动扫描：有 attempts 目录但无 success.json => interrupted（评审 B4）。"""
         interrupted: list[str] = []
@@ -582,7 +603,7 @@ class RunState:
                        commit_sha: str | None, branch: str | None,
                        verdict: str | None = None,
                        status: StageStatus = StageStatus.DONE,
-                       error: str | None = None) -> None:
+                       error: str | None = None, *, reason_code: str | None = None) -> None:
         """写产物清单与独立结论，再原子切 current 指针。
 
         审查结论一并写入：pass 才是完成，fail 续跑不得被当成通过。
@@ -607,6 +628,7 @@ class RunState:
         atomic_write_json(attempt_dir / "success.json", payload)
         atomic_write_json(attempt_dir / "decision.json", {
             **payload, "verdict": verdict or "pass", "status": status.value,
+            **({"reason_code": reason_code} if reason_code is not None else {}),
         })
         st = self.stage(name)
         self._set_attempt_record(name, n, attempt_dir, success=status == StageStatus.DONE,

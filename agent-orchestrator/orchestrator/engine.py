@@ -65,6 +65,7 @@ class Engine(GuardControls, StageExecutor, ReviewPolicy, BudgetPolicy, ArchiveOp
         # 审查上下文覆盖不完整（diff 截断且无法注入全部变更文件）=> 记录未纳入清单，
         # pass 结论不得直接当作完成，只能交人工确认/在无人值守下失败。
         self._review_missing: dict[str, list[str]] = {}
+        self._review_context_cache = {}
         # G1：应用配置的 git 路径后再探测（PATH 无 git 时走兜底）
         artifacts.set_git_exe(config.git_exe)
         self._git_ready = artifacts.git_available()
@@ -98,6 +99,7 @@ class Engine(GuardControls, StageExecutor, ReviewPolicy, BudgetPolicy, ArchiveOp
 
     # ---- 初始化 / 续跑 ----
     def prepare(self) -> None:
+        self._review_context_cache.clear()
         loaded = self.state.load()
         if not loaded:
             for s in self.config.stages:

@@ -70,9 +70,20 @@ class TestReviewResumeKeepsFailure(unittest.TestCase):
             res = eng.run()
             self.assertEqual(res["review"], StageStatus.FAILED.value)
             self.assertIn("仍未通过", eng.state.stage("review").error)
+            decision = eng.state.current_attempt_dir("review") / "decision.json"
+            self.assertEqual(json.loads(decision.read_text(encoding="utf-8"))["reason_code"],
+                             "review_exhausted")
+            eng.state.stage("review").error = "Review ended without approval."
+            eng.state.save()
             review2 = AlwaysFailReview()
             eng2 = Engine(cfg, {"fake": FakeAdapter(), "review": review2}, run_id="rv", task="t")
-            res2 = eng2.run()
+            # 只在进入审查通用恢复分支时失败；上游阶段仍按正常路径续跑。
+            original = eng2.state.terminal_replay
+            def terminal_replay(name, inputs_hash):
+                self.assertNotEqual(name, "review")
+                return original(name, inputs_hash)
+            with mock.patch.object(eng2.state, "terminal_replay", side_effect=terminal_replay):
+                res2 = eng2.run()
             self.assertEqual(res2["review"], StageStatus.FAILED.value)
             self.assertEqual(review2.calls, 0)
 
@@ -89,11 +100,32 @@ class TestReviewResumeKeepsFailure(unittest.TestCase):
             data.pop("verdict", None)
             data.pop("error", None)
             sj.write_text(json.dumps(data), encoding="utf-8")
+            decision = attempt / "decision.json"
+            data = json.loads(decision.read_text(encoding="utf-8"))
+            data.pop("reason_code")
+            decision.write_text(json.dumps(data), encoding="utf-8")
             review2 = AlwaysFailReview()
             eng2 = Engine(cfg, {"fake": FakeAdapter(), "review": review2}, run_id="lg", task="t")
             res = eng2.run()
             self.assertEqual(res["review"], StageStatus.FAILED.value)
             self.assertEqual(review2.calls, 0)
+
+    def test_review_context_is_reused_until_upstream_attempt_changes(self):
+        with tempfile.TemporaryDirectory() as d:
+            cfg = _review_cfg(Path(d))
+            eng = Engine(cfg, {"fake": FakeAdapter(), "review": AlwaysFailReview()},
+                         run_id="cached", task="t")
+            with mock.patch.object(artifacts, "cumulative_diff_info",
+                                   wraps=artifacts.cumulative_diff_info) as diff:
+                self.assertEqual(eng.run()["review"], StageStatus.FAILED.value)
+                self.assertEqual(diff.call_count, 1)
+                review = cfg.stage("review")
+                initial_hash = eng.state.stage("review").inputs_hash
+                self.assertEqual(eng._inputs_hash(review, 1), initial_hash)
+                self.assertEqual(diff.call_count, 1)
+                eng.state.stage("coding").outputs_hash = "changed"
+                self.assertNotEqual(eng._inputs_hash(review, 1), initial_hash)
+                self.assertEqual(diff.call_count, 2)
 
 
 class TestBudgetAccounted(unittest.TestCase):

@@ -102,6 +102,27 @@ class ReviewPolicy:
                     parts.append(f"### 被审查代码库（工作区现有源码）\n{existing}")
         return "\n\n".join(parts), reports
 
+    def _review_upstream_context(self, index: int, spec: StageSpec) -> tuple[str, list[Path]]:
+        upstream = [(stage, self.state.stage(stage.name)) for stage in self.config.stages[:index]]
+        # 直接审查工作区时没有上游提交约束，仍按当前文件生成上下文。
+        if (not self._git_ready or not any(stage.kind == "code" and state.commit_sha
+                                           for stage, state in upstream)
+                or any(state.current_attempt is not None and not state.outputs_hash
+                       for _, state in upstream)):
+            return self._upstream_context(index, spec)
+        # 截断报告可能包含 attempt 路径，diff 取决于提交和基线，不能只比较内容哈希。
+        key = (tuple((stage.name, stage.kind, state.current_attempt,
+                      state.outputs_hash, state.commit_sha) for stage, state in upstream),
+               self.state.control.get("project_baseline"), asdict(self.config.review_coverage))
+        cached = self._review_context_cache.get(spec.name)
+        if cached is None or cached[0] != key:
+            context, reports = self._upstream_context(index, spec)
+            cached = (key, context, tuple(reports), tuple(self._review_missing[spec.name]))
+            self._review_context_cache[spec.name] = cached
+        _, context, reports, missing = cached
+        self._review_missing[spec.name] = list(missing)
+        return context, list(reports)
+
     def _render_prompt(self, spec: StageSpec, index: int) -> str:
         """渲染模板：注入 task / upstream / feedback（评审 B1 + L2）。
 
@@ -117,6 +138,8 @@ class ReviewPolicy:
         if feedback and spec.kind == "code":
             upstream = self._rework_context(feedback)
             reports = []
+        elif spec.kind == "review":
+            upstream, reports = self._review_upstream_context(index, spec)
         else:
             upstream, reports = self._upstream_context(index, spec)
         self._reports[spec.name] = reports
@@ -350,6 +373,8 @@ class ReviewPolicy:
         st = self.state.stage(spec.name)
         if st.status != StageStatus.FAILED or st.inputs_hash != inputs_hash:
             return False
+        if self.state.failure_reason(spec.name) == "review_exhausted":
+            return True
         return bool(st.error) and "仍未通过" in st.error
 
     def _handle_review(self, spec: StageSpec, result: Result, attempt_dir: Path,
@@ -446,7 +471,7 @@ class ReviewPolicy:
             self.state.commit_success(
                 spec.name, n, attempt_dir, inputs_hash, outputs_hash,
                 result.commit_sha, result.branch, verdict="fail",
-                status=StageStatus.FAILED, error=stopped or error)
+                status=StageStatus.FAILED, error=stopped or error, reason_code="review_exhausted")
             return StageStatus.FAILED
 
         # 没有文件级问题 => 机器无法执行返工，停下等人处理，
