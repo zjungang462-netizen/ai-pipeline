@@ -167,10 +167,14 @@ def main(argv=None):
     mode.add_argument('--suite', choices=('fast','slow','full'), default='full', help='显式测试分层；默认 full')
     parser.add_argument('--slow-threshold', type=float, default=2, help='慢用例记录阈值，秒')
     parser.add_argument('--redact-logs', action='store_true', help='对回归日志与 CLI 冒烟日志脱敏')
+    parser.add_argument('--allow-linux-windows-skips', action='store_true',
+                        help='仅 Linux 全量矩阵允许已登记的 Windows 专用跳过')
     args=parser.parse_args(argv)
     if not math.isfinite(args.slow_threshold) or args.slow_threshold<=0:
         parser.error('--slow-threshold 必须为正数')
     selected_mode='fast' if args.quick else args.suite
+    if args.allow_linux_windows_skips and (sys.platform != 'linux' or selected_mode != 'full'):
+        parser.error('--allow-linux-windows-skips 只适用于 Linux full')
     output=Path(args.output).resolve()
     if output.is_relative_to(ROOT):raise ValueError('验证输出目录必须位于项目之外')
     output.mkdir(parents=True,exist_ok=True)
@@ -221,7 +225,28 @@ def main(argv=None):
     proof['redaction']={'verification_json':'known_credentials_and_token_patterns',
                         'full_regression_log':'known_credentials_and_token_patterns' if args.redact_logs else 'raw_not_redacted',
                         'cli_logs':'known_credentials_and_token_patterns' if args.redact_logs else 'raw_not_redacted'}
-    proof['exit_code']=0 if result.wasSuccessful() and before==after and not result.skipped else 1
+    permitted_skips = set()
+    if args.allow_linux_windows_skips:
+        permitted_skips = {
+            (f'test_process_start.ProcessStart.{name}', 'Windows Job 启动顺序回归')
+            for name in ('test_cmd_child_cannot_escape_before_delayed_job_attachment',
+                         'test_fast_resume_path_does_not_enumerate_system_threads',
+                         'test_fast_resume_falls_back_to_thread_scan_when_unavailable',
+                         'test_resume_failure_terminates_owned_process_and_leaves_no_job_handle',
+                         'test_failed_resume_closes_job_and_kills_suspended_process',
+                         'test_short_command_executes_after_job_attachment')
+        } | {
+            (f'test_codex_windows_profile.CodexWindowsProfile.{name}', 'Windows 沙箱配置仅适用于 Windows')
+            for name in ('test_isolated_profile_keeps_explicit_backend_without_global_extensions',
+                         'test_backend_change_invalidates_profile_fingerprint',
+                         'test_invalid_backend_and_shape_are_rejected_before_execution')
+        }
+    unexpected_skips = [(test.id(), reason) for test, reason in result.skipped
+                        if (test.id(), reason) not in permitted_skips]
+    if args.allow_linux_windows_skips:
+        proof['unexpected_skips'] = [entry for entry in proof['skipped']
+                                     if (entry['test'], entry['reason']) in unexpected_skips]
+    proof['exit_code']=0 if result.wasSuccessful() and before==after and not unexpected_skips else 1
     if selected_mode=='fast':
         proof['quick_budget_s']=120
         proof['quick_within_budget']=proof['duration_s']<=120

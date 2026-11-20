@@ -1,0 +1,40 @@
+name: Linux Offline Matrix
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/linux-matrix.yml'
+
+permissions:
+  contents: read
+jobs:
+  full:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        python: ['3.11', '3.13']
+    env:
+      PYTHONUTF8: '1'
+      PYTHONIOENCODING: utf-8
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: Full offline acceptance
+        working-directory: agent-orchestrator
+        run: python scripts/verify_delivery.py --suite full --redact-logs --allow-linux-windows-skips --output "$RUNNER_TEMP/linux-evidence"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: linux-${{ matrix.python }}-${{ github.sha }}
+          path: ${{ runner.temp }}/linux-evidence/
+          retention-days: 14
