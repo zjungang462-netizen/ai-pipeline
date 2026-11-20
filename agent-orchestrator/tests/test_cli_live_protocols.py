@@ -205,7 +205,16 @@ class RealCLIProtocols(unittest.TestCase):
         self.assertIn('CHILD_PID=',error.exception.stdout)
         from orchestrator.state import _pid_alive
         child_pid = int(error.exception.stdout.split('CHILD_PID=')[1].splitlines()[0])
-        self.assertFalse(_pid_alive(child_pid))
+        if sys.platform == 'linux' and _pid_alive(child_pid):
+            # SIGKILL 已生效的孤儿可能仍由 PID 1 等待回收，不能再执行用户代码。
+            try:
+                status = Path(f'/proc/{child_pid}/stat').read_text(encoding='utf8')
+            except FileNotFoundError:
+                self.assertFalse(_pid_alive(child_pid))
+            else:
+                self.assertIn(status.rsplit(')', 1)[1].split()[0], ('Z', 'X'))
+        else:
+            self.assertFalse(_pid_alive(child_pid))
         self.assertFalse(flag.exists())
 
 

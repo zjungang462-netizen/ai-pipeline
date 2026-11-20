@@ -7,6 +7,7 @@ from .safety import WriteRootGuard, WriteRootViolation, relative_target
 from .state import RunState, StageLock, atomic_write_json, compute_inputs_hash, sha256_text
 from dataclasses import asdict
 from pathlib import Path
+import errno
 import json
 import os
 import re
@@ -21,7 +22,13 @@ class ReviewPolicy:
         p = Path(spec.prompt)
         if not p.is_absolute():
             p = self.config.base_dir / p
-        if p.is_file():
+        try:
+            is_file = p.is_file()
+        except OSError as error:
+            if error.errno != errno.ENAMETOOLONG:
+                raise
+            is_file = False
+        if is_file:
             return p.read_text(encoding="utf-8")
         return spec.prompt  # 允许直接内联 prompt 文本
 
