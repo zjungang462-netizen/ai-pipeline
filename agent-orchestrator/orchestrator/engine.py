@@ -100,6 +100,7 @@ class Engine(GuardControls, StageExecutor, ReviewPolicy, BudgetPolicy, ArchiveOp
     # ---- 初始化 / 续跑 ----
     def prepare(self) -> None:
         self._review_context_cache.clear()
+        self._review_workspace_hash = None
         loaded = self.state.load()
         if not loaded:
             for s in self.config.stages:

@@ -1,7 +1,6 @@
 """Qoder 1.1.89/协议1.5.0：stdin、流式终态、受限文件工具、未知token与credits分列。"""
 from __future__ import annotations
 
-import json
 import math
 import subprocess
 from pathlib import Path
@@ -10,8 +9,9 @@ from ..contracts import ErrorKind, PreflightReport, Result, RunContext
 from ..safety import build_subprocess_env, resolve_exe
 from .cli_base import CLIAdapter, run_cli_process
 from .cli_codex import strip_ansi
+from .cli_result_stream import RESULT_STREAMS
 
-SUPPORTED_VERSION = '1.1.89'
+SUPPORTED_VERSION, = RESULT_STREAMS['cli_qoder'].accepted_versions
 
 
 class QoderAdapter(CLIAdapter):
@@ -93,19 +93,7 @@ class QoderAdapter(CLIAdapter):
 
     def _parse_1189(self, proc, stdout, stderr):
         try:
-            try:
-                data=json.loads(stdout)
-                if not isinstance(data,dict):raise ValueError('不是对象')
-                events=[data]
-            except json.JSONDecodeError:
-                events=[json.loads(line) for line in stdout.splitlines() if line.strip()]
-                if not events or not all(isinstance(e,dict) for e in events):raise ValueError('非法事件流')
-                init=next(e for e in events if e.get('type')=='system' and e.get('subtype')=='init')
-                if init.get('qodercli_version')!='1.1.89' or init.get('protocol_version')!='1.5.0':
-                    raise ValueError('初始化协议不匹配')
-            finals=[e for e in events if e.get('type')=='result']
-            if len(finals)!=1 or events[-1] is not finals[0]:raise ValueError('缺少唯一最终结果')
-            final=finals[0]
+            _, final = RESULT_STREAMS[self.channel].parse(stdout, self._version)
             if not isinstance(final.get('permission_denials'),list):raise ValueError('permission_denials 非列表')
             usage=self._reported_usage(final)
             if (final.get('subtype')!='success' or final.get('is_error') is not False

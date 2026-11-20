@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 import os
+import re
 import shutil
 import subprocess
 import tempfile
@@ -104,7 +105,7 @@ def _no_hooks_dir() -> str:
 
 
 def _git(args: list[str], cwd: Path, check: bool = True,
-         timeout: int = 120) -> subprocess.CompletedProcess:
+         timeout: int = 120, *, stdin: str | None = None) -> subprocess.CompletedProcess:
     """git 子进程：env 白名单（不透传 API Key）+ 超时 + 禁用 hook。"""
     from .safety import build_subprocess_env
     exe = resolve_git() or "git"
@@ -112,6 +113,7 @@ def _git(args: list[str], cwd: Path, check: bool = True,
     try:
         proc = subprocess.run(
             cmd, cwd=str(cwd), env=build_subprocess_env(),
+            input=stdin,
             capture_output=True, text=True, encoding="utf-8", errors="replace",
             timeout=timeout,
         )
@@ -378,6 +380,47 @@ def workspace_hash(workdir: Path, exclude: Path | None = None,
     if missing:
         return sha256_text(repr((values, sorted(missing))))
     return sha256_text(repr(values))
+
+
+def verified_workspace_tree(workdir: Path, exclude: Path | None = None) -> str | None:
+    """仅当工作区范围及原始文件字节均与提交树一致时采用树指纹。"""
+    root = Path(workdir).resolve()
+    if not (root / ".git").exists():
+        return None
+    try:
+        tree = _git(["rev-parse", "--verify", "HEAD^{tree}"], root).stdout.strip()
+        if not re.fullmatch(r"[0-9a-f]{40}|[0-9a-f]{64}", tree):
+            return None
+        listing = _git(["ls-tree", "-r", "-z", "--full-tree", tree], root).stdout
+        blobs = {}
+        excluded = Path(exclude).resolve() if exclude else None
+        for row in listing.split("\0"):
+            if not row:
+                continue
+            meta, path = row.split("\t", 1)
+            mode, kind, oid = meta.split(" ")
+            parts = path.split("/")
+            if (any(part.startswith(".") for part in parts)
+                    or any(part in SKIP_DIRS for part in parts[:-1])
+                    or (excluded and (root / path).is_relative_to(excluded))):
+                continue
+            if kind != "blob" or mode not in ("100644", "100755"):
+                return None
+            blobs[path] = oid
+        paths = {file.relative_to(root).as_posix(): file for file in workspace_files(root, exclude)}
+        if paths.keys() != blobs.keys() or any(
+                path.is_symlink() or set(path.as_posix()) & {'\n', '\r'}
+                for path in paths.values()):
+            return None
+        if paths:
+            # 批量重读原文。不使用 Git 的 stat 缓存、ignore 或换行转换来证明内容。
+            actual = _git(["hash-object", "--no-filters", "--stdin-paths"], root,
+                          stdin="".join(path.as_posix() + "\n" for path in paths.values()))
+            if actual.stdout.splitlines() != [blobs[name] for name in paths]:
+                return None
+        return tree
+    except (GitError, OSError, ValueError):
+        return None
 
 
 def existing_code_context(workdir: Path, max_file_bytes: int = 12000,

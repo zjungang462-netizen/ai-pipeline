@@ -123,6 +123,18 @@ class UsageLedger:
                 'usage_complete':self.complete,'usage_scope':'final_or_completed_responses' if self.complete else 'completed_responses_only'}
 
 
+_ASSISTANT_STREAM_USAGE = {
+    'cli_claude': UsageLedger.observe_claude,
+    'cli_qwen': UsageLedger.observe_qwen,
+    # Qoder 的计数仍按其独立终态读取，不用于实时用量结算。
+    'cli_qoder': None,
+}
+_ASSISTANT_TOOL_NAMES = {
+    'Read': 'read_file', 'Edit': 'edit_file', 'Write': 'write_file', 'Glob': 'glob', 'Grep': 'grep',
+    'read_file': 'read_file', 'edit': 'edit_file',
+}
+
+
 class StreamRedactor:
     """先替换已知完整密钥，再保留最长密钥长度的尾部，防止跨 chunk 泄漏。"""
     def __init__(self,secrets=()):
@@ -249,9 +261,10 @@ class CLITrace:
         except (ValueError,TypeError):return
         if not isinstance(event,dict):return
         self.ledger.observe(event)
-        if self.channel=='cli_claude':self.ledger.observe_claude(event)
-        if self.channel=='cli_qwen':self.ledger.observe_qwen(event)
-        if self.channel in ('cli_qoder','cli_claude','cli_qwen'):
+        if self.channel in _ASSISTANT_STREAM_USAGE:
+            observe = _ASSISTANT_STREAM_USAGE[self.channel]
+            if observe is not None:
+                observe(self.ledger, event)
             message=event.get('message')
             content=message.get('content',[]) if isinstance(message,dict) else []
             for item in content if isinstance(content,list) else []:
@@ -259,8 +272,7 @@ class CLITrace:
                 if event.get('type')=='assistant' and item.get('type')=='tool_use' and isinstance(item.get('id'),str):
                     name=item.get('name')
                     # 仅映射真实抓取的读/写事件；不推断任意工具调用具有写权限。
-                    mapped={'Read':'read_file','Edit':'edit_file','Write':'write_file','Glob':'glob','Grep':'grep',
-                            'read_file':'read_file','edit':'edit_file'}.get(name)
+                    mapped = _ASSISTANT_TOOL_NAMES.get(name)
                     if not mapped:continue
                     key=(self.channel,str(event.get('session_id') or ''),item['id'])
                     parameters=item.get('input',{})

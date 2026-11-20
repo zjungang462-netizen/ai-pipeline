@@ -9,10 +9,11 @@ from urllib.parse import urlsplit
 
 from .cli_base import CLIAdapter, run_cli_process
 from .cli_codex import strip_ansi
+from .cli_result_stream import RESULT_STREAMS
 from ..contracts import ErrorKind,Result,PreflightReport
 from ..safety import build_subprocess_env, resolve_exe
 
-SUPPORTED_VERSIONS = frozenset(('2.1.325', '2.1.328'))
+SUPPORTED_VERSIONS = RESULT_STREAMS['cli_claude'].accepted_versions
 
 CONNECTION_KEYS=frozenset(('ANTHROPIC_API_KEY','ANTHROPIC_AUTH_TOKEN','ANTHROPIC_BASE_URL',
     'ANTHROPIC_MODEL','ANTHROPIC_DEFAULT_OPUS_MODEL','ANTHROPIC_DEFAULT_SONNET_MODEL','ANTHROPIC_DEFAULT_HAIKU_MODEL'))
@@ -108,13 +109,7 @@ class ClaudeAdapter(CLIAdapter):
         if not self._version_known():
             result=self._unknown_version(proc,'未验证的Claude Code版本');result.usage={'usage_unknown':True};return result
         try:
-            events=[json.loads(line) for line in stdout.splitlines() if line.strip()]
-            if not events or not all(isinstance(e,dict) for e in events):raise ValueError('非法事件流')
-            init=next(e for e in events if e.get('type')=='system' and e.get('subtype')=='init')
-            if init.get('claude_code_version')!=self._version.split(' ',1)[0]:raise ValueError('初始化版本不匹配')
-            finals=[e for e in events if e.get('type')=='result']
-            if len(finals)!=1 or events[-1] is not finals[0]:raise ValueError('需要唯一末尾终态')
-            final=finals[0]
+            init, final = RESULT_STREAMS[self.channel].parse(stdout, self._version.split(' ', 1)[0])
             if not isinstance(final.get('permission_denials'),list):raise ValueError('权限拒绝字段非法')
             raw=final.get('usage')
             if not isinstance(raw,dict):raise ValueError('usage必须为对象')

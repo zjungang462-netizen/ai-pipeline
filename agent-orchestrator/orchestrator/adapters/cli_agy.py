@@ -13,6 +13,7 @@ from urllib.parse import urlsplit
 from ..contracts import ErrorKind, Result, RunContext
 from .cli_base import CLIAdapter
 from .cli_codex import strip_ansi
+from .cli_result_stream import jsonl_objects
 
 SUPPORTED_VERSIONS = frozenset(('1.5.9', '1.5.12', '1.5.13'))
 
@@ -76,14 +77,7 @@ class AgyAdapter(CLIAdapter):
     def _parse(self, proc, workdir: Path, ctx: RunContext) -> Result:
         stdout = strip_ansi(proc.stdout or "")
         stderr = strip_ansi(proc.stderr or "")
-        events = []
-        for line in stdout.splitlines():
-            try:
-                event = json.loads(line)
-                if isinstance(event, dict):
-                    events.append(event)
-            except ValueError:
-                continue
+        events = list(jsonl_objects(stdout))
         results = [e['result'] for e in events if e.get('event') == 'result' and isinstance(e.get('result'), dict)]
         final = results[-1] if results else {}
         reported = final.get('usage', {})

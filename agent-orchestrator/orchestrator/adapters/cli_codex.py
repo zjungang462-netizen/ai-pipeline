@@ -16,6 +16,7 @@ from pathlib import Path
 
 from ..contracts import ErrorKind, Result, RunContext
 from .cli_base import CLIAdapter
+from .cli_result_stream import jsonl_objects
 
 # 已验证可解析的 codex 版本前缀（fixture 绑定这些版本）
 KNOWN_VERSION_PREFIXES = ("codex-cli 0.167.", "codex-cli 0.169.", "codex 0.167.", "codex 0.169.")
@@ -33,17 +34,12 @@ def parse_codex_jsonl(stdout: str) -> tuple[str, bool]:
     兼容多种事件形态：item.completed / agent_message / 含 text 的消息。
     解析不到任何有效消息 => (原始文本, False)。
     """
+    return _codex_message(jsonl_objects(stdout), stdout)
+
+
+def _codex_message(events, stdout):
     texts: list[str] = []
-    for line in stdout.splitlines():
-        line = line.strip()
-        if not line or not line.startswith("{"):
-            continue
-        try:
-            ev = json.loads(line)
-        except ValueError:
-            continue
-        if not isinstance(ev, dict):
-            continue
+    for ev in events:
         # 形态 1: {"type":"item.completed","item":{"type":"agent_message","text":...}}
         item = ev.get("item") or {}
         if ev.get('type') == 'item.completed' and isinstance(item, dict) and item.get('type') in (None, 'agent_message'):
@@ -160,14 +156,7 @@ class CodexAdapter(CLIAdapter):
     def _parse(self, proc, workdir: Path, ctx: RunContext) -> Result:
         stdout = strip_ansi(proc.stdout or "")
         stderr = strip_ansi(proc.stderr or "")
-        events = []
-        for line in stdout.splitlines():
-            try:
-                event = json.loads(line)
-                if isinstance(event, dict):
-                    events.append(event)
-            except ValueError:
-                continue
+        events = list(jsonl_objects(stdout))
         # 同一个 turn 的重放/重复完成事件只能入账一次。
         by_turn = {}
         for event in events:
@@ -214,7 +203,7 @@ class CodexAdapter(CLIAdapter):
             result = self._unknown_version(proc, 'Codex 未提交回合完成事件')
             result.usage = usage
             return result
-        text, ok = parse_codex_jsonl(stdout)
+        text, ok = _codex_message(events, stdout)
         if not ok:
             result = self._unknown_version(proc, "JSONL 解析未得到有效消息")
             result.usage = usage

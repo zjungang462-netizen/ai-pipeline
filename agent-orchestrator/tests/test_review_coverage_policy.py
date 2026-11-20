@@ -1,5 +1,6 @@
 """审查覆盖配置、缺失清单证据、人工/失败/显式放行与恢复回归。"""
 import json
+import os
 import tempfile
 import unittest
 from pathlib import Path
@@ -101,3 +102,40 @@ class ReviewCoveragePolicy(unittest.TestCase):
         engine._review_missing={}
         self.assertEqual(engine._inputs_hash(spec,0),first)
         self.assertEqual(engine._review_missing['review'],missing)
+
+    def test_verified_tree_rejects_live_workspace_changes(self):
+        for path in self.ws.glob('*.py'):
+            path.write_bytes(path.read_bytes().replace(b'\r\n', b'\n'))
+        artifacts.ensure_repo(self.ws)
+        artifacts._git(['config', 'core.autocrlf', 'false'], self.ws)
+        ignored = self.ws / '.gitignore'
+        ignored.write_text('ignored.py\n', encoding='utf-8')
+        artifacts.commit_files(self.ws, ['.gitignore'], 'add ignore rules')
+        head = artifacts.head_sha(self.ws)
+        tree = artifacts.verified_workspace_tree(self.ws)
+        self.assertEqual(tree, artifacts._git(['rev-parse', 'HEAD^{tree}'], self.ws).stdout.strip())
+        source = self.ws / 'a.py'
+        original = source.read_bytes()
+        before = source.stat()
+        source.write_bytes(original.replace(b'1', b'9'))
+        os.utime(source, ns=(before.st_atime_ns, before.st_mtime_ns))
+        self.assertIsNone(artifacts.verified_workspace_tree(self.ws))
+        source.write_bytes(original.replace(b'\n', b'\r\n'))
+        self.assertIsNone(artifacts.verified_workspace_tree(self.ws))
+        source.write_bytes(original)
+        (self.ws / 'ignored.py').write_text('SECRET_VALUE = 2\n', encoding='utf-8')
+        self.assertIsNone(artifacts.verified_workspace_tree(self.ws))
+        self.assertEqual(artifacts.head_sha(self.ws), head)
+        self.assertEqual(artifacts._git(['diff', '--cached', '--name-only'], self.ws).stdout, '')
+
+    def test_git_review_resume_revalidates_dirty_input_on_same_engine(self):
+        for path in self.ws.glob('*.py'):
+            path.write_bytes(path.read_bytes().replace(b'\r\n', b'\n'))
+        artifacts.ensure_repo(self.ws)
+        engine = self.engine('allow')
+        self.assertEqual(engine.run()['review'], 'done')
+        self.assertEqual(engine.run()['review'], 'done')
+        self.assertEqual(len(engine.state.stage('review').attempts), 1)
+        (self.ws / 'b.py').write_text('OTHER = 7\n', encoding='utf-8')
+        self.assertEqual(engine.run()['review'], 'done')
+        self.assertEqual(len(engine.state.stage('review').attempts), 2)

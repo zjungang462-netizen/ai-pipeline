@@ -13,6 +13,7 @@ from urllib.parse import urlsplit
 from ..contracts import ErrorKind, Result, RunContext
 from .cli_base import CLIAdapter
 from .cli_codex import strip_ansi
+from .cli_result_stream import RESULT_STREAMS
 
 class QwenAdapter(CLIAdapter):
     channel = "cli_qwen"
@@ -29,7 +30,7 @@ class QwenAdapter(CLIAdapter):
 
     def _version_known(self) -> bool:
         v = (self._version or "").lower().strip()
-        return v in ('0.26.0', 'qwen-code 0.5.0', 'qwen 0.5.0')
+        return v in RESULT_STREAMS[self.channel].accepted_versions or v in ('qwen-code 0.5.0', 'qwen 0.5.0')
 
     def preflight(self):
         return self.verified_preflight()
@@ -88,19 +89,9 @@ class QwenAdapter(CLIAdapter):
                       tool_version=self._version)
 
     def _parse_026(self, stdout, stderr, exit_code):
-        """0.26.0 的真实 --output-format json 是事件数组，只认唯一成功终态。"""
+        """验证当前流式输出与旧事件数组的唯一末尾终态。"""
         try:
-            events = json.loads(stdout) if stdout.lstrip().startswith('[') else [json.loads(line) for line in stdout.splitlines() if line.strip()]
-            if not isinstance(events, list) or not all(isinstance(e, dict) for e in events):
-                raise ValueError('需要真实事件数组')
-            init = next(e for e in events if isinstance(e, dict) and e.get('type') == 'system'
-                        and e.get('subtype') == 'init')
-            if init.get('qwen_code_version') != '0.26.0':
-                raise ValueError('init 版本不匹配')
-            finals = [e for e in events if isinstance(e, dict) and e.get('type') == 'result']
-            if len(finals) != 1 or events[-1] is not finals[0]:
-                raise ValueError('缺少唯一末尾结果事件')
-            final = finals[0]
+            _, final = RESULT_STREAMS[self.channel].parse(stdout, self._version.strip())
             if final.get('subtype') != 'success' or final.get('is_error') is not False:
                 raise ValueError('CLI 结果不是成功')
             if final.get('permission_denials') not in (None, []):

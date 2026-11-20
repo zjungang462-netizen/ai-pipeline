@@ -324,9 +324,15 @@ class ReviewPolicy:
             # 审查现有代码库：输入是工作区源码本身。把工作区内容哈希并列
             # 参与指纹与 autonomy 逻辑哈希，源码变化后旧 verdict 不再被采纳。
             if getattr(self, '_review_workspace_hash', None) is None:
-                self._review_workspace_hash = artifacts.workspace_hash(
-                    self.config.task_workdir, exclude=self.config.state_dir)
-            config_keys["__review_workspace__"] = self._review_workspace_hash
+                tree = (artifacts.verified_workspace_tree(
+                    self.config.task_workdir, exclude=self.config.state_dir) if self._git_ready else None)
+                self._review_workspace_hash = (
+                    (tree, True) if tree else
+                    (artifacts.workspace_hash(self.config.task_workdir, exclude=self.config.state_dir), False))
+            workspace, is_tree = self._review_workspace_hash
+            config_keys["__review_workspace__"] = workspace
+            if is_tree:
+                config_keys["__review_workspace_protocol__"] = 3
         if spec.kind == "test":
             if not any(self.state.stage(u.name).commit_sha
                        for u in self.config.stages[:index]):

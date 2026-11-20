@@ -8,6 +8,7 @@ from urllib.parse import urlsplit
 from ..contracts import ErrorKind, Result, RunContext
 from .cli_base import CLIAdapter
 from .cli_codex import strip_ansi
+from .cli_result_stream import jsonl_objects
 from ..cli_telemetry import UsageLedger
 
 MAX_TEXT = 200_000  # 超长输出截断保护
@@ -43,11 +44,10 @@ class DshAdapter(CLIAdapter):
     def _parse(self, proc, workdir: Path, ctx: RunContext) -> Result:
         stdout = strip_ansi(proc.stdout or "")
         stderr = strip_ansi(proc.stderr or "")
-        events=[];ledger=UsageLedger()
-        for line in stdout.splitlines():
-            try:event=json.loads(line)
-            except ValueError:continue
-            if isinstance(event,dict):events.append(event);ledger.observe(event)
+        events = list(jsonl_objects(stdout))
+        ledger = UsageLedger()
+        for event in events:
+            ledger.observe(event)
         measured=ledger.snapshot()
         usage={**measured,'usage_unknown':not measured['usage_complete'],'accounting':'reported_total_includes_cache'}
         finals=[e for e in events if e.get('type')=='final']
