@@ -236,6 +236,25 @@ class CLIAdapter(Adapter):
         self._version = rep.tool_version
         return rep
 
+    def verified_preflight(self) -> PreflightReport:
+        """只接受成功退出且 stdout 精确匹配解析白名单的版本探测。"""
+        self._resolved = resolve_exe(self.exe_name, self.exe)
+        self._version = None
+        detail = f'未找到可执行文件 {self.exe_name}'
+        if self._resolved:
+            try:
+                process = run_cli_process([self._resolved, *self.version_args], cwd=None,
+                                          env=build_subprocess_env(), input=None, timeout=30)
+                if process.returncode == 0:
+                    self._version = (process.stdout or '').strip()
+                if not self._version_known():
+                    self._version = None
+                detail = '已确认解析支持版本，未探测登录' if self._version else '版本探测失败或协议尚未验证'
+            except (OSError, subprocess.TimeoutExpired):
+                detail = '版本探测无法完成，未发起模型请求'
+        return PreflightReport(adapter=self.name, ok=self._version is not None, exe_path=self._resolved,
+                               tool_version=self._version, detail=detail, needs_login=self.needs_login)
+
     def _ensure_resolved(self) -> str | None:
         if self._resolved is None or self._version is None:
             self.preflight()

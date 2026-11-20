@@ -1,0 +1,17 @@
+{
+  "date": "2026-11-20",
+  "version": "0.5.6",
+  "status": "candidate",
+  "scope": "current_cli_protocol_and_single_project_maintenance",
+  "tools": {
+    "codex": {"version": "0.170.0", "model": "gpt-6.1-sol", "reasoning_effort": "high", "live_read_edit": true, "maintenance_completed": true, "tokens": 43963, "wall_time_s": 49.813},
+    "agy": {"version": "1.5.12", "backend_model": null, "live_read_edit": true, "maintenance_completed": true, "conservative_tokens": 197793, "wall_time_s": 203.719},
+    "qwen": {"version": "0.26.0", "backend_model": "deepseek-v4-pro", "live_read_edit": true, "maintenance_completed": true, "tokens": 36747, "wall_time_s": 58.985, "observed_tools": ["read_file", "edit"]}
+  },
+  "maintenance": {"source_commit": "7ee4dbdf10ff708c8dac8b3bb86da980fb8b056c", "attempted_runs": 4, "completed_runs": 3, "all_successful_stages_attempts": 1, "protected_tests_unchanged": true, "human_implementation_interventions": 0, "preserved_failure": "agy initial design API IncompleteRead; coding CLI not called"},
+  "regressions": {"new_tests": 13, "quick_expected": 173, "full_expected": 670, "examples": 9, "first_full_tests": 668, "first_full_errors": 1, "first_full_error_fixed": "stdin regression fixture now uses a supported Codex version"},
+  "credentials_recorded": false,
+  "billing_cost": null,
+  "local_evidence": "D:/work/ai-pipeline-cli-next-20261120",
+  "cross_project_success_rate_established": false
+}

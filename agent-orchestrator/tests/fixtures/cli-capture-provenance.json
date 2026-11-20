@@ -159,5 +159,50 @@
       "thinking/signature body omitted",
       "system incremental thinking counters omitted"
     ]
+  },
+  "codex_0.170.0_tools_real.jsonl": {
+    "source": "真实本机隔离单文件 Read/Edit 探针，外部断言通过；非 Engine 业务完成率",
+    "version": "codex-cli 0.170.0",
+    "captured_at": "2026-11-20T00:10:40.789217+00:00",
+    "source_sha256": "d69596983310eee6e62ff73587baeae4b31f041bfe7515f405f04dc38353e49e",
+    "fixture_sha256": "825de995e7e50ee638111ec5948da6de878bfdfc7627255b74b7fc7b688ac2d4",
+    "redacted_fields": [
+      "paths",
+      "session and tool IDs",
+      "thinking body omitted",
+      "Codex shell executable path normalized"
+    ],
+    "user_configs_unchanged": true,
+    "external_file_check_exit": 0
+  },
+  "agy_1.5.12_tools_real.jsonl": {
+    "source": "真实本机隔离单文件 Read/Edit 探针，外部断言通过；非 Engine 业务完成率",
+    "version": "1.5.12",
+    "captured_at": "2026-11-20T00:10:40.804661+00:00",
+    "source_sha256": "2716e048c19e3598bc4c4511c0cac95129b6813e7d315567ce1aefe7c1064594",
+    "fixture_sha256": "ad792ec010a0929a0b418e371e464e0a8aa263ed5517a780359889b6ca3ef5e4",
+    "redacted_fields": [
+      "paths",
+      "session and tool IDs",
+      "thinking body omitted",
+      "Codex shell executable path normalized"
+    ],
+    "user_configs_unchanged": true,
+    "external_file_check_exit": 0
+  },
+  "qwen_0.26.0_tools_real.jsonl": {
+    "source": "真实本机隔离单文件 Read/Edit 探针，外部断言通过；非 Engine 业务完成率",
+    "version": "0.26.0",
+    "captured_at": "2026-11-20T00:10:40.805640+00:00",
+    "source_sha256": "d84821e9040d9dd727678cf0789367fbf040fab2c95cd59775b4cf03c170d1cf",
+    "fixture_sha256": "faa94498bfae4a754dfa1959155f7dfa8f24359c8778f049d7a685cfa42c3fe9",
+    "redacted_fields": [
+      "paths",
+      "session and tool IDs",
+      "thinking body omitted",
+      "Codex shell executable path normalized"
+    ],
+    "user_configs_unchanged": true,
+    "external_file_check_exit": 0
   }
 }

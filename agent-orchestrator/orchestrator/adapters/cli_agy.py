@@ -14,7 +14,7 @@ from ..contracts import ErrorKind, Result, RunContext
 from .cli_base import CLIAdapter
 from .cli_codex import strip_ansi
 
-KNOWN_VERSION_PREFIXES = ("agy ", "antigravity ")
+SUPPORTED_VERSIONS = frozenset(('1.5.9', '1.5.12'))
 
 
 class AgyAdapter(CLIAdapter):
@@ -35,20 +35,26 @@ class AgyAdapter(CLIAdapter):
                 raise ValueError('反重力 proxy_url 必须是不含凭据的 HTTP(S) 代理地址')
 
     def input_fingerprint(self):
-        return {'protocol': 4, 'model': self.model, 'proxy_url': self.proxy_url}
+        return {'protocol': 5, 'model': self.model, 'proxy_url': self.proxy_url, 'sandbox': True}
 
     def _version_known(self) -> bool:
         v = (self._version or "").lower().strip()
-        return v == '1.5.9' or any(v.startswith(p) for p in KNOWN_VERSION_PREFIXES)
+        return v in SUPPORTED_VERSIONS
+
+    def preflight(self):
+        return self.verified_preflight()
 
     def run(self, prompt: str, workdir: Path, ctx: RunContext) -> Result:
-        self._ensure_resolved()
-        modern = (self._version or '').strip() == '1.5.9'
+        if not self._ensure_resolved() or not self._version_known():
+            return Result(ok=False, exit_code=-1, parse_unknown=True, error_kind=ErrorKind.PARSE_FAILED,
+                          channel=self.channel, tool_version=self._version,
+                          stderr='未确认已验证反重力版本，没有发起模型请求')
+        modern = self._version_known()
         if modern:
             # 1.5.9 的 --print 需要附着值；NDJSON 把完整提示词留在 stdin。
             args = ['--print=', '--input-format', 'stream-json', '--output-format', 'stream-json',
                     '--mode', 'accept-edits' if ctx.kind == 'code' else 'plan',
-                    '--print-timeout', str(ctx.timeout_s or self.timeout_s) + 's',
+                    '--sandbox', '--print-timeout', str(ctx.timeout_s or self.timeout_s) + 's',
                     '--add-dir', str(workdir)]
             if self.model:
                 args += ['--model', self.model]
@@ -101,8 +107,10 @@ class AgyAdapter(CLIAdapter):
             result = self._unknown_version(proc, "未知 agy 版本")
             result.usage = usage
             return result
-        if (self._version or '').strip() == '1.5.9':
-            if len(results) != 1 or final.get('status') != 'SUCCESS' or any(e.get('event') == 'error' for e in events):
+        if self._version_known():
+            if (len(results) != 1 or final.get('status') != 'SUCCESS'
+                    or not events or events[-1].get('event') != 'result'
+                    or any(e.get('event') == 'error' for e in events)):
                 return Result(ok=False, channel=self.channel, stdout=stdout, stderr=stderr or '反重力未返回唯一成功结果',
                               tool_version=self._version, usage=usage, error_kind=ErrorKind.PARSE_FAILED, parse_unknown=True)
             text = final.get('response')

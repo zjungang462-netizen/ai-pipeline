@@ -429,7 +429,7 @@ class TestLockAndExit(unittest.TestCase):
 class TestPromptStdin(unittest.TestCase):
     def _assert_stdin(self, adapter, secret="SECRET_PROMPT_VALUE"):
         adapter._resolved = adapter.exe_name
-        adapter._version = f"{adapter.exe_name} 1.0"
+        adapter._version = 'codex-cli 0.170.0' if adapter.exe_name == 'codex' else f"{adapter.exe_name} 1.0"
         ctx = RunContext(task="t", run_id="r", stage="coding",
                          workdir=Path("."), runs_dir=Path("."))
         with tempfile.TemporaryDirectory() as d, \

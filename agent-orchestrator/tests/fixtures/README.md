@@ -2,6 +2,8 @@
 
 ## 现状（如实标注）
 
+2026-11-20 新增三份真实文件工具夹具：codex_0.170.0_tools_real.jsonl、agy_1.5.12_tools_real.jsonl、qwen_0.26.0_tools_real.jsonl。每份均真实读取并修改 probe.py，通过仓库外断言，未修改用户连接配置；路径、会话标识与思考正文机械脱敏。Qwen 样本使用 safe/bare 与显式 exclude-tools，init 工具清单仅 read_file/edit；反重力 init 保留完整内置工具清单，不伪称只开放文件工具。仅单文件协议探针通过不等于 Engine 业务闭环或跨项目成功率，后续维护证据单独记录。
+
 | 文件 | 来源 | 状态 |
 |---|---|---|
 | `codex_0.167.jsonl` | **手写**，模拟 codex `--json` 事件流 | ⚠️ 合成样本，非真实抓包 |

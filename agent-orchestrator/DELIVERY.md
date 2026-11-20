@@ -1,6 +1,20 @@
 # 干净目录运行与验收
 
-## 当前版本：0.5.5（状态备份与自身维护验收）
+## 当前版本：0.5.6（当前 CLI 文件工具与维护验证）
+
+本版新增 Codex CLI 0.170.0、反重力 1.5.12 的真实读取/修改协议样本；Qwen Code 0.26.0 增加受限文件工具的 stream-json 样本，兼容原 JSON 数组回放。全部来自本机隔离单文件探针，外部断言通过、用户连接配置哈希不变，脱敏样本及来源 SHA-256 已登记。CLI 身份与模型后端分开：Codex 探针使用已有代理的 gpt-6.1-sol/high，Qwen 后端为 DeepSeek Pro；反重力默认后端模型未在本轮 init 中报告，不能按历史值猜补。
+
+Codex、反重力和 Qwen 版本探测必须退出 0、stdout 匹配受支持协议，未知版本、失败或超时在模型调用前停止。Codex 0.170.0 和反重力要求唯一末尾完成事件，非零退出、重复完成或完成后仍有事件均不通过；旧 Codex 0.167/0.169 与 Qwen 0.5 合成协议回归仍保留，不将其当作新真机证据。
+
+Qwen 当前调用启用 bare/safe-mode、关闭会话记录，用 stream-json 在进程运行期间更新消息去重计量和工具活动，重复读取/工具错误护栏可提前停止。cache_read 属于 total_tokens 的子计数，不重复相加；终态和消息级计量取较大下界。编码 auto-edit，只保留已验证 read_file/edit；报告/审查 plan 并禁 edit。显式禁止 shell、网络、目标管理、notebook 和子代理工具；真实初始化清单验证该限制。safe-mode 忽略 core-tools，故使用仍生效的 exclude-tools。旧用户连接不自动加载，需在 extra_env 明确声明环境变量名，参考新增 qwen.example.toml。
+
+反重力当前保留 plan/accept-edits 并显式开启自身 sandbox。探针发现同时使用 disable-slash-commands 会使 mode 被忽略，所以不组合该选项；内置工具仍广泛列于 init，不宣称文件工具白名单或 OS 级隔离。白名单提交、真实测试、审批与全链预算继续由引擎约束。
+
+显式 OPENAI_BASE_URL/OPENAI_MODEL 与本次配置模型参与 Qwen 输入指纹，未声明的变量不读取；凭据值不入指纹，带凭据或查询参数的端点拒绝进入指纹，连接变化不会复用原输入。
+
+本轮新增 13 项确定性回归并加入 quick，当前应收集 quick 173 / full 670 项、9 份示例；收集数不等于通过，正式发布以本版源码与解压包两轮 verification.json 为准。真实维护证据保存在仓库外 D:/work/ai-pipeline-cli-next-20261120；同项目小样本不外推通用成功率，原始失败不覆盖，实际账单费用未知。
+
+## 0.5.5 功能与验收基线（历史）
 
 本版补齐 `state-check/state-backup/state-restore`：只读验证真实 schema 2 历史状态、完整备份并核对文件集合及 SHA-256、恢复到新目录且不改写历史字节。不假造其它 schema 的迁移；路径与工作区恢复边界见 OPERATIONS.md。已有工作台的 10 个状态根及数据库已完成停服备份，涉及 10 个项目、25 条历史运行，均通过当前 schema 加载检查；另有一份 391 文件的状态备份在全新目录完成恢复校验。
 

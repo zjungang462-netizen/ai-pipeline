@@ -98,6 +98,22 @@ class UsageLedger:
         elif isinstance(identifier,str):
             self._put(('claude',identifier),value);self.complete=False
 
+    def observe_qwen(self, event):
+        """Qwen total_tokens 已包含缓存；同消息块取最大值，终态与分步不相加。"""
+        message = event.get('message')
+        final = event.get('type') == 'result'
+        raw = event.get('usage') if final else message.get('usage') if isinstance(message, dict) else None
+        if not isinstance(raw, dict) or type(raw.get('total_tokens')) is not int or raw['total_tokens'] < 0:
+            return
+        values = {'tokens': raw['total_tokens'], 'cli_reported_tokens': raw['total_tokens'],
+                  'cache_read_tokens': counter(raw.get('cache_read_input_tokens'))}
+        if final:
+            self.final = values
+            self.complete = event.get('subtype') == 'success' and event.get('is_error') is False
+        elif event.get('type') == 'assistant' and isinstance(message.get('id'), str):
+            self._put(('qwen', message['id']), values)
+            self.complete = False
+
     def snapshot(self):
         totals={key:sum(row[key] for row in self.responses.values())
                 for key in ('tokens','cli_reported_tokens','cache_read_tokens')}
@@ -234,7 +250,8 @@ class CLITrace:
         if not isinstance(event,dict):return
         self.ledger.observe(event)
         if self.channel=='cli_claude':self.ledger.observe_claude(event)
-        if self.channel in ('cli_qoder','cli_claude'):
+        if self.channel=='cli_qwen':self.ledger.observe_qwen(event)
+        if self.channel in ('cli_qoder','cli_claude','cli_qwen'):
             message=event.get('message')
             content=message.get('content',[]) if isinstance(message,dict) else []
             for item in content if isinstance(content,list) else []:
@@ -242,7 +259,8 @@ class CLITrace:
                 if event.get('type')=='assistant' and item.get('type')=='tool_use' and isinstance(item.get('id'),str):
                     name=item.get('name')
                     # 仅映射真实抓取的读/写事件；不推断任意工具调用具有写权限。
-                    mapped={'Read':'read_file','Edit':'edit_file','Write':'write_file','Glob':'glob','Grep':'grep'}.get(name)
+                    mapped={'Read':'read_file','Edit':'edit_file','Write':'write_file','Glob':'glob','Grep':'grep',
+                            'read_file':'read_file','edit':'edit_file'}.get(name)
                     if not mapped:continue
                     key=(self.channel,str(event.get('session_id') or ''),item['id'])
                     parameters=item.get('input',{})

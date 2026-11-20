@@ -1,23 +1,18 @@
 """Qwen Code CLI 适配器（命令 qwen，Apache-2.0 开源）。
 
-命令模板：qwen -p "<prompt>" -m <model> --output-format json [--yolo]
-- env: OPENAI_API_KEY / OPENAI_BASE_URL / OPENAI_MODEL（百炼兼容端点）。
-- 这些凭据须配置显式开启（credential_env），默认不透传。
-- --output-format json 输出结构化结果；未知版本 => parse_unknown。
+0.26.0 使用隔离自定义配置的 stream-json 文件工具；旧数组样本继续回放。
+连接变量须由 extra_env 显式列名，未知版本在模型调用前停止。
 """
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
+from urllib.parse import urlsplit
 
 from ..contracts import ErrorKind, Result, RunContext
 from .cli_base import CLIAdapter
 from .cli_codex import strip_ansi
-
-# 版本白名单（评审 M4）：只认带工具名的版本串，裸 "0." 不再放行。
-# 真实 Qwen Code 当前为 0.26.x；fixture 须用真实抓包替换（见 tests/fixtures/README）。
-KNOWN_VERSION_PREFIXES = ("qwen-code ", "qwen ")
-
 
 class QwenAdapter(CLIAdapter):
     channel = "cli_qwen"
@@ -34,11 +29,38 @@ class QwenAdapter(CLIAdapter):
 
     def _version_known(self) -> bool:
         v = (self._version or "").lower().strip()
-        return v == '0.26.0' or any(v.startswith(p) for p in KNOWN_VERSION_PREFIXES)
+        return v in ('0.26.0', 'qwen-code 0.5.0', 'qwen 0.5.0')
+
+    def preflight(self):
+        return self.verified_preflight()
+
+    def input_fingerprint(self):
+        endpoint = os.environ.get('OPENAI_BASE_URL') if 'OPENAI_BASE_URL' in self.extra_env else None
+        if endpoint:
+            parsed = urlsplit(endpoint)
+            if parsed.scheme not in ('http', 'https') or not parsed.hostname or parsed.username or parsed.password or parsed.query or parsed.fragment:
+                raise ValueError('Qwen 兼容端点必须为不含凭据/查询的 HTTP(S) 地址')
+        model = self.model or (os.environ.get('OPENAI_MODEL') if 'OPENAI_MODEL' in self.extra_env else None)
+        return {'protocol': 3, 'model': model, 'backend_endpoint': endpoint, 'current_protocol': '0.26.0-stream-json',
+                'isolated_customizations': True, 'file_tools_only': True}
 
     def run(self, prompt: str, workdir: Path, ctx: RunContext) -> Result:
+        if not self._ensure_resolved() or not self._version_known():
+            return Result(ok=False, exit_code=-1, parse_unknown=True, error_kind=ErrorKind.PARSE_FAILED,
+                          channel=self.channel, tool_version=self._version,
+                          stderr='未确认已验证 Qwen 版本，没有发起模型请求')
         # 评审 M5：prompt 走 stdin，避免撞 Windows 命令行 32767 字符上限
         args = ["-p", "-", "--output-format", "json"]
+        if self._version == '0.26.0':
+            args = ['--bare', '--safe-mode', '--chat-recording=false', '-p', '-', '--output-format', 'stream-json',
+                    '--approval-mode', 'auto-edit' if ctx.kind == 'code' else 'plan',
+                    '--max-session-turns', '12', '--max-tool-calls', '24',
+                    '--max-wall-time', str(max(1, int(ctx.timeout_s or self.timeout_s))) + 's']
+            # safe mode 忽略 core-tools，但仍应用显式 exclude-tools；真机工具清单已验证。
+            for tool in ('run_shell_command', 'get_goal', 'update_goal', 'notebook_edit', 'task', 'web_fetch', 'web_search'):
+                args += ['--exclude-tools', tool]
+            if ctx.kind != 'code':
+                args += ['--exclude-tools', 'edit']
         if self.model:
             args += ["-m", self.model]
         if ctx.allow_yolo:
@@ -68,8 +90,8 @@ class QwenAdapter(CLIAdapter):
     def _parse_026(self, stdout, stderr, exit_code):
         """0.26.0 的真实 --output-format json 是事件数组，只认唯一成功终态。"""
         try:
-            events = json.loads(stdout)
-            if not isinstance(events, list):
+            events = json.loads(stdout) if stdout.lstrip().startswith('[') else [json.loads(line) for line in stdout.splitlines() if line.strip()]
+            if not isinstance(events, list) or not all(isinstance(e, dict) for e in events):
                 raise ValueError('需要真实事件数组')
             init = next(e for e in events if isinstance(e, dict) and e.get('type') == 'system'
                         and e.get('subtype') == 'init')
@@ -81,6 +103,8 @@ class QwenAdapter(CLIAdapter):
             final = finals[0]
             if final.get('subtype') != 'success' or final.get('is_error') is not False:
                 raise ValueError('CLI 结果不是成功')
+            if final.get('permission_denials') not in (None, []):
+                raise ValueError('存在权限拒绝')
             text = final.get('result')
             if not isinstance(text, str) or not text.strip():
                 raise ValueError('缺少结果正文')

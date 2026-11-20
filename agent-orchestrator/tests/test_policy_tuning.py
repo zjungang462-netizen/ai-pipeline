@@ -180,12 +180,14 @@ type = "fake"
             {"name": "design", "adapter": "qwen", "kind": "report", "prompt": "p", "approval": True},
             {"name": "next", "adapter": "qwen", "kind": "report", "prompt": "p"}],
             "adapters": {"qwen": {"type": "cli_qwen", "exe": sys.executable}}}, base_dir=self.base)
-        version = PreflightReport("qwen", True, sys.executable, "qwen-code 0.5.0")
         response = subprocess.CompletedProcess([], 0, '{"result":"body"}', "")
+        def process(command, **kwargs):
+            if command[-1] == '--version':
+                return subprocess.CompletedProcess([], 0, 'qwen-code 0.5.0', '')
+            return response
         with mock.patch("orchestrator.cli.load_config", return_value=cfg), \
                 mock.patch("orchestrator.engine.artifacts.git_available", return_value=False), \
-                mock.patch("orchestrator.adapters.cli_base.preflight_cli", return_value=version), \
-                mock.patch("orchestrator.adapters.cli_base.run_cli_process", return_value=response), \
+                mock.patch("orchestrator.adapters.cli_base.run_cli_process", side_effect=process), \
                 contextlib.redirect_stdout(io.StringIO()):
             # design 等待审批 => 退出码 11（未完成）；approve 后全部完成 => 0
             self.assertEqual(main(["run", "unused.toml", "--run-id", "r", "--task", "task"]), 11)

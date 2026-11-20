@@ -114,9 +114,16 @@ class CodexAdapter(CLIAdapter):
 
     def _version_known(self) -> bool:
         v = (self._version or "").lower().strip()
-        return any(v.startswith(p) for p in KNOWN_VERSION_PREFIXES)
+        return v == 'codex-cli 0.170.0' or any(v.startswith(p) for p in KNOWN_VERSION_PREFIXES)
+
+    def preflight(self):
+        return self.verified_preflight()
 
     def run(self, prompt: str, workdir: Path, ctx: RunContext) -> Result:
+        if not self._ensure_resolved() or not self._version_known():
+            return Result(ok=False, exit_code=-1, parse_unknown=True, error_kind=ErrorKind.PARSE_FAILED,
+                          channel=self.channel, tool_version=self._version,
+                          stderr='未确认已验证 Codex 版本，没有发起模型请求')
         out_file = (ctx.attempt_dir or Path(ctx.runs_dir) / ctx.stage) / "codex_last_message.txt"
         out_file.parent.mkdir(parents=True, exist_ok=True)
         out_file.unlink(missing_ok=True)
@@ -125,7 +132,7 @@ class CodexAdapter(CLIAdapter):
         args = ["exec", "-C", str(workdir),
                 "--sandbox", 'workspace-write' if ctx.kind == 'code' else 'read-only',
                 "--skip-git-repo-check", '--ephemeral', "--json", '--color', 'never',
-                '-c', 'notify=[]', "-o", str(out_file)]
+                '-c', 'notify=[]', '-c', 'approval_policy="never"', "-o", str(out_file)]
         if self.isolate_config:
             args.append('--ignore-user-config')
             environment['CODEX_HOME'] = profile['codex_home']
@@ -195,6 +202,12 @@ class CodexAdapter(CLIAdapter):
         # 版本绑定：未知版本不默认走老解析器（评审 M2）
         if not self._version_known():
             result = self._unknown_version(proc, "未知 codex 版本，需人工确认输出格式")
+            result.usage = usage
+            return result
+        if self._version == 'codex-cli 0.170.0' and (
+                not events or events[-1].get('type') != 'turn.completed'
+                or sum(e.get('type') == 'turn.completed' for e in events) != 1):
+            result = self._unknown_version(proc, 'Codex 0.170.0 需要唯一末尾完成事件')
             result.usage = usage
             return result
         if not any(e.get('type') == 'turn.completed' for e in events):

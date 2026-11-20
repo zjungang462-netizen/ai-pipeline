@@ -1,0 +1,8 @@
+{"type": "thread.started", "thread_id": "fixture-1"}
+{"type": "turn.started"}
+{"type": "item.started", "item": {"id": "fixture-2", "type": "command_execution", "command": "powershell -NoProfile -Command \"Get-Content -LiteralPath ./probe.py\"", "aggregated_output": "", "exit_code": null, "status": "in_progress"}}
+{"type": "item.completed", "item": {"id": "fixture-2", "type": "command_execution", "command": "powershell -NoProfile -Command \"Get-Content -LiteralPath ./probe.py\"", "aggregated_output": "MARKER = 'CLI_FILE_TOOL_PROBE'\r\ndef normalize(value):\r\n    return value\r\n", "exit_code": 0, "status": "completed"}}
+{"type": "item.started", "item": {"id": "fixture-3", "type": "file_change", "changes": [{"path": "C:/fixture\\probe.py", "kind": "update"}], "status": "in_progress"}}
+{"type": "item.completed", "item": {"id": "fixture-3", "type": "file_change", "changes": [{"path": "C:/fixture\\probe.py", "kind": "update"}], "status": "completed"}}
+{"type": "item.completed", "item": {"id": "fixture-4", "type": "agent_message", "text": "PROBE_EDIT_OK"}}
+{"type": "turn.completed", "usage": {"input_tokens": 71305, "cached_input_tokens": 53354, "cache_write_input_tokens": 0, "output_tokens": 274, "reasoning_output_tokens": 123}}

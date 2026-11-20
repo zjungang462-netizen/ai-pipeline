@@ -55,6 +55,7 @@ Claude Code 2.1.325 / 2.1.328 可作为文件工具代理接入你现有的 Deep
 | `dsh-test.example.toml` | dsh 测试角色 |
 | `qoder.example.toml` | API 设计/审查、Qoder 文件工具编码与独立测试 |
 | `claude-deepseek.example.toml` | API 设计/审查、Claude Code 经现有 DeepSeek 连接编码与独立测试 |
+| `qwen.example.toml` | API 设计/审查、Qwen Code 0.26.0 文件工具编码与独立测试 |
 
 模型示例会真实调用工具或 API，并可能修改示例任务目录。用于业务项目时，先核对 `task_workdir`、测试命令、允许修改的文件及预算。工作台中的任务文字不会切换执行目录，也不会替配置增加设计或编码阶段。
 
@@ -153,16 +154,18 @@ Claude Code 2.1.325 / 2.1.328 可作为文件工具代理接入你现有的 Deep
 | 类型 | 配置与验证范围 |
 |---|---|
 | `openai_compat` | `base_url`、`model`、`api_key_env` 必填；可设 `temperature`、`max_tokens`、`timeout_s` |
-| `cli_codex` | 可设 `exe`、`model`、`isolate_config`、`reasoning_effort`、`extra_env`、`timeout_s`；已有版本与真实样本见 fixtures |
-| `cli_agy` | 可设 `exe`、`model`、无凭据 `proxy_url`、`extra_env`、`timeout_s`；已有真实样本 |
+| `cli_codex` | 可设 `exe`、`model`、`isolate_config`、`reasoning_effort`、`extra_env`、`timeout_s`；0.170.0 真实读取/修改及维护闭环通过，旧协议样本保留 |
+| `cli_agy` | 可设 `exe`、`model`、无凭据 `proxy_url`、`extra_env`、`timeout_s`；精确支持 1.5.9 / 1.5.12，沙箱与严格流式终态 |
 | `cli_dsh` | 可设 `exe`、`permission_mode`、无凭据 `proxy_url`、`extra_env`、`timeout_s`；已有真实样本 |
-| `cli_qwen` | Qwen Code 0.26.0 的 stdin/JSON 数组/终态用量已有真实样本；后端为 DeepSeek，工具执行与其它版本仍待验证 |
+| `cli_qwen` | 0.26.0 的 stdin、JSON 数组兼容与 stream-json Read/Edit 已真机验证；safe/bare 模式、文件工具、实时计量与停止护栏；其它版本未验证 |
 | `cli_qoder` | 1.1.89 真机 stdin/流式成功终态及 Read/Edit 已验证；Ultimate/high/adaptive 真实维护任务通过；token计数不完整、credits分列 |
 | `cli_claude` | Claude Code 2.1.325 / 2.1.328 的真实流式终态与文件工具；默认继承用户兼容连接，已用 DeepSeek Pro/max 跑通维护闭环，不冒充 Claude 原生模型 |
 | `cli_doubao` | 未核实独立官方 CLI，属于未验证预留；调用豆包模型可使用方舟兼容API |
 | `fake` | 仅用于离线演示和确定性回归 |
 
 CLI 子进程使用环境白名单；额外凭据变量须在 `extra_env` 显式列名。Windows 的 Codex 建议配置原生 `codex.exe`，减少 npm `.cmd` 的参数转义影响。CLI 版本未知、缺少完成事件或输出无法解析时，不会按成功处理。样本来源与真实性见 [tests/fixtures/README.md](tests/fixtures/README.md)。
+
+Qwen 0.26.0 新调用不加载用户/项目自定义配置、hooks、技能、MCP 或历史会话；兼容连接由显式 `extra_env` 提供，模型可由配置覆盖。编码使用 auto-edit，报告/审查使用 plan；显式禁用 shell、网络、目标管理和子代理工具，报告另禁 edit，真实编码初始化清单只有 read_file/edit。此版本 safe mode 忽略 core-tools，因此不把该参数当作限制依据。任务测试仍由引擎独立执行。反重力使用自身 sandbox 和 plan/accept-edits 模式；其 init 仍列出广泛内置工具，不能声称是 OS 文件沙箱或文件工具白名单。
 
 ## 执行、恢复与审查
 
