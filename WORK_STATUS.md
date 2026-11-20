@@ -5,10 +5,12 @@
 - 发布包固定在 `4f51a9b`。远端源码和解压包各完整运行 701 项测试，零失败、错误和跳过。216 个交付文件与 Git 提交一致，ZIP SHA-256 为 `b386c6fff84ea8c05cddb3fa0bd36802b39abf902d7db8eeb61e8a9d60cd1115`。[远端发布验收](https://github.com/zjungang462-netizen/ai-pipeline/actions/runs/44695327363)
 - 本机端口 `8766` 已从该包启动工作台。升级后和守护重启后均复验了 10 个项目、25 条历史运行、141 份账本文件哈希和静态文件。自动任务恢复关闭，服务启动未调用模型。证据保存在 `D:/work/ai-pipeline-release-056-cb48f023/upgrade-verified.json`。
 - `87524a7` 上的 Linux Python 3.11 和 3.13 全量矩阵均通过。每个环境收集 701 项，692 项通过，9 项 Windows 专属用例按登记跳过。修正前的 Linux 失败证据也已保留。[Linux 全量矩阵](https://github.com/zjungang462-netizen/ai-pipeline/actions/runs/44700044402)
+- 归档及业务基准变更提交 `2acb4df` 在远端 Windows Python 3.11、3.13 各通过 179 项快速检查，在 Linux Python 3.11、3.13 各通过 694 项并跳过 9 项 Windows 专属用例。四份验收产物的哈希已核对。[Windows 检查](https://github.com/zjungang462-netizen/ai-pipeline/actions/runs/44755401049) · [Linux 矩阵](https://github.com/zjungang462-netizen/ai-pipeline/actions/runs/44755451080)
+- 同一提交在本地 Windows 完整通过 703 项，零失败、错误和跳过，源码指纹保持一致。耗时 677.984 秒，超过 480 秒观察目标。证据保存在 `D:/work/ai-pipeline-release-056-cb48f023/continuation-windows-2acb4df/verification.json`。
 - 归档、工作树清理和测试产物记录已改为 `Engine` 显式持有的组件。测试输出作为结构化诊断数据传入返工提示，HTTP 回归覆盖客户端断开后重放同一暂停请求。
 - `agent-orchestrator/scripts/multi_project_benchmark.py` 使用独立工作区复现两个业务缺陷，随后由仓库外的保护测试和审查判定结果。DeepSeek API 最终轮两个样例都完成，订单金额 3 次模型调用、报告 2402 tokens，预约容量包含一次返工，共 4 次调用、报告 3948 tokens。两个样例各改动两个模块，保护测试文件哈希保持一致。证据保存在 `D:/work/ai-pipeline-release-056-cb48f023/multi-project-api-final-129e691e/results.json`。
 - 早期 API 试跑出现输出截断、补丁格式或签名错误。固定 Claude Code 2.1.328 试跑中，订单金额触及预算，预约容量编码超时。失败记录均保留于同一交付目录，实际账单金额及其它项目的成功率仍无数据。
-- Grok 1.0.89 仍报告未认证，豆包独立 CLI 的入口和真实协议仍待核实。
+- Grok 1.0.89 仍报告未认证。已在仓库外核验 `@bytedance/doubao-cli` 2.37.2 的 npm 包完整性、Windows 原生包 SHA-256 与 Windows 数字签名。原生 `doubao.exe` 支持标准输入和逐行 JSON，`auth status` 及未登录流式探针均返回退出码 4 和 `login_required`。豆包需要扫码，登录后的终态、计量和文件工具仍待采样。[豆包 CLI](https://www.npmjs.com/package/@bytedance/doubao-cli)
 
 ## 0.5.6 当前 CLI 验证
 
