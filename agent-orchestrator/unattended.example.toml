@@ -43,6 +43,8 @@ auto_apply = true
 min_runs = 5
 # schema: autotune.max_batch_size：可自动选择的修复文件批量上限
 max_batch_size = 2
+# 可选候选仅供人工 tune 提案，永不由 autotune 自动应用；argv 不经过 shell。
+# test_command_candidates = { testing = [["python", "-m", "pytest", "tests"]] }
 
 [[stages]]
 # schema: stages.name：唯一阶段名；字母数字、下划线、点或横线，禁止父目录段

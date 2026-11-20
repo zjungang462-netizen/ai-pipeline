@@ -55,6 +55,50 @@ type="fake"
         self.assertEqual(cfg.stages[1].max_rounds,3)
         self.assertEqual(self.file.read_bytes(),original)
         self.assertEqual(cfg.run_budget.max_tokens,load_config(self.file).run_budget.max_tokens)
+    def test_prompt_suggestions_are_never_auto_applied(self):
+        prompt_dir=self.root/'prompts';prompt_dir.mkdir()
+        (prompt_dir/'coding.md').write_text('实现任务。\n',encoding='utf8')
+        text=self.file.read_text(encoding='utf8').replace('prompt="p"','prompt="prompts/coding.md"')
+        text += '''\n[[stages]]
+name="review"
+adapter="fake"
+kind="review"
+prompt="review"
+feedback_to="coding"
+max_rounds=3
+'''
+        self.file.write_text(text,encoding='utf8')
+        original=self.file.read_bytes();self.samples(self.file)
+        issue={'file':'a.py','problem':'遗漏边界处理','expected':'校验空输入'}
+        for i in range(5):
+            attempt=self.state/'runs'/f'r{i}'/'stages'/'review'/'attempts'/'1'
+            attempt.mkdir(parents=True)
+            atomic_write_json(attempt/'review_verdict.json',{'verdict':'fail','issues':[issue]})
+
+        result=policy_tune(self.file)
+        self.assertEqual(result['status'],'applied_to_copy')
+        selected=load_config(result['config_path'])
+        self.assertEqual(selected.stage('coding').prompt,'prompts/coding.md')
+        self.assertEqual(self.file.read_bytes(),original)
+        self.assertFalse(list(self.root.glob('config.tune-*.coding.prompt.md')))
+    def test_test_command_suggestions_are_never_auto_applied(self):
+        text=self.file.read_text(encoding='utf8').replace(
+            'max_batch_size=2','max_batch_size=2\ntest_command_candidates={testing=[["python","-m","pytest","tests"]]}')
+        self.file.write_text(text,encoding='utf8')
+        original=self.file.read_bytes();self.samples(self.file,cycles=0)
+        for i in range(5):
+            path=self.state/'runs'/f'r{i}'/'metrics.json'
+            data=json.loads(path.read_text(encoding='utf8'))
+            data['status']='failed'
+            data['stages']['testing']['status']='failed'
+            atomic_write_json(path,data)
+            attempt=self.state/'runs'/f'r{i}'/'stages'/'testing'/'attempts'/'1'
+            atomic_write_json(attempt/'test_record.json',{'output':'Ran 0 tests','error':'测试未收集到任何用例'})
+
+        result=policy_tune(self.file)
+        self.assertEqual(result['status'],'proposed')
+        self.assertEqual(self.file.read_bytes(),original)
+        self.assertEqual(select_policy_config(self.file),self.file)
     def test_insufficient_or_unknown_usage_samples_do_not_apply(self):
         self.samples(self.file,4);self.assertEqual(policy_tune(self.file)['status'],'proposed')
         self.assertEqual(select_policy_config(self.file),self.file)

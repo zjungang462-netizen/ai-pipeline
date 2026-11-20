@@ -32,6 +32,8 @@ class StageStatus(str, Enum):
     FAILED = "failed"
     STALE = "stale"                # inputs_hash 变化，必须重跑
     AWAITING_APPROVAL = "awaiting_approval"
+    WAITING_EXTERNAL = "waiting_external"
+    WAITING_OWNER = "waiting_owner"
     INTERRUPTED = "interrupted"
     REVIEW_FEEDBACK = "review_feedback"   # L2：审查不通过，已反馈待返工
 
@@ -58,6 +60,7 @@ class Result:
     tool_version: str | None = None
     parse_unknown: bool = False                 # 版本不认识/解析失败 => 禁止判完成
     verdict_file: Path | None = None            # 当前 attempt 的独立审查结论
+    deferred: dict[str, Any] | None = None       # 通过 stage_result.json 请求显式等待
 
     def is_meaningful(self, kind: str = "code") -> bool:
         """按产物类型判定是否有可验收成果（评审 B4）。
@@ -91,6 +94,7 @@ class StageSpec:
     # L2 审查反馈环（仅 kind=review 生效）
     feedback_to: str | None = config_field('review/test 反馈目标，必须是之前的阶段', default=None)
     max_rounds: int = config_field('反馈轮次上限，含首轮', default=1, numeric=True, integer=True, minimum=1)
+    allow_wait: bool = config_field('允许 report 阶段返回结构化等待回执', default=False)
     # kind=test：不调用模型，真实执行命令；非零退出码即失败
     test_cmd: list[str] = config_field('test 必填的非空 argv 数组，其它类型禁止设置', default_factory=list)
     context_files: list[str] = config_field('显式上下文相对文件路径列表', default_factory=list)
@@ -111,6 +115,7 @@ class RunContext:
     kind: str = ""                              # 当前阶段产物类型；空则用适配器自身 kind
     feedback: str = ""                          # L2：审查反馈文本（注入编码阶段）
     attempt_dir: Path | None = None
+    allow_wait: bool = False
     output_tokens: int | None = None
     token_reservation: int = 0
     call_id: str | None = None

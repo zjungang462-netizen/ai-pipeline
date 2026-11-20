@@ -26,7 +26,9 @@ python -m orchestrator.cli approve workbench.example.toml --run-id demo-1 --stag
 python -m orchestrator.cli resume workbench.example.toml --run-id demo-1
 ```
 
-运行等待审批时退出 **11**，完成后退出 **0**，执行失败退出 **1**，配置或用法错误通常退出 **2**。不要把审批中当作成功；新任务使用新的 run-id。
+运行等待审批或等待恢复时退出 **11**，完成后退出 **0**，执行失败退出 **1**，配置或用法错误通常退出 **2**。新任务使用新的 run-id。
+
+需要在外部条件满足或本人处理后继续的 `report` 阶段，可显式设置 `allow_wait = true`。工作台会显示阻塞原因和恢复条件；条件满足后点击「继续」，直接 CLI 运行则使用同一 run-id 执行 `resume`。如回执含下次检查时间，到点前不会调用模型；到点也需主动继续。等待期间模型进程退出，原有预算和任务有效期保留。
 
 ## 先选好模型与思考强度
 
@@ -115,6 +117,7 @@ Claude Code 2.1.325 / 2.1.328 可作为文件工具代理接入你现有的 Deep
 | stages | `config_keys` | `dict[str, Any]` | `{}` | 参与输入指纹的可 JSON 序列化配置表 |
 | stages | `feedback_to` | `str | None` | `null` | review/test 反馈目标，必须是之前的阶段 |
 | stages | `max_rounds` | `int` | `1` | >= 1；反馈轮次上限，含首轮 |
+| stages | `allow_wait` | `bool` | `false` | 允许 report 阶段返回结构化等待回执 |
 | stages | `test_cmd` | `list[str]` | `[]` | test 必填的非空 argv 数组，其它类型禁止设置 |
 | stages | `context_files` | `list[str]` | `[]` | 显式上下文相对文件路径列表 |
 | stages | `precheck_cmd` | `list[str]` | `[]` | 仅 code 可设，运行前真实检查命令 argv |
@@ -138,6 +141,7 @@ Claude Code 2.1.325 / 2.1.328 可作为文件工具代理接入你现有的 Deep
 | autotune | `auto_apply` | `bool` | `false` | 自动选择需同时启用 autonomy 和 autotune |
 | autotune | `min_runs` | `int` | `5` | >= 5；最少同配置终态记录数 |
 | autotune | `max_batch_size` | `int` | `2` | >= 1，<= 3；可自动选择的修复文件批量上限 |
+| autotune | `test_command_candidates` | `dict[str, list[list[str]]]` | `{}` | 人工审批可选的 test 阶段 argv 候选；不自动执行或应用 |
 | review_coverage | `diff_lines` | `int` | `600` | >= 1，<= 10000；累积 diff 注入行数上限 |
 | review_coverage | `per_file_bytes` | `int` | `24000` | >= 1，<= 2097152；变更文件全文注入的单文件字节上限 |
 | review_coverage | `total_bytes` | `int` | `180000` | >= 1，<= 8388608；变更文件全文注入总字节上限 |

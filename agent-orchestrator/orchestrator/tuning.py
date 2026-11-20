@@ -75,6 +75,8 @@ def propose(state_dir: Path, config_path: Path, last: int = 20) -> dict:
                 changes.append({"stage": spec.name, "key": "max_rounds",
                                 "old": spec.max_rounds, "new": spec.max_rounds + 1,
                                 "reason": "至少五次测试已通过但审查耗尽；仅提议人工评估增加一轮"})
+        changes.extend(_repeated_prompt_checks(state_dir, records, cfg))
+        changes.extend(_uncollected_test_candidates(state_dir, records, cfg))
     if no_improvement >= 2:
         reason = "连续两次策略调整未降低失败率，停止产出调整建议"
     elif stopped:
@@ -82,7 +84,7 @@ def propose(state_dir: Path, config_path: Path, last: int = 20) -> dict:
     elif len(records) < 5:
         reason = "同一配置的有效终态样本不足 5 条"
     else:
-        reason = "只允许 max_rounds 增减 1；不修改模型、预算、命令或源码"
+        reason = "只提议 max_rounds、重复问题提示词检查项或登记过的测试命令；不修改模型、预算或源码"
     proposal = {"schema_version": 1, "id": "tune-" + uuid.uuid4().hex[:12],
                 "created_at": time.time(), "config_path": str(config_path),
                 "config_hash": config_hash, "sample_run_ids": [r["run_id"] for r in records],
@@ -93,6 +95,128 @@ def propose(state_dir: Path, config_path: Path, last: int = 20) -> dict:
     atomic_write_json(directory / f"{proposal['id']}.json", proposal)
     atomic_write_json(directory / "tune_proposal.json", proposal)
     return proposal
+
+
+def _repeated_prompt_checks(state_dir: Path, records: list[dict], cfg) -> list[dict]:
+    """Repeated, located review findings may suggest a human-reviewed coding prompt check."""
+    if len(records) < 5:
+        return []
+    runs_dir = (Path(state_dir) / "runs").resolve()
+    findings: dict[tuple[str, str, str, str], set[str]] = {}
+    for record in records:
+        run_id = record.get("run_id")
+        if not isinstance(run_id, str) or not run_id or Path(run_id).name != run_id:
+            continue
+        run_dir = (runs_dir / run_id).resolve()
+        if run_dir.parent != runs_dir:
+            continue
+        for review in (stage for stage in cfg.stages if stage.kind == "review" and stage.feedback_to):
+            attempts = run_dir / "stages" / review.name / "attempts"
+            if not attempts.is_dir():
+                continue
+            candidates = sorted((p for p in attempts.iterdir() if p.is_dir() and p.name.isdigit()),
+                                key=lambda p: int(p.name), reverse=True)
+            for attempt in candidates:
+                try:
+                    verdict = json.loads((attempt / "review_verdict.json").read_text(encoding="utf-8"))
+                except (OSError, ValueError):
+                    continue
+                if not isinstance(verdict, dict) or verdict.get("verdict") != "fail":
+                    continue
+                issues = verdict.get("issues")
+                if not isinstance(issues, list):
+                    continue
+                for issue in issues:
+                    if not isinstance(issue, dict):
+                        continue
+                    file = issue.get("file")
+                    problem = issue.get("problem")
+                    expected = issue.get("expected")
+                    if not all(isinstance(value, str) and value.strip() for value in (file, problem, expected)):
+                        continue
+                    file, problem, expected = (" ".join(value.split()) for value in (file, problem, expected))
+                    if len(file) > 240 or len(problem) > 300 or len(expected) > 300:
+                        continue
+                    findings.setdefault((review.feedback_to, file, problem, expected), set()).add(run_id)
+                break
+
+    suggestions = []
+    suggested_stages = set()
+    for (target_name, file, problem, expected), run_ids in sorted(findings.items()):
+        if len(run_ids) < 5:
+            continue
+        if target_name in suggested_stages:
+            continue
+        target = cfg.stage(target_name)
+        if not target.prompt:
+            continue
+        source = (cfg.base_dir / target.prompt).resolve()
+        try:
+            source.relative_to(cfg.base_dir.resolve())
+            source_hash = sha256_file(source)
+        except (OSError, ValueError):
+            continue
+        if not source.is_file():
+            continue
+        check = (f"- 完成 `{file}` 相关改动前，核对：{expected}")
+        suggestions.append({"stage": target.name, "key": "prompt_check", "old": target.prompt,
+                            "source_hash": source_hash, "check": check,
+                            "evidence": {"file": file, "problem": problem, "expected": expected,
+                                         "distinct_runs": len(run_ids),
+                                         "run_ids": sorted(run_ids)}})
+        suggested_stages.add(target_name)
+        if len(suggestions) == 5:
+            break
+    return suggestions
+
+
+def _uncollected_test_candidates(state_dir: Path, records: list[dict], cfg) -> list[dict]:
+    """Suggest a registered argv command only after repeated zero-test terminal failures."""
+    if len(records) < 5:
+        return []
+    runs_dir = (Path(state_dir) / "runs").resolve()
+    suggestions = []
+    for spec in (stage for stage in cfg.stages if stage.kind == "test"):
+        candidates = cfg.autotune.test_command_candidates.get(spec.name, [])
+        candidate = next((item for item in candidates if item != spec.test_cmd), None)
+        if candidate is None:
+            continue
+        failed_runs = []
+        for record in records:
+            run_id = record.get("run_id")
+            if (not isinstance(run_id, str) or not run_id or Path(run_id).name != run_id
+                    or record.get("stages", {}).get(spec.name, {}).get("status") != "failed"):
+                continue
+            run_dir = (runs_dir / run_id).resolve()
+            if run_dir.parent != runs_dir:
+                continue
+            attempts = run_dir / "stages" / spec.name / "attempts"
+            if not attempts.is_dir():
+                continue
+            numbered = sorted((p for p in attempts.iterdir() if p.is_dir() and p.name.isdigit()),
+                              key=lambda p: int(p.name), reverse=True)
+            for attempt in numbered:
+                try:
+                    test_record = json.loads((attempt / "test_record.json").read_text(encoding="utf-8"))
+                except (OSError, ValueError):
+                    continue
+                output = test_record.get("output", "") if isinstance(test_record, dict) else ""
+                error = test_record.get("error", "") if isinstance(test_record, dict) else ""
+                if (isinstance(output, str) and isinstance(error, str)
+                        and re.search(r"\bRan\s+0\s+tests\b|\bcollected\s+0\s+items\b|\bno\s+tests\s+ran\b",
+                                      output, flags=re.IGNORECASE)
+                        or error == "测试未收集到任何用例"):
+                    failed_runs.append(run_id)
+                break
+        failed_runs = sorted(set(failed_runs))
+        if len(failed_runs) < 5:
+            continue
+        suggestions.append({"stage": spec.name, "key": "test_cmd_candidate",
+                            "old": list(spec.test_cmd), "new": list(candidate),
+                            "evidence": {"kind": "zero_tests_collected",
+                                         "distinct_runs": len(failed_runs),
+                                         "run_ids": failed_runs}})
+    return suggestions
 
 
 def approve_proposal(state_dir: Path, proposal_path: Path, output: Path) -> Path:
@@ -128,6 +252,7 @@ def approve_proposal(state_dir: Path, proposal_path: Path, output: Path) -> Path
         spans = list(re.finditer(r"(?m)^\s*\[\[stages\]\]\s*(?:#.*)?$", text))
         edits = []
         seen = set()
+        prompt_files = []
         for change in changes:
             if not isinstance(change, dict):
                 raise ConfigError("提案条目必须是对象")
@@ -152,6 +277,78 @@ def approve_proposal(state_dir: Path, proposal_path: Path, output: Path) -> Path
                 continue
             name = change.get("stage")
             spec = cfg.stage(name)
+            if change.get("key") == "prompt_check":
+                evidence = change.get("evidence")
+                valid_evidence = (isinstance(evidence, dict)
+                                  and all(isinstance(evidence.get(key), str) and evidence[key].strip()
+                                          for key in ("file", "problem", "expected"))
+                                  and len(evidence.get("file", "")) <= 240
+                                  and len(evidence.get("problem", "")) <= 300
+                                  and len(evidence.get("expected", "")) <= 300
+                                  and type(evidence.get("distinct_runs")) is int
+                                  and evidence["distinct_runs"] >= 5
+                                  and isinstance(evidence.get("run_ids"), list)
+                                  and all(isinstance(run_id, str) and Path(run_id).name == run_id
+                                          for run_id in evidence["run_ids"])
+                                  and len(set(evidence["run_ids"])) >= 5)
+                expected_check = (f"- 完成 `{evidence['file']}` 相关改动前，核对：{evidence['expected']}"
+                                  if valid_evidence else None)
+                if (name in seen or not spec.prompt or change.get("old") != spec.prompt
+                        or not valid_evidence or change.get("check") != expected_check
+                        or not isinstance(change.get("source_hash"), str)):
+                    raise ConfigError("提示词提案与当前配置不匹配")
+                source = (cfg.base_dir / spec.prompt).resolve()
+                try:
+                    source.relative_to(cfg.base_dir.resolve())
+                except ValueError as error:
+                    raise ConfigError("提示词提案只能修改配置目录内的文件") from error
+                if not source.is_file() or sha256_file(source) != change["source_hash"]:
+                    raise ConfigError("提示词文件已变化，请重新生成提案")
+                candidate_name = f"{original.stem}.{identifier}.{name}.prompt.md"
+                candidate_path = original.parent / candidate_name
+                if candidate_path.exists():
+                    raise ConfigError("提示词候选文件已存在，拒绝覆盖")
+                prompt_files.append((candidate_path, source, change["check"]))
+                seen.add(name)
+                index = cfg.stage_index(name)
+                start = spans[index].end()
+                end = spans[index + 1].start() if index + 1 < len(spans) else len(text)
+                next_table = re.search(r"(?m)^\s*\[", text[start:end])
+                if next_table:
+                    end = start + next_table.start()
+                block = text[start:end]
+                field = re.search(r'(?m)^(\s*prompt\s*=\s*)("(?:\\.|[^"\\])*"|\'[^\']*\')', block)
+                if not field:
+                    raise ConfigError("阶段提示词字段无法安全定位")
+                edits.append((start + field.start(2), start + field.end(2), json.dumps(candidate_name)))
+                continue
+            if change.get("key") == "test_cmd_candidate":
+                evidence = change.get("evidence")
+                run_ids = evidence.get("run_ids") if isinstance(evidence, dict) else None
+                registered = cfg.autotune.test_command_candidates.get(name, [])
+                old, new = change.get("old"), change.get("new")
+                if (name in seen or spec.kind != "test" or old != spec.test_cmd
+                        or not isinstance(new, list) or new not in registered or new == old
+                        or not isinstance(evidence, dict) or evidence.get("kind") != "zero_tests_collected"
+                        or type(evidence.get("distinct_runs")) is not int
+                        or evidence["distinct_runs"] < 5 or not isinstance(run_ids, list)
+                        or not all(isinstance(run_id, str) and Path(run_id).name == run_id for run_id in run_ids)
+                        or len(set(run_ids)) < 5):
+                    raise ConfigError("测试命令提案不在登记候选范围内或证据不足")
+                index = cfg.stage_index(name)
+                start = spans[index].end()
+                end = spans[index + 1].start() if index + 1 < len(spans) else len(text)
+                next_table = re.search(r"(?m)^\s*\[", text[start:end])
+                if next_table:
+                    end = start + next_table.start()
+                block = text[start:end]
+                array = r'\[(?:[^\[\]"\']|"(?:\\.|[^"\\])*"|\'[^\']*\')*\]'
+                field = re.search(r'(?m)^(\s*test_cmd\s*=\s*)(' + array + r')', block)
+                if not field:
+                    raise ConfigError("阶段 test_cmd 字段无法安全定位")
+                edits.append((start + field.start(2), start + field.end(2), json.dumps(new, ensure_ascii=False)))
+                seen.add(name)
+                continue
             old, new = change.get("old"), change.get("new")
             if (name in seen or change.get("key") != "max_rounds" or not spec.feedback_to
                     or type(old) is not int or type(new) is not int
@@ -182,8 +379,19 @@ def approve_proposal(state_dir: Path, proposal_path: Path, output: Path) -> Path
         else:
             text = f'tune_proposal_id = "{identifier}"\n' + text
         parse_config(tomllib.loads(text), base_dir=original.parent)
-        with output.open("x", encoding="utf-8", newline="") as stream:
-            stream.write(text)
+        created = []
+        try:
+            for candidate_path, source, check in prompt_files:
+                with candidate_path.open("x", encoding="utf-8", newline="") as stream:
+                    stream.write(source.read_text(encoding="utf-8").rstrip() +
+                                 "\n\n## 历史问题检查项（人工批准）\n" + check + "\n")
+                created.append(candidate_path)
+            with output.open("x", encoding="utf-8", newline="") as stream:
+                stream.write(text)
+        except Exception:
+            for path in created:
+                path.unlink(missing_ok=True)
+            raise
         atomic_write_json(state_dir / "tuning" / f"{identifier}.approved.json", {
             "proposal_id": identifier, "approved_at": time.time(), "output": str(output),
             "baseline": proposal["baseline"], "source_run_ids": proposal["sample_run_ids"],

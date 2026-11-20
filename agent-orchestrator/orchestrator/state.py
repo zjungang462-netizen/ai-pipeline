@@ -280,7 +280,7 @@ class RunState:
 
     SCHEMA_VERSION = 2
     STATE_FIELDS = {
-        'schema_version', 'run_id', 'task', 'stages', 'pending_approvals', 'events',
+        'schema_version', 'run_id', 'task', 'stages', 'pending_approvals', 'pending_waits', 'events',
         'usage_total', 'feedback', 'review_rounds', 'invalidate_nonce', 'stage_usage',
         'autonomy', 'test_artifacts', 'test_artifact_hashes', 'revision', 'control',
     }
@@ -295,6 +295,7 @@ class RunState:
         self.state_file = self.run_dir / "state.json"
         self.stages: dict[str, StageState] = {}
         self.pending_approvals: dict[str, dict[str, Any]] = {}
+        self.pending_waits: dict[str, dict[str, Any]] = {}
         self.events: list[dict[str, Any]] = []
         self.usage_total: dict[str, Any] = {"tokens": 0, "duration_s": 0.0}
         self.task: str = ""
@@ -337,7 +338,7 @@ class RunState:
             raise self._invalid_state('state.json run_id 与目标运行不匹配')
 
         defaults = {
-            'task': '', 'stages': {}, 'pending_approvals': {}, 'events': [],
+            'task': '', 'stages': {}, 'pending_approvals': {}, 'pending_waits': {}, 'events': [],
             'usage_total': {'tokens': 0, 'duration_s': 0.0}, 'feedback': {},
             'review_rounds': {}, 'invalidate_nonce': {}, 'stage_usage': {},
             'autonomy': {}, 'revision': 0, 'control': {}, 'test_artifacts': {},
@@ -348,7 +349,7 @@ class RunState:
             raise self._invalid_state('state.json task 字段格式错误')
         if type(values['revision']) is not int or values['revision'] < 0:
             raise self._invalid_state('state.json revision 字段格式错误')
-        for key in ('stages', 'pending_approvals', 'usage_total', 'feedback',
+        for key in ('stages', 'pending_approvals', 'pending_waits', 'usage_total', 'feedback',
                     'review_rounds', 'invalidate_nonce', 'stage_usage', 'autonomy',
                     'control', 'test_artifacts', 'test_artifact_hashes'):
             if not isinstance(values[key], dict):
@@ -365,6 +366,7 @@ class RunState:
         self.task = values['task']
         self.stages = stages
         self.pending_approvals = values['pending_approvals']
+        self.pending_waits = values['pending_waits']
         self.events = values['events']
         self.usage_total = values['usage_total']
         self.feedback = values['feedback']
@@ -388,6 +390,7 @@ class RunState:
             "task": self.task,
             "stages": {k: v.to_dict() for k, v in self.stages.items()},
             "pending_approvals": self.pending_approvals,
+            **({"pending_waits": self.pending_waits} if self.pending_waits else {}),
             "events": self.events,
             "usage_total": self.usage_total,
             "feedback": self.feedback,
@@ -512,7 +515,7 @@ class RunState:
             except (OSError, ValueError, TypeError):
                 return None
             data = {**data, **decision}
-            if approved(directory, data):
+            if data.get('status') not in ('waiting_external', 'waiting_owner') and approved(directory, data):
                 data["verdict"] = "approved"
             best = n, data
         return best
@@ -566,7 +569,7 @@ class RunState:
         if best is None:
             return None
         n, data = best
-        if data.get("verdict") in ("fail", "unparsed"):
+        if data.get("verdict") in ("fail", "unparsed", "waiting_external", "waiting_owner"):
             return None
         self._apply_record(name, n, data, StageStatus.DONE, None)
         self.log_event("adopted", name, n=n)

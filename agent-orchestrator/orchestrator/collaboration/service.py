@@ -102,18 +102,20 @@ class Service:
         status = lifecycle(state, job)
         managed = bool(run['managed'])
         active = status in ('pending', 'running', 'recovering')
-        paused = status == 'paused'
+        paused = status in ('paused', 'waiting_external', 'waiting_owner')
         waiting = status == 'waiting_approval'
         data = {'id': key, 'run_id': run['run_id'], 'project_id': run['project_id'],
                 'task': state.get('task') or job.get('task', ''), 'lifecycle': status,
                 'revision': state.get('revision', 0), 'stages': state.get('stages', {}),
                 'pending_approvals': state.get('pending_approvals', {}),
+                'pending_waits': state.get('pending_waits', {}),
                 'usage': state.get('usage_total', {}), 'rounds': state.get('review_rounds', {}),
                 'autonomy': {'convergence': state.get('autonomy', {}).get('convergence', {})},
                 'capabilities': {'pause': managed and active, 'resume': managed and paused,
-                                 'cancel': managed and status in ('pending', 'running', 'recovering', 'paused', 'waiting_approval'),
+                                 'cancel': managed and status in ('pending', 'running', 'recovering', 'paused',
+                                                                  'waiting_approval', 'waiting_external', 'waiting_owner'),
                                  'approve': managed and waiting, 'derive': True,
-                                 'rerun': managed and status in ('paused', 'done', 'failed'),
+                                 'rerun': managed and status in ('paused', 'waiting_external', 'waiting_owner', 'done', 'failed'),
                                  'discussion': bool(state.get('stages'))},
                 'parent_id': run['parent_id'], 'managed': managed,
                 'last_cursor': self.store.last_cursor(key),
@@ -180,6 +182,8 @@ class Service:
         'running': {'pending', 'running', 'recovering'},
         'paused': {'paused'},
         'waiting_approval': {'waiting_approval'},
+        'waiting_external': {'waiting_external'},
+        'waiting_owner': {'waiting_owner'},
         'done': {'done'},
         'failed': {'failed', 'timeout', 'cancelled'},
     }
@@ -527,7 +531,8 @@ class Service:
                     raise Conflict('同一创建标识不能更换模型或 token 选项')
             else:
                 if any(r['id'] != parent and r['project_id'] == project_id and self.snapshot(r['id'])['lifecycle'] in
-                       ('pending', 'running', 'recovering', 'paused', 'waiting_approval') for r in self.store.runs()):
+                       ('pending', 'running', 'recovering', 'paused', 'waiting_approval',
+                        'waiting_external', 'waiting_owner') for r in self.store.runs()):
                     raise Conflict('此项目已有未结束任务；请先处理或取消')
                 if parent:
                     from .config_copy import derive
@@ -586,7 +591,8 @@ class Service:
         if intent not in ('pause', 'resume', 'cancel', 'approve', 'rerun'):
             raise ValueError('不支持的界面操作；改变需求请创建后续任务')
         allowed = {'approve': {'stage', 'target'}, 'rerun': {'stage', 'revision'}}.get(intent, set())
-        if not isinstance(payload, dict) or set(payload) != allowed:
+        if not isinstance(payload, dict) or (set(payload) != allowed and
+                not (intent == 'resume' and set(payload) == {'wait_target'})):
             raise ValueError('指令参数与当前操作不匹配')
         with self.operations:
             run = self.store.run(key)
@@ -609,6 +615,14 @@ class Service:
             raise Conflict('角色会诊正在使用固定快照，请等待会诊结束再操作运行')
         if not current['capabilities'].get(intent):
             raise Conflict('当前状态不允许此操作')
+        if intent == 'resume' and current['lifecycle'] in ('waiting_external', 'waiting_owner'):
+            targets = [[name, value.get('current_attempt'), value.get('outputs_hash')]
+                       for name, value in current['stages'].items()
+                       if value.get('status') == current['lifecycle'] and name in current['pending_waits']]
+            if len(targets) != 1 or payload.get('wait_target') != targets[0]:
+                raise Conflict('等待回执目标已过期，请刷新后继续')
+        elif intent == 'resume' and payload:
+            raise Conflict('运行已不再等待该回执')
         if intent == 'approve':
             stage = payload.get('stage')
             if stage not in current['pending_approvals'] or payload.get('target') != stage_target(current['stages'][stage]):

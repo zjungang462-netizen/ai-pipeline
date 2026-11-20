@@ -83,6 +83,8 @@ class AutoTune:
     auto_apply: bool = config_field('自动选择需同时启用 autonomy 和 autotune', default=False)
     min_runs: int = config_field('最少同配置终态记录数', default=5, numeric=True, integer=True, minimum=1, constraint_minimum=5, validation_order=1, limit_message='自动调优至少需要 5 条同配置记录')
     max_batch_size: int = config_field('可自动选择的修复文件批量上限', default=2, numeric=True, integer=True, minimum=1, maximum=3, validation_order=2, limit_message='自动修复文件批量上限为 3')
+    test_command_candidates: dict[str, list[list[str]]] = config_field(
+        '人工审批可选的 test 阶段 argv 候选；不自动执行或应用', default_factory=dict)
 
 
 @dataclass
@@ -254,6 +256,9 @@ def parse_config(raw: dict[str, Any], base_dir: Path | None = None) -> Config:
             kind = "test"  # 兼容优化方案中的命名，不新增另一套执行路径。
         _require(kind in ("code", "report", "review", "test"),
                  f"阶段 {name} 的 kind 非法: {kind!r}")
+        allow_wait = s.get("allow_wait", default_value(StageSpec, "allow_wait"))
+        _require(type(allow_wait) is bool, f"阶段 {name} allow_wait 必须是布尔值")
+        _require(not allow_wait or kind == "report", f"阶段 {name} 只有 kind=report 才能启用 allow_wait")
         # test 阶段不调用模型：不需要 adapter/prompt，但必须有 test_cmd
         test_cmd_raw = s.get("test_cmd", default_value(StageSpec, "test_cmd"))
         if kind == "test":
@@ -302,11 +307,17 @@ def parse_config(raw: dict[str, Any], base_dir: Path | None = None) -> Config:
             config_keys=dict(s.get("config_keys", default_value(StageSpec, "config_keys"))),
             feedback_to=feedback_to,
             max_rounds=max_rounds,
+            allow_wait=allow_wait,
             test_cmd=list(test_cmd_raw) if kind == "test" else [],
             context_files=_paths(s.get("context_files", default_value(StageSpec, "context_files")), f"阶段 {name} context_files"),
             precheck_cmd=_command(s.get("precheck_cmd", default_value(StageSpec, "precheck_cmd")), f"阶段 {name} precheck_cmd"),
         ))
         _require(not stages[-1].precheck_cmd or kind == "code", "只有 code 阶段能配置 precheck_cmd")
+
+    for stage_name in autotune.test_command_candidates:
+        stage = next((item for item in stages if item.name == stage_name), None)
+        _require(stage is not None and stage.kind == "test",
+                 f"autotune.test_command_candidates 引用了非 test 阶段: {stage_name!r}")
 
     # 校验 feedback_to 指向的阶段存在，且位于审查阶段之前
     stage_names = [s.name for s in stages]
@@ -395,6 +406,29 @@ def _policy(raw, cls):
             _require(type(value) is bool, f"{key} 必须是布尔值")
         elif isinstance(original, list):
             value = _paths(value, key) if key != "auto_approve" else _command(value, key)
+        elif key == "test_command_candidates":
+            _require(isinstance(value, dict), "test_command_candidates 必须是阶段名到 argv 列表的表")
+            normalized = {}
+            for stage, candidates in value.items():
+                _require(isinstance(stage, str) and re.fullmatch(r"[\w.-]+", stage)
+                         and ".." not in stage and stage not in (".", ".."),
+                         "test_command_candidates 含非法阶段名")
+                _require(isinstance(candidates, list) and 1 <= len(candidates) <= 10,
+                         f"test_command_candidates.{stage} 必须有 1 到 10 条候选命令")
+                commands = []
+                for candidate in candidates:
+                    _require(isinstance(candidate, list) and 1 <= len(candidate) <= 64
+                             and all(isinstance(arg, str) and arg and "\x00" not in arg and len(arg) <= 4096
+                                     for arg in candidate),
+                             f"test_command_candidates.{stage} 的每条命令须是非空 argv 数组")
+                    command = list(candidate)
+                    _require(command not in commands,
+                             f"test_command_candidates.{stage} 含重复命令")
+                    commands.append(command)
+                normalized[stage] = commands
+            value = normalized
+        elif isinstance(original, dict):
+            _require(isinstance(value, dict), f"{key} 必须是表")
         else:
             _schema_number(value, cls, key, key, bounds=False)
         values[key] = value

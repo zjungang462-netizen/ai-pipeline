@@ -148,6 +148,12 @@ def diagnose(path: str | Path) -> dict:
         for name in stage.context_files:
             if not (cfg.task_workdir/name).is_file():
                 add('warning', label+'.context_files', '上下文文件不存在', name)
+    for stage_name, candidates in cfg.autotune.test_command_candidates.items():
+        for index, command in enumerate(candidates):
+            if not command_exists(command[0], cfg.task_workdir):
+                add('warning', f'autotune.test_command_candidates.{stage_name}[{index}]',
+                    '候选命令入口当前不可用；doctor 不会执行候选命令',
+                    '确认工具已安装，或从候选清单删除该命令')
     if cfg.watch_root and cfg.watch_root.strip().lower() != 'off':
         watch = (cfg.base_dir/cfg.watch_root).resolve()
         if not watch.is_dir():

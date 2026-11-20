@@ -10,6 +10,7 @@ from .contracts import ErrorKind, Result, RunContext, StageSpec, StageStatus
 from .safety import WriteRootGuard, WriteRootViolation, relative_target
 from .state import RunState, StageLock, atomic_write_json, compute_inputs_hash, sha256_text
 from pathlib import Path
+import json
 import time
 
 
@@ -246,6 +247,7 @@ class StageExecutor:
                 upstream_reports=self._reports.get(spec.name, []),
                 allow_yolo=self.config.allow_yolo, timeout_s=timeout,
                 kind=spec.kind, attempt_dir=attempt_dir,
+                allow_wait=spec.allow_wait,
                 feedback=self.state.feedback.get(spec.name, ""),
                 base_commit=base_sha,
                 idle_timeout_s=self.config.autonomy.cli_idle_timeout_s,
@@ -420,6 +422,36 @@ class StageExecutor:
                 recovery=self.state.control.get('recoveries',{}).get(spec.name)
                 if recovery:recovery['status']='consumed'
             self._cleanup_worktree(worktree)
+
+            if result.deferred is not None:
+                from .stage_result import validate_deferred
+                try:
+                    deferred = validate_deferred(result.deferred)
+                    saved = validate_deferred(json.loads(
+                        (attempt_dir / "stage_result.json").read_text(encoding="utf-8")))
+                    if spec.kind != "report" or not spec.allow_wait or saved != deferred:
+                        raise ValueError("等待回执仅适用于启用 allow_wait 的 report 阶段，且必须与封存回执一致")
+                except (OSError, ValueError, TypeError) as error:
+                    message = f"阶段等待回执校验失败：{error}"
+                    self.state.log_event("deferred_rejected", spec.name, n=n, reason=message)
+                    self.state.commit_success(
+                        spec.name, n, attempt_dir, inputs_hash, outputs_hash,
+                        result.commit_sha, result.branch, verdict="fail",
+                        status=StageStatus.FAILED, error=message)
+                    return StageStatus.FAILED
+                wait_status = StageStatus(deferred["outcome"])
+                self.state.pending_waits[spec.name] = {
+                    **deferred, "n": n, "inputs_hash": inputs_hash,
+                    "outputs_hash": outputs_hash, "config_hash": self.config.source_hash,
+                    "task_hash": sha256_text(self.state.task),
+                }
+                self.state.log_event("stage_deferred", spec.name, n=n,
+                                     outcome=deferred["outcome"], reason=deferred["reason"])
+                self.state.commit_success(
+                    spec.name, n, attempt_dir, inputs_hash, outputs_hash,
+                    result.commit_sha, result.branch, verdict=deferred["outcome"],
+                    status=wait_status, error=deferred["reason"])
+                return wait_status
 
             # 审查先定结论，再决定这条记录能不能被续跑采纳。
             if spec.kind == "review":

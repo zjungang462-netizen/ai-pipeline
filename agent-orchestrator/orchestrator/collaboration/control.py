@@ -68,10 +68,20 @@ class Control:
                     state.control['paused'] = True
                     result = {'lifecycle': 'paused', 'checkpoint': True}
                 elif kind == 'resume':
-                    if not state.control.get('paused'):
-                        raise ValueError('运行并未暂停')
-                    state.control['paused'] = False
-                    result = {'lifecycle': 'running'}
+                    if state.control.get('paused'):
+                        state.control['paused'] = False
+                        result = {'lifecycle': 'running'}
+                    else:
+                        target = payload.get('wait_target')
+                        if not isinstance(target, list) or len(target) != 3 or not isinstance(target[0], str):
+                            raise ValueError('缺少等待回执目标')
+                        stage = state.stages.get(target[0])
+                        if (stage is None or target[0] not in state.pending_waits
+                                or stage.status.value not in ('waiting_external', 'waiting_owner')
+                                or target[1:] != [stage.current_attempt, stage.outputs_hash]):
+                            raise ValueError('等待回执目标已过期')
+                        state.control['resume_wait'] = target
+                        result = {'stage': target[0], 'attempt': target[1]}
                 elif kind == 'approve':
                     spec = engine.config.stage(payload['stage'])
                     stage = state.stage(spec.name)

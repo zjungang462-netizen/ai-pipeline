@@ -9,7 +9,8 @@ from .state import sha256_file, sha256_text
 
 
 def write_metrics(engine, results: dict[str, str]) -> None:
-    if not results or any(v in ("running", "awaiting_approval") for v in results.values()):
+    if not results or any(v in ("running", "awaiting_approval", "waiting_external", "waiting_owner")
+                          for v in results.values()):
         return
     config, state = engine.config, engine.state
     path = state.run_dir / "metrics.json"

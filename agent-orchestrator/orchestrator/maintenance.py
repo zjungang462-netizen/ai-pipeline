@@ -85,18 +85,19 @@ def _run_actions(run: Path, root: Path, cutoff: float, *, owned=False) -> tuple[
     if not isinstance(stages, dict) or not stages:
         raise ValueError('缺少有效阶段状态，保留整个运行')
     valid_statuses = {'pending', 'running', 'done', 'failed', 'stale', 'awaiting_approval',
-                      'interrupted', 'review_feedback'}
+                      'interrupted', 'review_feedback', 'waiting_external', 'waiting_owner'}
     for stage in stages.values():
         if (not isinstance(stage, dict) or stage.get('status') not in valid_statuses
                 or (stage.get('current_attempt') is not None and
                     (type(stage['current_attempt']) is not int or stage['current_attempt'] < 1))):
             raise ValueError('阶段状态或 current_attempt 无效，保留整个运行')
-    if state.get('pending_approvals') or state.get('control', {}).get('cli_worktrees'):
-        return [], [dict(path=str(run), reason='待审批或存在尚未回收的 CLI worktree，保留运行')]
-    if any(not isinstance(s, dict) or s.get('status') in ('running', 'awaiting_approval') for s in stages.values()):
+    if state.get('pending_approvals') or state.get('pending_waits') or state.get('control', {}).get('cli_worktrees'):
+        return [], [dict(path=str(run), reason='待审批、待恢复或存在尚未回收的 CLI worktree，保留运行')]
+    if any(s.get('status') in ('running', 'awaiting_approval', 'waiting_external', 'waiting_owner')
+           for s in stages.values()):
         return [], [dict(path=str(run), reason='阶段正在执行、待审批或状态无效，保留运行')]
     job = _read_json(run/'job.json') if (run/'job.json').exists() else {}
-    if job.get('status') in ('pending', 'running', 'recovering'):
+    if job.get('status') in ('pending', 'running', 'recovering', 'waiting_external', 'waiting_owner'):
         return [], [dict(path=str(run), reason='job 尚未终止，保留运行')]
     if not owned and any(p.exists() for p in (run/'.run.lock', run/'.supervisor.lock', run/'.control.lock')):
         return [], [dict(path=str(run), reason='存在运行/控制锁，保留运行')]

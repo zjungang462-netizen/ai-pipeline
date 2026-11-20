@@ -79,7 +79,7 @@ def cmd_resume(args) -> int:
     if not eng.state.load():
         print(f"未找到 run: {args.run_id}")
         return 2
-    results = eng.run()
+    results = eng.run(resume_wait=not (eng.state.run_dir / 'job.json').exists())
     return _print_results(results)
 
 
@@ -96,6 +96,10 @@ def cmd_status(args) -> int:
               f"out={(st.outputs_hash or '')[:12]}")
     if eng.state.pending_approvals:
         print("等待审批:", ", ".join(eng.state.pending_approvals))
+    for stage, wait in eng.state.pending_waits.items():
+        if isinstance(wait, dict) and wait.get('reason'):
+            print(f"  {stage}：{wait['reason']}；恢复条件：{wait.get('condition') or '本人处理'}；"
+                  f"下一步：{wait.get('resume_action', '')}")
     print(f"用量: {eng.state.usage_total}")
     return 0
 
@@ -134,6 +138,10 @@ def _print_results(results: dict[str, str]) -> int:
     # 避免脚本把"等人工审批"误判为流水线已完成。
     if any(status == StageStatus.AWAITING_APPROVAL.value for status in results.values()):
         print("流水线未完成：有阶段等待人工审批（approve 后继续）。")
+        return 11
+    if any(status in (StageStatus.WAITING_EXTERNAL.value, StageStatus.WAITING_OWNER.value)
+           for status in results.values()):
+        print("流水线未完成：阶段等待恢复条件或本人处理（resume 后继续）。")
         return 11
     return 0
 
@@ -180,7 +188,11 @@ def cmd_unattended(args) -> int:
     result = supervise(Path(args.config), args.run_id or 'auto-' + uuid.uuid4().hex[:8],
                        args.task, args.max_restarts)
     print(json.dumps(result, ensure_ascii=False, indent=2))
-    return 0 if result['status'] == 'done' else 1
+    if result['status'] == 'done':
+        return 0
+    if result['status'] in ('waiting_external', 'waiting_owner', 'waiting_approval', 'paused'):
+        return 11
+    return 1
 
 
 def cmd_dashboard(args) -> int:

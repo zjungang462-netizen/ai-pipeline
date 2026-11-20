@@ -27,9 +27,13 @@ def main():
             from .collaboration.control import Control
             control = Control(job['control_db'], job['run_key'])
         engine = Engine(config, adapters, job['run_id'], job['task'], control=control)
-        result = engine.run()
+        result = engine.run(resume_wait=True) if not control and job.get('resume_wait') else engine.run()
         print(json.dumps({'run_id': job['run_id'], 'results': result,
                           'usage': engine.state.usage_total}, ensure_ascii=False), flush=True)
+        if any(s == 'waiting_external' for s in result.values()):
+            return 13
+        if any(s == 'waiting_owner' for s in result.values()):
+            return 14
         if job.get('control_db') and any(s == 'awaiting_approval' for s in result.values()):
             return 11
         return 0 if result and all(s == 'done' for s in result.values()) else 1

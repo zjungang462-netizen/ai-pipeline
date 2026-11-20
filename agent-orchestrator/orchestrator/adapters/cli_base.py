@@ -364,6 +364,15 @@ class CLIAdapter(Adapter):
                 report = report_dir / f"{ctx.stage}_report.md"
                 report.write_text(text, encoding="utf-8")
                 result.report_files = [report]
+        if result.ok and kind == "report" and ctx.allow_wait and ctx.attempt_dir is not None:
+            try:
+                from ..stage_result import extract_deferred
+                result.deferred = extract_deferred(result.text, ctx.attempt_dir)
+            except (OSError, ValueError, TypeError) as error:
+                result.ok = False
+                result.error_kind = ErrorKind.PARSE_FAILED
+                result.parse_unknown = True
+                result.stderr = f"阶段等待结果协议错误: {error}"
         if result.ok and kind == "review":
             from .openai_compat import OpenAICompatAdapter
             result.verdict_file = OpenAICompatAdapter._write_verdict_file(

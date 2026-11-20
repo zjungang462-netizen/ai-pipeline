@@ -36,6 +36,10 @@ def lifecycle(state, job):
     statuses = {s.get('status') for s in stages}
     if 'awaiting_approval' in statuses:
         return 'waiting_approval'
+    if 'waiting_owner' in statuses:
+        return 'waiting_owner'
+    if 'waiting_external' in statuses:
+        return 'waiting_external'
     if 'running' in statuses:
         return 'running'
     if 'failed' in statuses:

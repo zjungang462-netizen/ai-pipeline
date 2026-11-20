@@ -67,6 +67,11 @@ def supervise(config_path: Path, run_id: str, task: str, max_restarts: int = 2,
         config = load_config(job['config'])
         if config.source_hash != job['config_hash']:
             raise ConfigError('被固定的运行配置发生变化，停止自动恢复')
+        if job.get('status') in ('waiting_external', 'waiting_owner'):
+            if store and not any(c['kind'] in ('resume', 'rerun') for c in queued):
+                return job
+            if not store:
+                job['resume_wait'] = True
         if job.get('status') in ('failed', 'timeout', 'cancelled'):
             return job
         if job.get('status') == 'done':
@@ -142,8 +147,12 @@ def supervise(config_path: Path, run_id: str, task: str, max_restarts: int = 2,
                         from .process_tree import close
                         close(process)
             job['exit_code'] = code
+            job.pop('resume_wait', None)
             if code == 0:
                 job['status'] = 'done'
+                break
+            if code in (13, 14):
+                job['status'] = {13: 'waiting_external', 14: 'waiting_owner'}[code]
                 break
             if store and code in (10, 11, 12):
                 job['status'] = {10: 'paused', 11: 'waiting_approval', 12: 'cancelled'}[code]

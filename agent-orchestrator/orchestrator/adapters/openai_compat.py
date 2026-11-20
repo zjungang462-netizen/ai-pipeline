@@ -157,6 +157,9 @@ class OpenAICompatAdapter(Adapter):
                 report = report_dir / f"{ctx.stage}_report.md"
                 report.write_text(text, encoding="utf-8")
                 result.report_files = [report]
+                if kind == "report" and ctx.allow_wait and ctx.attempt_dir is not None:
+                    from ..stage_result import extract_deferred
+                    result.deferred = extract_deferred(text, ctx.attempt_dir)
                 if kind == "review":
                     # 结论文件独立落盘到 run 目录；Markdown 只给人看，不参与判定。
                     result.verdict_file = self._write_verdict_file(

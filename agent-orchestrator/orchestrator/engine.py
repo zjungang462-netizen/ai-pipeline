@@ -59,6 +59,7 @@ class Engine(GuardControls, StageExecutor, ReviewPolicy, BudgetPolicy, ArchiveOp
         self.control = control
         self._owned = False
         self._owner_thread = None
+        self._explicit_resume = False
         self._prompts: dict[str, str] = {}
         self._reports: dict[str, list[Path]] = {}
         # 审查上下文覆盖不完整（diff 截断且无法注入全部变更文件）=> 记录未纳入清单，
@@ -205,6 +206,18 @@ class Engine(GuardControls, StageExecutor, ReviewPolicy, BudgetPolicy, ArchiveOp
             self.state.save()
             return StageStatus.FAILED
 
+        if (st.status in (StageStatus.INTERRUPTED, StageStatus.RUNNING)
+                and spec.kind == "report" and spec.name not in self.state.pending_waits):
+            recovered = self._recover_interrupted_wait(spec, index)
+            if recovered is not None:
+                return recovered
+
+        if spec.name in self.state.pending_waits or st.status in (
+                StageStatus.WAITING_EXTERNAL, StageStatus.WAITING_OWNER):
+            waiting = self._resume_deferred(spec, index)
+            if waiting is not None:
+                return waiting
+
         inputs_hash = self._inputs_hash(spec, index)
 
         # 未决审批优先（评审 B3）：有 pending 就直接返回 AWAITING，绝不重跑覆盖。
@@ -263,6 +276,126 @@ class Engine(GuardControls, StageExecutor, ReviewPolicy, BudgetPolicy, ArchiveOp
         finally:
             lock.release()
 
+    def _resume_deferred(self, spec: StageSpec, index: int) -> StageStatus | None:
+        """恢复前校验等待 attempt 的回执、配置绑定和封存清单。"""
+        from .evidence import validate
+        from .stage_result import validate_deferred
+
+        st = self.state.stage(spec.name)
+        pending = self.state.pending_waits.get(spec.name)
+        if (not isinstance(pending, dict) or spec.kind != "report" or not spec.allow_wait
+                or st.status.value not in ("waiting_external", "waiting_owner")):
+            st.status = StageStatus.FAILED
+            st.error = "等待状态缺少有效回执，拒绝自动重跑"
+            self.state.log_event("deferred_rejected", spec.name, reason="missing_or_inconsistent_wait")
+            self.state.save()
+            return StageStatus.FAILED
+
+        directory = self.state.current_attempt_dir(spec.name)
+        record = {"n": st.current_attempt, "inputs_hash": st.inputs_hash,
+                  "outputs_hash": st.outputs_hash, "commit_sha": st.commit_sha}
+        try:
+            deferred = validate_deferred({key: pending.get(key) for key in
+                                          ("outcome", "reason", "condition", "resume_action", "next_check_at")})
+            saved = json.loads((directory / "stage_result.json").read_text(encoding="utf-8")) if directory else None
+            saved = validate_deferred(saved)
+            target_matches = (
+                pending.get("n") == st.current_attempt
+                and pending.get("inputs_hash") == st.inputs_hash
+                and pending.get("outputs_hash") == st.outputs_hash
+                and pending.get("config_hash") == self.config.source_hash
+                and pending.get("task_hash") == sha256_text(self.state.task)
+                and st.status.value == deferred["outcome"]
+                and saved == deferred
+                and directory is not None
+                and validate(directory, record)
+                and self._inputs_hash(spec, index) == st.inputs_hash
+            )
+        except (OSError, ValueError, TypeError, KeyError, RuntimeError):
+            target_matches = False
+            deferred = {}
+        if not target_matches:
+            st.status = StageStatus.FAILED
+            st.error = "等待回执、任务配置或封存产物已变化，拒绝自动重跑"
+            self.state.log_event("deferred_rejected", spec.name, reason="checkpoint_mismatch")
+            self.state.save()
+            return StageStatus.FAILED
+
+        target = [spec.name, st.current_attempt, st.outputs_hash]
+        if not self._explicit_resume and self.state.control.get('resume_wait') != target:
+            return st.status
+        self.state.control.pop('resume_wait', None)
+        if (deferred["outcome"] == StageStatus.WAITING_EXTERNAL.value
+                and deferred["next_check_at"] is not None
+                and time.time() < deferred["next_check_at"]):
+            self.state.save()
+            return StageStatus.WAITING_EXTERNAL
+
+        self.state.pending_waits.pop(spec.name, None)
+        self.state.control.setdefault('wait_context', {})[spec.name] = {**deferred, 'attempt': record['n']}
+        st.status = StageStatus.PENDING
+        st.current_attempt = None
+        st.inputs_hash = None
+        st.outputs_hash = None
+        st.error = None
+        self.state.invalidate_nonce[spec.name] = self.state.invalidate_nonce.get(spec.name, 0) + 1
+        self.state.log_event("deferred_resumed", spec.name, n=record["n"], outcome=deferred["outcome"])
+        self.state.save()
+        return None
+
+    def _recover_interrupted_wait(self, spec: StageSpec, index: int) -> StageStatus | None:
+        """Recover a fully sealed wait after a crash; partial wait receipts fail closed."""
+        from .evidence import validate
+        from .stage_result import validate_deferred
+
+        attempts = self.state.attempts_dir(spec.name)
+        numbered = sorted((path for path in attempts.iterdir() if path.is_dir() and path.name.isdigit()),
+                          key=lambda path: int(path.name), reverse=True) if attempts.is_dir() else []
+        directory = numbered[0] if numbered else None
+        if directory is None or not (directory / "stage_result.json").is_file():
+            return None
+        n = int(directory.name)
+        try:
+            deferred = validate_deferred(json.loads((directory / "stage_result.json").read_text(encoding="utf-8")))
+            success = json.loads((directory / "success.json").read_text(encoding="utf-8"))
+            decision = json.loads((directory / "decision.json").read_text(encoding="utf-8"))
+            if not isinstance(success, dict) or not isinstance(decision, dict):
+                raise ValueError("等待 attempt 元数据格式错误")
+            current_hash = self._inputs_hash(spec, index)
+            record = {"n": n, "inputs_hash": success.get("inputs_hash"),
+                      "outputs_hash": success.get("outputs_hash"), "commit_sha": success.get("commit_sha")}
+            valid = (spec.allow_wait and success.get("n") == n
+                     and success.get("verdict") == deferred["outcome"]
+                     and decision.get("verdict") == deferred["outcome"]
+                     and decision.get("status") == deferred["outcome"]
+                     and success.get("inputs_hash") == current_hash
+                     and all(decision.get(key) == success.get(key)
+                             for key in ("n", "inputs_hash", "outputs_hash"))
+                     and validate(directory, record))
+        except (OSError, ValueError, TypeError, KeyError, RuntimeError):
+            valid = False
+            deferred = {}
+            record = {}
+        if not valid:
+            st = self.state.stage(spec.name)
+            st.status = StageStatus.FAILED
+            st.error = "中断的阶段已有等待回执但 attempt 未完整封存，拒绝自动重跑；核对外部效果后显式 rerun"
+            self.state.pending_waits[spec.name] = {"n": n, "outcome": "rejected"}
+            self.state.log_event("deferred_rejected", spec.name, n=n, reason="interrupted_partial_receipt")
+            self.state.save()
+            return StageStatus.FAILED
+
+        status = StageStatus(deferred["outcome"])
+        self.state._apply_record(spec.name, n, success, status, deferred["reason"])
+        self.state.pending_waits[spec.name] = {
+            **deferred, "n": n, "inputs_hash": success["inputs_hash"],
+            "outputs_hash": success["outputs_hash"], "config_hash": self.config.source_hash,
+            "task_hash": sha256_text(self.state.task),
+        }
+        self.state.log_event("deferred_recovered", spec.name, n=n, outcome=deferred["outcome"])
+        self.state.save()
+        return status
+
 
     # ---- 审批 ----
     def approve(self, stage_name: str) -> bool:
@@ -311,15 +444,20 @@ class Engine(GuardControls, StageExecutor, ReviewPolicy, BudgetPolicy, ArchiveOp
         return True
 
     # ---- 主流程 ----
-    def run(self) -> dict[str, str]:
+    def run(self, *, resume_wait: bool = False) -> dict[str, str]:
         with self._ownership() as owned:
             if not owned:
                 return {self.config.stages[0].name: StageStatus.RUNNING.value}
-            result = self._run_owned()
+            self._explicit_resume = resume_wait and self.control is None
+            try:
+                result = self._run_owned()
+            finally:
+                self._explicit_resume = False
             from .metrics import write_metrics
             write_metrics(self, result)
             if self.config.autotune.enabled and self.config.source_path and not any(
-                    status in ('running', 'awaiting_approval') for status in result.values()):
+                    status in ('running', 'awaiting_approval', 'waiting_external', 'waiting_owner')
+                    for status in result.values()):
                 from .tuning import policy_tune
                 try:
                     policy_tune(self.config.source_path, self.config.source_hash)
@@ -377,6 +515,7 @@ class Engine(GuardControls, StageExecutor, ReviewPolicy, BudgetPolicy, ArchiveOp
                 continue
             # 锁占用 => 中止整轮（评审 B2），不让下游在无上游产物时照跑
             if status in (StageStatus.FAILED, StageStatus.AWAITING_APPROVAL,
+                          StageStatus.WAITING_EXTERNAL, StageStatus.WAITING_OWNER,
                           StageStatus.RUNNING):
                 break
             i += 1
@@ -413,6 +552,10 @@ class Engine(GuardControls, StageExecutor, ReviewPolicy, BudgetPolicy, ArchiveOp
             st.error = None
             # 清未决审批，让该阶段可被重新执行（含 review_unparsed 的 awaiting）
             self.state.pending_approvals.pop(s.name, None)
+            self.state.pending_waits.pop(s.name, None)
+            self.state.control.get('wait_context', {}).pop(s.name, None)
+            if (self.state.control.get('resume_wait') or [None])[0] == s.name:
+                self.state.control.pop('resume_wait', None)
             # 上游重跑后旧审查反馈已过期；保留会让 coding 继续走返工分支、
             # 看不到新的设计/需求产物（P3）。
             self.state.feedback.pop(s.name, None)
