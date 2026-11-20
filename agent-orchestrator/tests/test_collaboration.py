@@ -140,7 +140,9 @@ class Collaboration(unittest.TestCase):
         repeated = service.command(run['id'], 'approve', {'stage': 'verify', 'target': target}, 'approve-command-001')
         self.assertEqual(repeated['id'], command['id'])
         state = json.loads((directory(service.store.run(run['id'])) / 'state.json').read_text(encoding='utf8'))
-        self.assertEqual(sum(e['kind'] == 'approved' for e in state['events']), 1)
+        from orchestrator.event_journal import read_events
+        events = read_events(directory(service.store.run(run['id'])), state)
+        self.assertEqual(sum(e['kind'] == 'approved' for e in events), 1)
 
     def test_historical_read_does_not_start_model_or_mutate_state(self):
         from orchestrator.engine import Engine

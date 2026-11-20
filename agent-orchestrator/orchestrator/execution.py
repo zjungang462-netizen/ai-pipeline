@@ -47,11 +47,8 @@ class StageExecutor:
             self.state.log_event("lock_busy", spec.name)
             return StageStatus.RUNNING
         try:
-            n, attempt_dir = self.state.new_attempt_dir(spec.name)
-            st.status = StageStatus.RUNNING
-            self.state.log_event("test_start", spec.name, n=n,
-                                 cmd=" ".join(spec.test_cmd))
-            self.state.save()
+            n, attempt_dir = self.state.new_attempt_dir(
+                spec.name, start_event="test_start", cmd=" ".join(spec.test_cmd))
 
             workdir = self.config.task_workdir
             upstream_sha = next((self.state.stage(s.name).commit_sha
@@ -185,10 +182,7 @@ class StageExecutor:
                     break
             if self.control:
                 self.control.checkpoint(self)
-            n, attempt_dir = self.state.new_attempt_dir(spec.name)
-            st.status = StageStatus.RUNNING
-            self.state.log_event("attempt_start", spec.name, n=n)
-            self.state.save()
+            n, attempt_dir = self.state.new_attempt_dir(spec.name, start_event="attempt_start")
 
             # 代码阶段在独立 worktree 执行（基于上游 commit 拉分支，评审 B3）；
             # 报告阶段在主工作区（报告落 runs/，不进 git）。

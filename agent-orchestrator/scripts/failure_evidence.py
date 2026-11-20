@@ -280,7 +280,14 @@ def capture(test_id, roots, output=None, secrets=(), failure='', metadata=None):
                                     if size>MAX_JSON_BYTES:
                                         issues.append({'path':relative,'reason':'json_size_limit'});continue
                                     raw=stream.read(MAX_JSON_BYTES+1)
-                                    selected=_select(item.name,json.loads(raw))
+                                    value = json.loads(raw)
+                                    if item.name == 'state.json' and isinstance(value, dict) and value.get('schema_version') == 3:
+                                        from orchestrator.event_journal import read_events
+                                        try:
+                                            value['events'] = read_events(path.parent, value, max_bytes=MAX_JSON_BYTES)
+                                        except (OSError, ValueError, RecursionError):
+                                            issues.append({'path': relative, 'reason': 'event_journal_unavailable'})
+                                    selected=_select(item.name,value)
                                     data=scrub.clean(selected)
                                     if isinstance(selected.get('output'),str):
                                         data['output']=scrub.text(selected['output'])[-MAX_TAIL_BYTES:]

@@ -28,7 +28,11 @@ class StateBackup(unittest.TestCase):
         self.output = self.root / 'backup'
 
     def test_restore_preserves_bytes_and_empty_directories(self):
+        self.state.log_event('approved', 'verify')
+        self.state.save()
         before = self.state.state_file.read_bytes()
+        journal = self.state.run_dir / 'events.jsonl'
+        log_before = journal.read_bytes()
         evidence = self.evidence.read_bytes()
         report = backup_state(self.source, self.output)
         self.assertTrue(report['compatible'])
@@ -37,6 +41,10 @@ class StateBackup(unittest.TestCase):
         self.assertFalse(restored['automatic_resume'])
         self.assertFalse(restored['paths_rewritten'])
         self.assertEqual((target / 'runs/existing/state.json').read_bytes(), before)
+        self.assertEqual((target / journal.relative_to(self.source)).read_bytes(), log_before)
+        loaded = RunState(target, 'existing')
+        self.assertTrue(loaded.load())
+        self.assertEqual(loaded.events, self.state.events)
         self.assertEqual((target / self.evidence.relative_to(self.source)).read_bytes(), evidence)
         self.assertTrue((target / 'empty').is_dir())
         self.assertFalse(list(target.rglob('*.lock')))

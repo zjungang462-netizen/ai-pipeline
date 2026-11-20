@@ -11,6 +11,7 @@ import tempfile
 import json
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from orchestrator.config import parse_config
 from orchestrator.contracts import StageStatus
@@ -103,7 +104,7 @@ class TestCrashRecovery(unittest.TestCase):
             state=RunState(Path(d),'expected')
             state.task='unchanged in-memory task'
             state.state_file.parent.mkdir(parents=True)
-            raw=b'{"schema_version":3,"run_id":"expected","task":"future"}'
+            raw=b'{"schema_version":4,"run_id":"expected","task":"future"}'
             state.state_file.write_bytes(raw)
 
             with self.assertRaisesRegex(ValueError,'schema_version'):
@@ -145,6 +146,71 @@ class TestCrashRecovery(unittest.TestCase):
             saved=json.loads(state.state_file.read_text(encoding='utf8'))
             self.assertEqual(saved['schema_version'],RunState.SCHEMA_VERSION)
             self.assertEqual(saved['run_id'],'expected')
+
+    def test_legacy_events_migrate_once_on_save(self):
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d)
+            state = RunState(root, 'legacy')
+            old_events = [{'kind': 'model_call_started', 'stage': 'review', 'ts': 1}]
+            atomic_write_json(state.state_file, {'schema_version': 2, 'run_id': 'legacy',
+                                                'revision': 8, 'events': old_events})
+            self.assertTrue(state.load())
+            path = state.run_dir / 'events.jsonl'
+            self.assertFalse(path.exists())
+            state.log_event('attempt_done', 'review')
+            state.save()
+            prefix = path.read_bytes()
+            state.save()
+            self.assertEqual(path.read_bytes(), prefix)
+            state.log_event('approved', 'review')
+            state.save()
+            self.assertTrue(path.read_bytes().startswith(prefix))
+            snapshot = json.loads(state.state_file.read_bytes())
+            self.assertNotIn('events', snapshot)
+            self.assertEqual(snapshot['events_bytes'], path.stat().st_size)
+            loaded = RunState(root, 'legacy')
+            self.assertTrue(loaded.load())
+            self.assertEqual(loaded.events, state.events)
+            self.assertEqual(loaded.events[:1], old_events)
+            self.assertEqual(loaded.events[-1]['engine_seq'], 3)
+
+    def test_crash_after_event_sync_exposes_only_committed_snapshot(self):
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d)
+            state = RunState(root, 'crash')
+            state.log_event('attempt_start', 'review')
+            state.save()
+            before = state.state_file.read_bytes()
+            state.log_event('model_call_started', 'review')
+            state.usage_total['tokens'] = 100
+            with patch('orchestrator.state.atomic_write_json', side_effect=OSError('replace failed')):
+                with self.assertRaises(OSError):
+                    state.save()
+            self.assertEqual(state.state_file.read_bytes(), before)
+            journal = state.run_dir / 'events.jsonl'
+            with journal.open('ab') as stream:
+                stream.write(b'{"partial":')
+            restarted = RunState(root, 'crash')
+            self.assertTrue(restarted.load())
+            self.assertEqual(restarted.usage_total['tokens'], 0)
+            self.assertEqual([event['kind'] for event in restarted.events], ['attempt_start'])
+            restarted.log_event('interrupted', 'review')
+            restarted.save()
+            self.assertTrue(state.load())
+            self.assertEqual([event['kind'] for event in state.events], ['attempt_start', 'interrupted'])
+            self.assertEqual(len(journal.read_bytes().splitlines()), 2)
+
+    def test_short_committed_event_log_rejects_unsafe_resume(self):
+        with tempfile.TemporaryDirectory() as d:
+            state = RunState(Path(d), 'short')
+            state.log_event('model_call_started', 'review')
+            state.save()
+            path = state.run_dir / 'events.jsonl'
+            path.write_bytes(path.read_bytes()[:-1])
+            with self.assertRaisesRegex(ValueError, '事件日志短于'):
+                state.load()
+            with self.assertRaisesRegex(ValueError, '拒绝覆盖'):
+                state.save()
 
     def test_state_load_rejects_unversioned_state_without_mutating_or_rewriting(self):
         with tempfile.TemporaryDirectory() as d:

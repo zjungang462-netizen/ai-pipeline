@@ -9,7 +9,7 @@ from unittest import mock
 from orchestrator.collaboration import projection
 from orchestrator.collaboration.projection import SummaryCache
 from orchestrator.collaboration.service import Service
-from orchestrator.state import atomic_write_json
+from orchestrator.state import RunState, atomic_write_json
 
 
 class HistorySummary(unittest.TestCase):
@@ -72,6 +72,24 @@ class HistorySummary(unittest.TestCase):
         self.service.list_runs_page()
         self.service.snapshot(key)
         self.assertEqual(self.service.store.last_cursor(key),cursor)
+
+    def test_projection_keeps_event_identity_after_journal_migration(self):
+        key,root = self.run_record()
+        legacy = json.loads((root / 'state.json').read_bytes())
+        legacy.update(schema_version=2, run_id='r')
+        legacy['stages']['review']['name'] = 'review'
+        atomic_write_json(root / 'state.json', legacy)
+        self.service.snapshot(key)
+        state = RunState(self.root / 'state', 'r')
+        self.assertTrue(state.load())
+        state.log_event('approved', 'review', n=1)
+        state.save()
+        with (root / 'events.jsonl').open('ab') as stream:
+            stream.write(b'{"kind":"uncommitted"}\n')
+        self.service.snapshot(key)
+        self.service.snapshot(key)
+        events = [row for row in self.service.store.events(key) if row['kind'] == 'engine_event']
+        self.assertEqual([row['payload']['kind'] for row in events], ['attempt_done', 'approved'])
 
     def test_updated_state_and_job_invalidate_summary_without_full_snapshot(self):
         key,root=self.run_record()

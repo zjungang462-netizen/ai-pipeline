@@ -38,7 +38,7 @@ def inspect_state(state_dir):
         rows.append(row)
     return dict(schema_version=RunState.SCHEMA_VERSION, runs=rows,
                 compatible=all(row['compatible'] for row in rows),
-                migration='schema_2_read_only_validation',
+                migration='schema_2_and_3_read_only_validation',
                 scope='state_only; task_workdir_and_git_worktrees_require_separate_backup')
 
 

@@ -9,6 +9,7 @@ from threading import RLock
 from pathlib import Path
 
 from ..state import sha256_file
+from ..event_journal import read_events
 from ..safety import relative_target
 
 
@@ -134,14 +135,15 @@ def project(store, run, cache=None):
             if cache is not None:
                 cache[run['id']] = (signature, state, job)
             return state, job
-        for index, event in enumerate(state.get('events', [])):
+        events = read_events(root, state)
+        for index, event in enumerate(events):
             event_id = run['id'] + ':engine:' + str(event.get('event_id') or index)
             store._event(db, event_id, run['id'], 'engine_event', event, event.get('ts'))
         store._event(db, run['id'] + ':lifecycle:' + hashlib.sha256(signature.encode()).hexdigest(),
                      run['id'], 'snapshot_changed', {'lifecycle': lifecycle(state, job),
                                                      'revision': state.get('revision', 0)})
     # 只有已归档成功、或已记录结束事件的 attempt 才能显示模型/工具结果。
-    closed = {(e.get('stage'), e.get('n')) for e in state.get('events', [])
+    closed = {(e.get('stage'), e.get('n')) for e in events
               if e.get('kind') in ('attempt_done', 'attempt_fail', 'test_pass', 'test_fail')}
     for stage_name, stage in state.get('stages', {}).items():
         attempts = root / 'stages' / stage_name / 'attempts'

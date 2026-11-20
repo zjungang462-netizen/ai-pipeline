@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from ..reporting import failure_categories, read_object, usage_summary
+from ..event_journal import read_events
 from .projection import directory, lifecycle
 from .storage import Conflict
 
@@ -10,6 +11,8 @@ def run_summary(service, key):
     run = service.store.run(key)
     root = directory(run)
     state = read_object(root / 'state.json')
+    if state.get('schema_version') == 3:
+        state['events'] = read_events(root, state)
     metrics = read_object(root / 'metrics.json') if (root / 'metrics.json').exists() else None
     job = read_object(root / 'job.json') if (root / 'job.json').exists() else {}
     summary = usage_summary(run['run_id'], state, metrics)

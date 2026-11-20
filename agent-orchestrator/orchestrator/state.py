@@ -19,6 +19,7 @@ from pathlib import Path
 from typing import Any
 
 from .contracts import StageStatus
+from .event_journal import append_events, read_events
 
 
 def sha256_text(text: str) -> str:
@@ -276,9 +277,9 @@ class StageState:
 
 
 class RunState:
-    """一次 run 的持久化状态。state.json 为唯一权威。"""
+    """运行快照和快照引用的已提交事件。"""
 
-    SCHEMA_VERSION = 2
+    SCHEMA_VERSION = 3
     STATE_FIELDS = {
         'schema_version', 'run_id', 'task', 'stages', 'pending_approvals', 'pending_waits', 'events',
         'usage_total', 'feedback', 'review_rounds', 'invalidate_nonce', 'stage_usage',
@@ -297,6 +298,8 @@ class RunState:
         self.pending_approvals: dict[str, dict[str, Any]] = {}
         self.pending_waits: dict[str, dict[str, Any]] = {}
         self.events: list[dict[str, Any]] = []
+        self._events_bytes = 0
+        self._saved_events = 0
         self.usage_total: dict[str, Any] = {"tokens": 0, "duration_s": 0.0}
         self.task: str = ""
         # L2 审查反馈环：阶段名 -> 反馈文本；阶段名 -> 已用轮次；阶段名 -> 失效计数
@@ -329,9 +332,10 @@ class RunState:
         if not isinstance(data, dict):
             raise self._invalid_state('state.json 根节点必须是对象')
         version = data.get('schema_version')
-        if type(version) is not int or version != self.SCHEMA_VERSION:
+        if type(version) is not int or version not in (2, self.SCHEMA_VERSION):
             raise self._invalid_state('state.json schema_version 不受支持')
-        unknown = set(data) - self.STATE_FIELDS
+        fields = self.STATE_FIELDS | {'events_bytes'} if version == 3 else self.STATE_FIELDS
+        unknown = set(data) - fields
         if unknown:
             raise self._invalid_state('state.json 含有当前版本无法安全保留的字段')
         if data.get('run_id') != self.run_id:
@@ -354,8 +358,12 @@ class RunState:
                     'control', 'test_artifacts', 'test_artifact_hashes'):
             if not isinstance(values[key], dict):
                 raise self._invalid_state(f'state.json {key} 字段必须是对象')
-        if not isinstance(values['events'], list):
-            raise self._invalid_state('state.json events 字段必须是数组')
+        try:
+            events = read_events(self.run_dir, data)
+            if version == 2 and any(not isinstance(event, dict) for event in events):
+                raise ValueError('旧版运行事件必须是对象')
+        except (OSError, ValueError) as error:
+            raise self._invalid_state(f'无法安全读取运行事件: {error}') from error
         try:
             stages = {name: StageState.from_dict(stage)
                       for name, stage in values['stages'].items()}
@@ -367,7 +375,9 @@ class RunState:
         self.stages = stages
         self.pending_approvals = values['pending_approvals']
         self.pending_waits = values['pending_waits']
-        self.events = values['events']
+        self.events = events
+        self._events_bytes = data['events_bytes'] if version == 3 else 0
+        self._saved_events = len(events) if version == 3 else 0
         self.usage_total = values['usage_total']
         self.feedback = values['feedback']
         self.review_rounds = values['review_rounds']
@@ -383,7 +393,8 @@ class RunState:
     def save(self) -> None:
         if self._unsafe_to_save:
             raise ValueError('state.json 加载校验失败；拒绝覆盖原始状态')
-        self.revision += 1
+        events_bytes = append_events(self.run_dir, self._events_bytes, self.events[self._saved_events:])
+        revision = self.revision + 1
         atomic_write_json(self.state_file, {
             "schema_version": self.SCHEMA_VERSION,
             "run_id": self.run_id,
@@ -391,7 +402,7 @@ class RunState:
             "stages": {k: v.to_dict() for k, v in self.stages.items()},
             "pending_approvals": self.pending_approvals,
             **({"pending_waits": self.pending_waits} if self.pending_waits else {}),
-            "events": self.events,
+            "events_bytes": events_bytes,
             "usage_total": self.usage_total,
             "feedback": self.feedback,
             "review_rounds": self.review_rounds,
@@ -400,9 +411,12 @@ class RunState:
             "autonomy": self.autonomy,
             "test_artifacts": self.test_artifacts,
             "test_artifact_hashes": self.test_artifact_hashes,
-            'revision': self.revision,
+            'revision': revision,
             'control': self.control,
         })
+        self.revision = revision
+        self._events_bytes = events_bytes
+        self._saved_events = len(self.events)
 
     def log_event(self, kind: str, stage: str, **kw: Any) -> None:
         self.events.append({'event_id': uuid.uuid4().hex, 'engine_seq': len(self.events) + 1,
@@ -429,7 +443,8 @@ class RunState:
     def attempts_dir(self, name: str) -> Path:
         return self.stage_dir(name) / "attempts"
 
-    def new_attempt_dir(self, name: str) -> tuple[int, Path]:
+    def new_attempt_dir(self, name: str, *, start_event: str | None = None,
+                        **event_fields: Any) -> tuple[int, Path]:
         adir = self.attempts_dir(name)
         adir.mkdir(parents=True, exist_ok=True)
         existing = [int(p.name) for p in adir.iterdir() if p.is_dir() and p.name.isdigit()]
@@ -438,6 +453,9 @@ class RunState:
         path.mkdir(parents=True, exist_ok=True)
         # 调用前即持久化：失败、超时或进程崩溃也必须留下真实尝试次数。
         self._set_attempt_record(name, n, path, success=False)
+        if start_event is not None:
+            self.stage(name).status = StageStatus.RUNNING
+            self.log_event(start_event, name, n=n, **event_fields)
         self.save()
         return n, path
 

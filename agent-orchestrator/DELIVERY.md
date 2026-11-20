@@ -270,7 +270,7 @@ Qwen Code 0.26.0 已从官方 npm 固定版本安装到独立试验目录，真�
 - **根外写入证据**：当前开发版的 `watch_enforce=true` 保留根外文件原位，只在 `<run>/violations/<stage>/` 保存有界变化元数据，不读取、复制或移动原文件正文；快照无法可靠确认写入者。违规仍按输入指纹持久判失败，修正问题后用 `rerun-from` 显式重试。`watch_root` 位于可写根内时禁用该监视域并记录 `watch_disabled`。旧冻结包的隔离搬移行为只作为历史记录。
 - **审查覆盖不完整**：diff 超过 600 行时尝试按 commit 注入变更文件全文；仍无法覆盖时，`pass` 在人工模式下转待审批，无人值守模式下判失败。人工确认前应核查未覆盖的变更。
 - **审批校验变化**：code/test 阶段校验申请时冻结的输入指纹、attempt 归档及 evidence；report/review 阶段仍拒绝输入变化后的审批。等待审批退出码为 11，不能作为任务成功处理。
-- **状态兼容与备份**：当前保存的 `state.json` 使用 `schema_version=2`，包含顶层 `test_artifacts`、`test_artifact_hashes` 以及 `control.consumed_feedback`、`control.write_violations`。缺失字段按空值读取；没有提供向旧版本回滚的迁移工具。升级前及回滚前先停止写入该状态目录的 worker/supervisor/工作台，备份整个 `state_dir`（含 attempts、审批与隔离证据）；回滚时使用与旧代码配套的备份，不让旧代码覆盖新版状态。不要只修改 `schema_version` 或删字段来冒充迁移。
+- **状态兼容与备份**：新保存的 `state.json` 使用 `schema_version=3`，通过字节位置引用 `events.jsonl` 的已提交前缀。旧 schema 2 可直接读取，首次保存时迁移；其它状态字段与 attempt 证据格式保持原样。升级前及回滚前先停止写入该状态目录的 worker/supervisor/工作台，备份整个 `state_dir`；回滚时使用与旧代码配套的备份。不要单独复制状态快照或手改版本号。
 - **测试输入与缓存**：输出按内容哈希绑定，输出改变或丢失会重新执行测试；只有路径、没有哈希的旧记录不再自动受信。测试期间既有输入被改写或删除会拒收，保留真实命令退出码和输入变化原因；既有生成文件若没有可信输出绑定，也按输入保守处理。
 - **既有工作区与脚本**：非 Git 工作区首次 coding 会提交已有文件作为本地基线；零净变更 code 阶段现在判失败。`demo/run_api_demo.py` 的未完成退出码为 11 或 1，调用方应检查退出码。
 
