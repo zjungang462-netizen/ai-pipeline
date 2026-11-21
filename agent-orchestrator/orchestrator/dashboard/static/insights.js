@@ -14,17 +14,71 @@ function renderBudgetAlerts(run){
  show(modelBox,!!modelBox.textContent);
 }
 
+const ADAPTER_TYPE_LABELS={
+ openai_compat:'兼容 API',cli_agy:'反重力 CLI',cli_codex:'Codex CLI',cli_claude:'Claude CLI',
+ cli_grok:'Grok 容器',cli_doubao:'豆包容器',cli_qwen:'Qwen CLI',cli_qoder:'Qoder CLI',cli_dsh:'DSH CLI',fake:'离线模拟'
+};
+const MODEL_PRESETS={
+ openai_compat:['deepseek-chat','deepseek-reasoner','gpt-4.1','gpt-4o','claude-sonnet-4-20250514','qwen-plus'],
+ cli_agy:['gemini-3.8-flash-high','gemini-3.8-pro-high','gemini-3.8-flash-low','claude-sonnet-4-6'],
+ cli_codex:['gpt-5.4','gpt-5.3-codex','o3'],
+ cli_claude:['claude-sonnet-4-6','claude-opus-4-6','deepseek-v4-pro[1M]'],
+ cli_grok:['grok-code-fast-1','grok-4'],
+ cli_doubao:['doubao-seed-code','doubao-pro-32k'],
+ cli_qwen:['qwen3-coder-plus','qwen-plus'],
+ cli_qoder:['Ultimate','Performance','Efficient']
+};
+
 function renderModelSettings(){
  const project=projects.find(p=>p.id===$('project-select').value),box=$('model-settings');box.replaceChildren();
  for(const model of project?.models||[]){
-  const row=el('div','model-setting'),label=el('label','',model.name+' · '+model.type),input=el('input');input.value=model.model||model.effective_model||'';input.placeholder='使用已登录工具默认模型';input.maxLength=160;input.dataset.adapter=model.name;input.dataset.option='model';label.append(input);row.append(label);
-  for(const [field,enabled,values,title] of [['reasoning_effort',model.supports_effort,['cli_qoder','cli_claude'].includes(model.type)?['low','medium','high','xhigh','max']:['none','low','medium','high','xhigh'],'思考强度'],['thinking',model.supports_thinking,model.type==='cli_qoder'?['auto','adaptive','disabled']:['enabled','disabled'],'深度思考（端点需支持）']]){
-   if(!enabled)continue;const fieldLabel=el('label','',title),select=el('select');select.dataset.adapter=model.name;select.dataset.option=field;
-   for(const value of ['',...values]){const option=el('option','',value||'沿用配置/模型默认');option.value=value;select.append(option);}select.value=model[field]||'';fieldLabel.append(select);row.append(fieldLabel);
+  const card=el('div','adapter-card');
+  const head=el('div','adapter-card-head');
+  head.append(el('span','adapter-card-name',model.name),el('span','adapter-type-pill',ADAPTER_TYPE_LABELS[model.type]||model.type));
+  card.append(head);
+
+  const currentVal=model.model||model.effective_model||'';
+  const basePresets=MODEL_PRESETS[model.type]||[];
+  const presets=[...new Set([...(currentVal?[currentVal]:[]),...basePresets])];
+
+  const pickerRow=el('div','model-picker-row');
+  const presetLabel=el('label','','常用模型选择');
+  const presetSelect=el('select','model-preset-select');
+  presetSelect.append(Object.assign(el('option','','自定义 / 工具默认'),{value:''}));
+  for(const item of presets){presetSelect.append(Object.assign(el('option','',item),{value:item}));}
+  presetSelect.value=presets.includes(currentVal)?currentVal:'';
+  presetLabel.append(presetSelect);
+
+  const inputLabel=el('label','','模型标识（可手动输入）');
+  const input=el('input');input.value=currentVal;input.placeholder='留空使用已登录工具默认模型';input.maxLength=160;input.dataset.adapter=model.name;input.dataset.option='model';
+  inputLabel.append(input);
+  pickerRow.append(presetLabel,inputLabel);
+  card.append(pickerRow);
+
+  const chips=[];
+  if(presets.length){
+   const chipWrap=el('div','model-chips');
+   for(const item of presets.slice(0,5)){
+    const chip=el('button','model-chip'+(item===currentVal?' active':''),item);
+    chip.type='button';
+    chip.onclick=()=>{input.value=item;presetSelect.value=item;chips.forEach(c=>c.classList.toggle('active',c.textContent===item));};
+    chips.push(chip);chipWrap.append(chip);
+   }
+   card.append(chipWrap);
   }
-  if(model.type==='openai_compat'){const label=el('label','','结构化审查 JSON（端点需支持）'),select=el('select');select.dataset.adapter=model.name;select.dataset.option='review_json_mode';
-   for(const [value,text] of [['','沿用配置'],['true','启用'],['false','禁用']]){const option=el('option','',text);option.value=value;select.append(option);}select.value=model.review_json_mode?'true':'';label.append(select);row.append(label);
-  }box.append(row);
+  presetSelect.onchange=()=>{if(presetSelect.value){input.value=presetSelect.value;}chips.forEach(c=>c.classList.toggle('active',c.textContent===input.value.trim()));};
+  input.oninput=()=>{const v=input.value.trim();presetSelect.value=presets.includes(v)?v:'';chips.forEach(c=>c.classList.toggle('active',c.textContent===v));};
+
+  const extraGrid=el('div','adapter-extra-grid');
+  for(const [field,enabled,values,title] of [['reasoning_effort',model.supports_effort,['cli_qoder','cli_claude'].includes(model.type)?['low','medium','high','xhigh','max']:['none','low','medium','high','xhigh'],'思考强度'],['thinking',model.supports_thinking,model.type==='cli_qoder'?['auto','adaptive','disabled']:['enabled','disabled'],'深度思考']]){
+   if(!enabled)continue;const fieldLabel=el('label','',title),select=el('select');select.dataset.adapter=model.name;select.dataset.option=field;
+   for(const value of ['',...values]){const option=el('option','',value||'沿用配置/默认');option.value=value;select.append(option);}select.value=model[field]||'';fieldLabel.append(select);extraGrid.append(fieldLabel);
+  }
+  if(model.type==='openai_compat'){const label=el('label','','结构化审查 JSON'),select=el('select');select.dataset.adapter=model.name;select.dataset.option='review_json_mode';
+   for(const [value,text] of [['','沿用配置'],['true','启用'],['false','禁用']]){const option=el('option','',text);option.value=value;select.append(option);}select.value=model.review_json_mode?'true':'';label.append(select);extraGrid.append(label);
+  }
+  if(extraGrid.children.length)card.append(extraGrid);
+  box.append(card);
  }
 }
 function executionOptions(){
