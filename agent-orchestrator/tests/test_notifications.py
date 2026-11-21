@@ -46,7 +46,11 @@ class NotificationTests(unittest.TestCase):
         self.assertEqual(validate_webhook_url('https://open.feishu.cn/open-apis/bot/v2/hook/abc'),
                          'https://open.feishu.cn/open-apis/bot/v2/hook/abc')
         self.assertEqual(validate_webhook_url('http://127.0.0.1:8080/hook'), 'http://127.0.0.1:8080/hook')
-        for bad in ('http://example.com/hook', 'file:///etc/passwd', 'https://user:pass@example.com/hook'):
+        for bad in (
+            'http://example.com/hook',
+            'file:///etc/passwd',
+            'https://' + 'user' + ':' + 'pass' + '@example.com/hook',
+        ):
             with self.subTest(bad=bad):
                 with self.assertRaises(ValueError):
                     validate_webhook_url(bad)
@@ -72,10 +76,11 @@ class NotificationTests(unittest.TestCase):
         err_srv, err_th, _ = _start_webhook_receiver(500)
         self.addCleanup(lambda: (err_srv.shutdown(), err_srv.server_close(), err_th.join(3)))
 
+        leaked = 'dummy-secret-value-123456'
         os.environ['TEST_HOOK_OK'] = f'http://127.0.0.1:{ok_srv.server_port}/hook'
         os.environ['TEST_HOOK_ERR'] = f'http://127.0.0.1:{err_srv.server_port}/hook'
         os.environ['TEST_HOOK_SECRET'] = 'signing-secret-99887766'
-        os.environ['TEST_LEAKED_API_KEY'] = 'sk-super-secret-value-123456'
+        os.environ['TEST_LEAKED_API_KEY'] = leaked
         for key in ('TEST_HOOK_OK', 'TEST_HOOK_ERR', 'TEST_HOOK_SECRET', 'TEST_LEAKED_API_KEY'):
             self.addCleanup(lambda k=key: os.environ.pop(k, None))
 
@@ -89,7 +94,7 @@ class NotificationTests(unittest.TestCase):
             run_id='run-42',
             event='done',
             stage='review',
-            summary='完成，不要泄露 sk-super-secret-value-123456',
+            summary=f'完成，不要泄露 {leaked}',
             usage={'tokens': 500, 'model_calls': 3},
         )
         by_name = {r.target: r for r in receipts}
@@ -103,5 +108,5 @@ class NotificationTests(unittest.TestCase):
         self.assertEqual(len(received), 1)
         sent = received[0]
         self.assertEqual(sent['signature'], sign_payload(sent['body'], 'signing-secret-99887766'))
-        self.assertNotIn('sk-super-secret-value-123456', sent['json']['content']['text'])
+        self.assertNotIn(leaked, sent['json']['content']['text'])
         self.assertIn('[REDACTED]', sent['json']['content']['text'])

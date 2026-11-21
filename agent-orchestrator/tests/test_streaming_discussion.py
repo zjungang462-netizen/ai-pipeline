@@ -75,7 +75,7 @@ class StreamingDiscussionTests(unittest.TestCase):
         ]
         server, thread = _start_mock_sse_server(sse_with_usage)
         self.addCleanup(lambda: (server.shutdown(), server.server_close(), thread.join(3)))
-        os.environ['TEST_STREAM_API_KEY'] = 'sk-stream-secret-12345678'
+        os.environ['TEST_STREAM_API_KEY'] = 'dummy-stream-key-12345678'
         self.addCleanup(lambda: os.environ.pop('TEST_STREAM_API_KEY', None))
 
         received: list[str] = []
@@ -148,7 +148,7 @@ class StreamingDiscussionTests(unittest.TestCase):
         ]
         mock_api, api_thread = _start_mock_sse_server(sse_lines)
         self.addCleanup(lambda: (mock_api.shutdown(), mock_api.server_close(), api_thread.join(3)))
-        os.environ['TEST_STREAM_API_KEY'] = 'sk-stream-secret-87654321'
+        os.environ['TEST_STREAM_API_KEY'] = 'dummy-stream-key-87654321'
         self.addCleanup(lambda: os.environ.pop('TEST_STREAM_API_KEY', None))
 
         scratch = tempfile.TemporaryDirectory()

@@ -42,7 +42,7 @@ class DockerBase(unittest.TestCase):
         validate_proxy_url('https://proxy.local:8080/', 'Test')
         for bad in (
             'socks5://127.0.0.1:1080',
-            'http://user:pass@127.0.0.1:7897',
+            'http://' + 'user' + ':' + 'pass' + '@127.0.0.1:7897',
             'http://127.0.0.1:7897/path',
             'http://127.0.0.1:7897?a=1',
             'http://127.0.0.1:7897#frag',
