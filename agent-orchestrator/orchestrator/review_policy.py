@@ -3,6 +3,7 @@ from __future__ import annotations
 
 from . import artifacts
 from .contracts import ErrorKind, Result, RunContext, StageSpec, StageStatus
+from .lessons import load_approved_lessons_text
 from .prompt_context import PromptContextMixin, _UPSTREAM_REPORT_LIMIT
 from .safety import WriteRootGuard, WriteRootViolation, relative_target
 from .state import RunState, StageLock, atomic_write_json, compute_inputs_hash, sha256_text
@@ -93,8 +94,13 @@ class ReviewPolicy(PromptContextMixin):
             if not getattr(self.adapters.get(spec.adapter),'channel','').startswith('cli_'):
                 policy={k:v for k,v in policy.items() if not k.startswith('cli_')}
             config_keys['__autonomy__'] = policy
+            approved_lessons = (
+                load_approved_lessons_text(self.config.state_dir)
+                if spec.kind in ('code', 'report') else ''
+            )
             logical = compute_inputs_hash(self._read_prompt(spec) + self.task + self._feedback(spec.name)
-                                          + self.state.autonomy.get('recovery_hints', {}).get(spec.name, ''),
+                                          + self.state.autonomy.get('recovery_hints', {}).get(spec.name, '')
+                                          + approved_lessons,
                                           self._upstream_hashes(index), config_keys)
             saved = self.state.autonomy.setdefault('execution_inputs', {}).get(spec.name)
             if prompt_override is None and saved and saved['logical_hash'] == logical:

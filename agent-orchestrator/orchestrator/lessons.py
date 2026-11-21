@@ -9,7 +9,9 @@ from __future__ import annotations
 
 from collections import Counter
 import json
+import os
 from pathlib import Path
+import re
 import time
 from typing import Any
 
@@ -19,6 +21,38 @@ from .state import atomic_write_json, sha256_text
 APPROVED_LESSONS_FILE = 'approved_lessons.json'
 MAX_APPROVED_ITEMS = 12
 MAX_ITEM_CHARS = 240
+_MAX_RECORD_BYTES = 2 * 1024 * 1024
+_SECRET_ENV_HINTS = ('KEY', 'TOKEN', 'SECRET', 'PASSWORD', 'CREDENTIAL')
+_BEARER_RE = re.compile(r'(?i)\b(Bearer\s+)[A-Za-z0-9._\-~+/]+=*')
+_TOKEN_PREFIX_RE = re.compile(r'\b(?:sk|pk|rk|ghp|gho|ghu|ghs|ghr|AIza)[A-Za-z0-9_\-]{12,}\b')
+_URL_CRED_RE = re.compile(r'(https?://)([^/\s:@]+):([^/\s@]+)@')
+
+
+def _env_secrets() -> tuple[str, ...]:
+    found = []
+    for k, v in os.environ.items():
+        if isinstance(v, str) and len(v) >= 8 and any(h in k.upper() for h in _SECRET_ENV_HINTS):
+            found.append(v)
+    return tuple(found)
+
+
+def _scrub_sensitive(text: str, redactor: StreamRedactor) -> str:
+    cleaned = redactor.feed(str(text or ''), final=True)
+    cleaned = _BEARER_RE.sub(r'\1[REDACTED]', cleaned)
+    cleaned = _URL_CRED_RE.sub(r'\1[REDACTED]@', cleaned)
+    cleaned = _TOKEN_PREFIX_RE.sub('[REDACTED]', cleaned)
+    return cleaned
+
+
+def _read_json_safe(path: Path) -> Any:
+    if not path.is_file() or path.is_symlink():
+        return None
+    try:
+        if path.stat().st_size > _MAX_RECORD_BYTES:
+            return None
+        return json.loads(path.read_text(encoding='utf-8'))
+    except (OSError, ValueError):
+        return None
 
 
 def _clean_text(value: str, max_len: int = MAX_ITEM_CHARS) -> str:
@@ -30,18 +64,22 @@ def _clean_text(value: str, max_len: int = MAX_ITEM_CHARS) -> str:
 
 def _iter_attempts(state_dir: Path):
     runs_dir = Path(state_dir) / 'runs'
-    if not runs_dir.is_dir():
+    if not runs_dir.is_dir() or runs_dir.is_symlink():
         return
     for run_dir in sorted(runs_dir.iterdir()):
+        if run_dir.is_symlink() or not run_dir.is_dir():
+            continue
         stages_dir = run_dir / 'stages'
-        if not stages_dir.is_dir():
+        if not stages_dir.is_dir() or stages_dir.is_symlink():
             continue
         for stage_dir in sorted(stages_dir.iterdir()):
+            if stage_dir.is_symlink() or not stage_dir.is_dir():
+                continue
             attempts_dir = stage_dir / 'attempts'
-            if not attempts_dir.is_dir():
+            if not attempts_dir.is_dir() or attempts_dir.is_symlink():
                 continue
             for attempt_dir in sorted(attempts_dir.iterdir()):
-                if attempt_dir.is_dir():
+                if attempt_dir.is_dir() and not attempt_dir.is_symlink():
                     yield run_dir.name, stage_dir.name, attempt_dir
 
 
@@ -59,7 +97,7 @@ def propose_lessons(
         raise ValueError('max_items 必须在 1..50 之间')
 
     root = Path(state_dir).resolve()
-    redactor = StreamRedactor(secrets)
+    redactor = StreamRedactor((*_env_secrets(), *secrets))
     review_counts: Counter[tuple[str, str]] = Counter()
     review_examples: dict[tuple[str, str], dict[str, Any]] = {}
     test_counts: Counter[str] = Counter()
@@ -67,36 +105,26 @@ def propose_lessons(
 
     for run_id, _stage, attempt_dir in _iter_attempts(root):
         scanned_runs.add(run_id)
-        verdict_file = attempt_dir / 'review_verdict.json'
-        if verdict_file.is_file():
-            try:
-                data = json.loads(verdict_file.read_text(encoding='utf-8'))
-            except (OSError, ValueError):
-                data = None
-            if isinstance(data, dict) and data.get('verdict') == 'fail' and isinstance(data.get('issues'), list):
-                for issue in data['issues']:
-                    if not isinstance(issue, dict):
-                        continue
-                    rel = _clean_text(issue.get('file', ''), 120) or '(未指定文件)'
-                    problem = _clean_text(redactor.feed(str(issue.get('problem', '')), final=True), 160)
-                    expected = _clean_text(redactor.feed(str(issue.get('expected', '')), final=True), 160)
-                    if not problem:
-                        continue
-                    key = (rel, problem.casefold())
-                    review_counts[key] += 1
-                    review_examples.setdefault(key, {'file': rel, 'problem': problem, 'expected': expected})
+        data = _read_json_safe(attempt_dir / 'review_verdict.json')
+        if isinstance(data, dict) and data.get('verdict') == 'fail' and isinstance(data.get('issues'), list):
+            for issue in data['issues']:
+                if not isinstance(issue, dict):
+                    continue
+                rel = _clean_text(_scrub_sensitive(str(issue.get('file', '')), redactor), 120) or '(未指定文件)'
+                problem = _clean_text(_scrub_sensitive(str(issue.get('problem', '')), redactor), 160)
+                expected = _clean_text(_scrub_sensitive(str(issue.get('expected', '')), redactor), 160)
+                if not problem:
+                    continue
+                key = (rel, problem.casefold())
+                review_counts[key] += 1
+                review_examples.setdefault(key, {'file': rel, 'problem': problem, 'expected': expected})
 
-        test_file = attempt_dir / 'test_record.json'
-        if test_file.is_file():
-            try:
-                rec = json.loads(test_file.read_text(encoding='utf-8'))
-            except (OSError, ValueError):
-                rec = None
-            if isinstance(rec, dict) and rec.get('ok') is False and isinstance(rec.get('failure_ids'), list):
-                for fid in rec['failure_ids']:
-                    cleaned = _clean_text(redactor.feed(str(fid), final=True), 120)
-                    if cleaned:
-                        test_counts[cleaned] += 1
+        rec = _read_json_safe(attempt_dir / 'test_record.json')
+        if isinstance(rec, dict) and rec.get('ok') is False and isinstance(rec.get('failure_ids'), list):
+            for fid in rec['failure_ids']:
+                cleaned = _clean_text(_scrub_sensitive(str(fid), redactor), 120)
+                if cleaned:
+                    test_counts[cleaned] += 1
 
     items: list[dict[str, Any]] = []
     for key, count in review_counts.most_common():
@@ -146,6 +174,8 @@ def approve_lessons(
     max_items: int = MAX_APPROVED_ITEMS,
 ) -> Path:
     """校验提案哈希并将已批准的高频检查清单原子写入 state_dir/approved_lessons.json。"""
+    if type(max_items) is not int or not 1 <= max_items <= 50:
+        raise ValueError('max_items 必须在 1..50 之间')
     if not isinstance(proposal, dict) or proposal.get('schema_version') != 1:
         raise ValueError('无效的经验提案格式')
     items = proposal.get('items')
@@ -155,15 +185,24 @@ def approve_lessons(
     if proposal.get('proposal_hash') != expected_hash:
         raise ValueError('经验提案内容哈希不匹配，拒绝批准')
 
+    redactor = StreamRedactor(_env_secrets())
     sanitized: list[dict[str, Any]] = []
     for item in items[:max_items]:
         if not isinstance(item, dict) or not isinstance(item.get('checklist'), str) or not item['checklist'].strip():
             raise ValueError('经验条目缺少有效 checklist 文本')
+        raw_occ = item.get('occurrences')
+        if raw_occ is None:
+            occurrences = 1
+        elif type(raw_occ) is int and raw_occ >= 1:
+            occurrences = raw_occ
+        else:
+            raise ValueError('经验条目 occurrences 必须为正整数')
+        checklist = _clean_text(_scrub_sensitive(item['checklist'], redactor), MAX_ITEM_CHARS)
         sanitized.append({
-            'id': str(item.get('id') or sha256_text(item['checklist'])[:12]),
+            'id': str(item.get('id') or sha256_text(checklist)[:12]),
             'source': str(item.get('source') or 'manual'),
-            'occurrences': int(item.get('occurrences') or 1),
-            'checklist': _clean_text(item['checklist'], MAX_ITEM_CHARS),
+            'occurrences': occurrences,
+            'checklist': checklist,
         })
 
     target = Path(state_dir).resolve() / APPROVED_LESSONS_FILE
@@ -178,13 +217,7 @@ def approve_lessons(
 
 def load_approved_lessons_text(state_dir: Path, *, max_items: int = MAX_APPROVED_ITEMS) -> str:
     """读取已批准的检查清单文本；文件缺失或损坏时安全返回空字符串，不影响主流程。"""
-    target = Path(state_dir) / APPROVED_LESSONS_FILE
-    if not target.is_file() or target.is_symlink():
-        return ''
-    try:
-        data = json.loads(target.read_text(encoding='utf-8'))
-    except (OSError, ValueError):
-        return ''
+    data = _read_json_safe(Path(state_dir) / APPROVED_LESSONS_FILE)
     if not isinstance(data, dict) or data.get('schema_version') != 1 or not isinstance(data.get('items'), list):
         return ''
     lines = []

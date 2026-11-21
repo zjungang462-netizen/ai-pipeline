@@ -367,10 +367,11 @@ def cmd_lessons_approve(args) -> int:
     proposal_path = Path(args.proposal)
     proposal = json.loads(proposal_path.read_text(encoding='utf-8'))
     target = approve_lessons(Path(args.state_dir), proposal, max_items=args.max_items)
+    saved = json.loads(target.read_text(encoding='utf-8'))
     print(json.dumps({
         'approved_file': str(target),
-        'items': len(proposal.get('items') or []),
-        'proposal_hash': proposal.get('proposal_hash'),
+        'items': len(saved.get('items') or []),
+        'proposal_hash': saved.get('proposal_hash'),
     }, ensure_ascii=False, indent=2))
     return 0
 

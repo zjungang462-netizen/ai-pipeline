@@ -8,9 +8,12 @@
 from __future__ import annotations
 
 import json
+import math
 from pathlib import Path
 import statistics
 from typing import Any
+
+_MAX_METRICS_BYTES = 2 * 1024 * 1024
 
 
 def recommend_adapters(
@@ -29,12 +32,16 @@ def recommend_adapters(
     buckets: dict[tuple[str, str, str], dict[str, Any]] = {}
     scanned_metrics = 0
 
-    if runs_dir.is_dir():
+    if runs_dir.is_dir() and not runs_dir.is_symlink():
         for run_dir in sorted(runs_dir.iterdir()):
+            if run_dir.is_symlink() or not run_dir.is_dir():
+                continue
             metrics_path = run_dir / 'metrics.json'
-            if not metrics_path.is_file():
+            if not metrics_path.is_file() or metrics_path.is_symlink():
                 continue
             try:
+                if metrics_path.stat().st_size > _MAX_METRICS_BYTES:
+                    continue
                 data = json.loads(metrics_path.read_text(encoding='utf-8'))
             except (OSError, ValueError):
                 continue
@@ -50,6 +57,12 @@ def recommend_adapters(
                 if kind not in ('code', 'report', 'review'):
                     continue
                 if stage_kind is not None and kind != stage_kind:
+                    continue
+                # 跳过未实际执行的下游阶段（如上游失败导致 pending / attempts == 0），避免污染模型评分
+                if info.get('status') not in ('done', 'failed'):
+                    continue
+                attempts = info.get('attempts')
+                if type(attempts) is int and attempts <= 0:
                     continue
                 tool = str(info.get('tool') or 'unknown')
                 used = stage_usage.get(stage_name) if isinstance(stage_usage.get(stage_name), dict) else {}
@@ -72,7 +85,7 @@ def recommend_adapters(
                 if run_done:
                     bucket['run_done'] += 1
                 dur = used.get('duration_s')
-                if isinstance(dur, (int, float)) and not isinstance(dur, bool) and dur >= 0:
+                if isinstance(dur, (int, float)) and not isinstance(dur, bool) and math.isfinite(dur) and dur >= 0:
                     bucket['durations'].append(float(dur))
                 unknown = used.get('unknown_calls', 0)
                 if type(unknown) is int and unknown > 0:

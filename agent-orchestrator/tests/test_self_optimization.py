@@ -4,9 +4,11 @@ from __future__ import annotations
 import contextlib
 import io
 import json
+import os
 from pathlib import Path
 import tempfile
 import unittest
+from unittest import mock
 
 from orchestrator.cli import main as cli_main
 from orchestrator.config import load_config
@@ -263,6 +265,158 @@ prompt = "审查任务：{{task}}"
                 routed['recommendations']['code']['recommended'],
                 {'tool': 'api_openai', 'model': 'deepseek-chat'},
             )
+
+    def test_model_router_skips_unexecuted_downstream_and_non_finite_duration(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            state_dir = Path(tmp) / 'state'
+            # 上游 design 失败，下游 coding 未执行（pending / attempts=0），不应拉低 downstream-model
+            for run_id in ('u1', 'u2'):
+                _write_json(
+                    state_dir / 'runs' / run_id / 'metrics.json',
+                    {
+                        'run_id': run_id,
+                        'status': 'failed',
+                        'stages': {
+                            'design': {'kind': 'report', 'tool': 'api_openai', 'model': 'upstream-bad', 'status': 'failed', 'attempts': 1},
+                            'coding': {'kind': 'code', 'tool': 'api_openai', 'model': 'downstream-clean', 'status': 'pending', 'attempts': 0},
+                        },
+                        'stage_usage': {},
+                    },
+                )
+            # 正常执行记录包含非法 Infinity 耗时（手写 JSON 模拟异常文件），应安全忽略而非输出非法 JSON
+            for run_id in ('u3', 'u4'):
+                _write_json(
+                    state_dir / 'runs' / run_id / 'metrics.json',
+                    {
+                        'run_id': run_id,
+                        'status': 'done',
+                        'stages': {
+                            'coding': {'kind': 'code', 'tool': 'api_openai', 'model': 'downstream-clean', 'status': 'done', 'attempts': 1},
+                        },
+                        'stage_usage': {
+                            'coding': {'backend_model': 'downstream-clean', 'duration_s': float('inf'), 'tokens': 800, 'unknown_calls': 0},
+                        },
+                    },
+                )
+
+            report = recommend_adapters(state_dir, stage_kind='code', min_runs=2)
+            code_rec = report['recommendations']['code']
+            self.assertEqual(code_rec['recommended'], {'tool': 'api_openai', 'model': 'downstream-clean'})
+            entry = code_rec['candidates'][0]
+            self.assertEqual(entry['runs'], 2)
+            self.assertEqual(entry['stage_pass_rate'], 1.0)
+            self.assertEqual(entry['run_pass_rate'], 1.0)
+            self.assertIsNone(entry['median_duration_s'])
+            # 确保可严格序列化为标准 JSON（禁止 Infinity/NaN）
+            json.dumps(report, allow_nan=False)
+
+    def test_autonomy_inputs_hash_updates_when_lessons_approved(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            state_dir = root / 'state'
+            workdir = root / 'work'
+            workdir.mkdir()
+            cfg_path = root / 'autonomy.toml'
+            cfg_path.write_text(
+                f'''
+state_dir = "{state_dir.as_posix()}"
+task_workdir = "{workdir.as_posix()}"
+
+[run_budget]
+max_tokens = 10000
+max_duration_s = 300
+
+[autonomy]
+enabled = true
+allowed_files = ["app.py"]
+
+[adapters.mock]
+type = "fake"
+
+[[stages]]
+name = "coding"
+kind = "code"
+adapter = "mock"
+prompt = "编码任务：{{task}}"
+''',
+                encoding='utf-8',
+            )
+            cfg = load_config(cfg_path)
+            engine = Engine(cfg, {}, 'run-auto', '实现功能')
+            before_hash = engine._inputs_hash(cfg.stages[0], 0)
+            self.assertIn('coding', engine.state.autonomy['execution_inputs'])
+            self.assertEqual(engine._inputs_hash(cfg.stages[0], 0), before_hash)
+
+            self._seed_failure_runs(state_dir)
+            proposal = propose_lessons(state_dir, min_occurrences=2)
+            approve_lessons(state_dir, proposal)
+
+            after_hash = engine._inputs_hash(cfg.stages[0], 0)
+            self.assertNotEqual(after_hash, before_hash)
+
+    def test_lessons_scrubs_env_and_pattern_credentials_and_validates_approve_args(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            state_dir = root / 'state'
+            env_secret = 'ENV_VAL_' + '998877665544'
+            fake_key = 'sk' + '-' + 'pattern1234567890abcd'
+            fake_url = 'https://' + 'alice' + ':' + 'pass98765' + '@example.com/api'
+            fake_bearer = 'Bearer ' + 'jwt_payload_1234567890'
+            for run_id in ('s1', 's2'):
+                _write_json(
+                    state_dir / 'runs' / run_id / 'stages' / 'review' / 'attempts' / '001' / 'review_verdict.json',
+                    {
+                        'verdict': 'fail',
+                        'issues': [{
+                            'file': 'src/auth.py',
+                            'problem': f'泄漏 {env_secret} 与 {fake_key} 与 {fake_bearer}',
+                            'expected': f'不要硬编码 {fake_url}',
+                        }],
+                    },
+                )
+
+            with mock.patch.dict(os.environ, {'MY_TEST_API_TOKEN': env_secret}):
+                proposal = propose_lessons(state_dir, min_occurrences=2)
+
+            self.assertEqual(len(proposal['items']), 1)
+            text = proposal['items'][0]['checklist']
+            for sensitive in (env_secret, fake_key, 'pass98765', 'jwt_payload_1234567890'):
+                self.assertNotIn(sensitive, text)
+            self.assertIn('[REDACTED]', text)
+
+            # approve_lessons 拒绝非法 max_items 和 bool occurrences
+            for bad_max in (0, -1, True, 51):
+                with self.assertRaises(ValueError):
+                    approve_lessons(state_dir, proposal, max_items=bad_max)
+
+            bad_occ_proposal = json.loads(json.dumps(proposal))
+            bad_occ_proposal['items'][0]['occurrences'] = True
+            from orchestrator.state import sha256_text
+            bad_occ_proposal['proposal_hash'] = sha256_text(
+                json.dumps(bad_occ_proposal['items'], ensure_ascii=False, sort_keys=True)
+            )
+            with self.assertRaises(ValueError):
+                approve_lessons(state_dir, bad_occ_proposal)
+
+            # CLI lessons-approve --max-items 1 汇报条数必须与实际写入一致
+            self._seed_failure_runs(state_dir)
+            multi_proposal = propose_lessons(state_dir, min_occurrences=2)
+            self.assertGreaterEqual(len(multi_proposal['items']), 2)
+            proposal_file = root / 'multi.json'
+            proposal_file.write_text(json.dumps(multi_proposal, ensure_ascii=False), encoding='utf-8')
+            buf = io.StringIO()
+            with contextlib.redirect_stdout(buf):
+                rc = cli_main([
+                    'lessons-approve',
+                    '--state-dir', str(state_dir),
+                    '--proposal', str(proposal_file),
+                    '--max-items', '1',
+                ])
+            self.assertEqual(rc, 0)
+            out = json.loads(buf.getvalue())
+            self.assertEqual(out['items'], 1)
+            saved = json.loads((state_dir / APPROVED_LESSONS_FILE).read_text(encoding='utf-8'))
+            self.assertEqual(len(saved['items']), 1)
 
 
 if __name__ == '__main__':
