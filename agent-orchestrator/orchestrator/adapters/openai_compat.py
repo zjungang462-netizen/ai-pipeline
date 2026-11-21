@@ -13,10 +13,66 @@ import time
 import urllib.error
 import urllib.request
 import http.client
+from collections.abc import Callable
 from pathlib import Path
 
 from ..contracts import ErrorKind, PreflightReport, Result, RunContext
 from .base import Adapter
+
+
+def parse_sse_stream(lines, on_token: Callable[[str], None] | None = None) -> dict:
+    """解析 OpenAI 兼容 SSE 流（data: {...} / data: [DONE]），逐块回调增量文本。"""
+    chunks: list[str] = []
+    usage: dict = {}
+    response_id = None
+    model = None
+    finish_reason = None
+    saw_data = False
+    done = False
+    for raw_line in lines:
+        line = raw_line.decode("utf-8", errors="replace") if isinstance(raw_line, (bytes, bytearray)) else str(raw_line)
+        line = line.strip()
+        if not line or line.startswith(":"):
+            continue
+        if not line.startswith("data:"):
+            continue
+        payload = line[5:].strip()
+        if payload == "[DONE]":
+            done = True
+            break
+        try:
+            event = json.loads(payload)
+        except ValueError as error:
+            raise ValueError(f"SSE JSON 块解析失败: {error}") from None
+        if not isinstance(event, dict):
+            raise ValueError("SSE 事件必须是 JSON 对象")
+        saw_data = True
+        if isinstance(event.get("id"), str) and not response_id:
+            response_id = event["id"]
+        if isinstance(event.get("model"), str) and not model:
+            model = event["model"]
+        if isinstance(event.get("usage"), dict) and event["usage"]:
+            usage = event["usage"]
+        choices = event.get("choices")
+        if isinstance(choices, list) and choices:
+            first = choices[0]
+            if isinstance(first, dict):
+                delta = first.get("delta")
+                if isinstance(delta, dict) and isinstance(delta.get("content"), str) and delta["content"]:
+                    piece = delta["content"]
+                    chunks.append(piece)
+                    if on_token is not None:
+                        on_token(piece)
+                if first.get("finish_reason") is not None:
+                    finish_reason = first["finish_reason"]
+    if not done or not saw_data:
+        raise ValueError("SSE 流未收到完整的 [DONE] 终态")
+    return {
+        "id": response_id,
+        "model": model,
+        "choices": [{"message": {"content": "".join(chunks)}, "finish_reason": finish_reason}],
+        "usage": usage,
+    }
 
 
 class OpenAICompatAdapter(Adapter):
@@ -26,7 +82,8 @@ class OpenAICompatAdapter(Adapter):
                  kind: str = "report", temperature: float = 0.2,
                  max_tokens: int | None = None, timeout_s: int = 120,
                  reasoning_effort: str | None = None, thinking: str | None = None,
-                 review_json_mode: bool = False):
+                 review_json_mode: bool = False, stream_tokens: bool = False,
+                 on_token: Callable[[str], None] | None = None):
         self.name = name
         self.base_url = base_url.rstrip("/")
         self.model = model
@@ -42,6 +99,10 @@ class OpenAICompatAdapter(Adapter):
         self.reasoning_effort, self.thinking = reasoning_effort, thinking
         if type(review_json_mode) is not bool:raise ValueError('review_json_mode 必须为布尔值')
         self.review_json_mode = review_json_mode
+        if type(stream_tokens) is not bool:
+            raise ValueError('stream_tokens 必须为布尔值')
+        self.stream_tokens = stream_tokens
+        self.on_token = on_token
 
     def _key(self) -> str | None:
         return os.environ.get(self.api_key_env)
@@ -82,6 +143,9 @@ class OpenAICompatAdapter(Adapter):
             payload['response_format'] = {'type': 'json_object'}
         if ctx.output_tokens is not None:
             payload['max_tokens'] = min(payload.get('max_tokens', ctx.output_tokens), ctx.output_tokens)
+        if self.stream_tokens:
+            payload['stream'] = True
+            payload['stream_options'] = {'include_usage': True}
         req = urllib.request.Request(
             self.base_url + "/chat/completions",
             data=json.dumps(payload).encode("utf-8"),
@@ -90,9 +154,20 @@ class OpenAICompatAdapter(Adapter):
             method="POST",
         )
         t0 = time.monotonic()
+        streamed_data: dict | None = None
+        body = ""
         try:
             with urllib.request.urlopen(req, timeout=min(self.timeout_s, ctx.timeout_s)) as resp:
-                body = resp.read().decode("utf-8")
+                if self.stream_tokens:
+                    streamed_data = parse_sse_stream(resp, on_token=self.on_token)
+                    body = json.dumps(streamed_data, ensure_ascii=False)
+                else:
+                    body = resp.read().decode("utf-8")
+        except ValueError as e:
+            return Result(ok=False, exit_code=0, error_kind=ErrorKind.PARSE_FAILED,
+                          channel=self.channel, stdout=body, parse_unknown=True,
+                          stderr=f"流式响应解析失败: {e}",
+                          usage={'usage_unknown': True, 'duration_s': time.monotonic() - t0})
         except urllib.error.HTTPError as e:
             # 错误分类（评审 M6）：401/403→AUTH，429/5xx→RATE_LIMIT（可退避），其余 CRASH
             if e.code in (401, 403):
@@ -118,7 +193,7 @@ class OpenAICompatAdapter(Adapter):
         duration = time.monotonic() - t0
 
         try:
-            data = json.loads(body)
+            data = streamed_data if streamed_data is not None else json.loads(body)
             text = data["choices"][0]["message"]["content"]
         except (ValueError, KeyError, IndexError, TypeError) as e:
             return Result(ok=False, exit_code=0, error_kind=ErrorKind.PARSE_FAILED,

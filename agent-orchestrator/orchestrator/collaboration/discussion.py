@@ -97,7 +97,24 @@ def settle_parent(run, topic, usage):
         state.save()
 
 
-def execute(store, topic_id):
+def _wrap_streaming_adapter(adapter, store, run_id: str, topic_id: str, role: str):
+    from .discussion_stream import DiscussionEventSink, run_streaming_turn
+
+    class _StreamingProxy:
+        def __init__(self, inner):
+            self._inner = inner
+
+        def __getattr__(self, item):
+            return getattr(self._inner, item)
+
+        def run(self, prompt, workdir, ctx):
+            sink = DiscussionEventSink(store, run_id, topic_id, role)
+            return run_streaming_turn(self._inner, prompt, workdir, ctx, sink)
+
+    return _StreamingProxy(adapter)
+
+
+def execute(store, topic_id, *, stream_tokens: bool = False):
     topic = store.thread(topic_id)
     run = store.run(topic['run_id'])
     from ..config import load_config
@@ -154,12 +171,20 @@ def execute(store, topic_id):
             'stages': [{'name': s.name, 'adapter': s.adapter, 'prompt': s.prompt, 'kind': 'report',
                         'timeout_s': min(40, maximum_duration), 'max_attempts': 1} for s in stages],
             'adapters': {k: {'type': v.type, **v.options} for k, v in adapters.items()}}), encoding='utf8')
-        from ..supervisor import supervise
-        supervise(config_path, topic_id, topic['question'], 0)
-        config = load_config(config_path)
-        engine = Engine(config, build_all(config.adapters, {s.adapter: 'report' for s in stages}), topic_id, topic['question'])
-        with StageLock(engine.state.run_dir / '.run.lock'):
-            engine.prepare()
+        if stream_tokens:
+            config = load_config(config_path)
+            built = build_all(config.adapters, {s.adapter: 'report' for s in stages})
+            streamed = {role: _wrap_streaming_adapter(ad, store, run['id'], topic_id, role)
+                        for role, ad in built.items()}
+            engine = Engine(config, streamed, topic_id, topic['question'])
+            engine.run()
+        else:
+            from ..supervisor import supervise
+            supervise(config_path, topic_id, topic['question'], 0)
+            config = load_config(config_path)
+            engine = Engine(config, build_all(config.adapters, {s.adapter: 'report' for s in stages}), topic_id, topic['question'])
+            with StageLock(engine.state.run_dir / '.run.lock'):
+                engine.prepare()
         result = {s.name: engine.state.stage(s.name).status.value for s in stages}
         settle_parent(run, topic, engine.state.usage_total)
         for index, role in enumerate(topic['roles']):
