@@ -28,6 +28,7 @@ python -m orchestrator.workbench_service run --config workbench.example.toml --d
 [adapters.grok]
 type = "cli_grok"
 binary = "D:/tools/grok-1.0.89-linux-x86_64"
+# runtime_version = "1.0.89"  # 可选，显式绑定 verified_runtimes 中已验证版本
 # auth_file 默认使用本机 ~/.grok/auth.json，由 grok login 创建。
 # 如需经本机代理访问服务，从 Docker 内使用可达地址。
 # proxy_url = "http://host.docker.internal:7897"
@@ -47,6 +48,7 @@ binary = "D:/tools/doubao-cli-2.37.2-linux-x64/doubao"
 image = "pipeline-doubao-probe:2.37.2"
 machine_id = "D:/tools/doubao-cli-2.37.2/machine-id"
 profile = "pipeline-doubao-profile"
+# runtime_version = "2.37.2"  # 可选，显式绑定 verified_runtimes 中已验证版本
 # 如需经本机代理访问服务，从 Docker 内使用可达地址。
 # proxy_url = "http://host.docker.internal:7897"
 timeout_s = 180
