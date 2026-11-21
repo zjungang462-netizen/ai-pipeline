@@ -52,7 +52,7 @@ profile = "pipeline-doubao-profile"
 timeout_s = 180
 ```
 
-只接受已核对 SHA-256 的 2.37.2 Linux 程序和本地探针镜像；`binary` 应位于独立的发行包目录中（容器以只读方式挂载该目录）。会话保存在指定 Docker 卷，设备身份来自 `machine_id`。提示词经标准输入传给 `-p -`。编码阶段以可写方式挂载任务工作区；报告和审查改为只读挂载。成功终态不报告 token，用量保持未知；多轮返工建议配置 `run_budget.unlimited_tokens = true` 并配合 `max_duration_s`、`max_model_calls` 和 `max_unknown_calls` 限制总耗时与调用次数。直连登录服务曾返回 HTTP 403，当前验证通过本机代理完成。
+只接受已核对 SHA-256 的 2.37.2 Linux 程序和本地探针镜像；`binary` 应位于独立的发行包目录中（容器以只读方式挂载该目录）。会话保存在指定 Docker 卷，设备身份来自 `machine_id`。提示词经标准输入传给 `-p -`。编码阶段声明可编辑文件时，容器仅挂载包含声明文件的隔离临时工作区，成功终态且确认宿主机基线未变后才原子回写可编辑文件；报告和审查以只读方式挂载。成功终态不报告 token，用量保持未知；多轮返工建议配置 `run_budget.unlimited_tokens = true` 并配合 `max_duration_s`、`max_model_calls` 和 `max_unknown_calls` 限制总耗时与调用次数。直连登录服务曾返回 HTTP 403，当前验证通过本机代理完成。
 
 ## 固定任务集
 

@@ -6,14 +6,16 @@
 """
 from __future__ import annotations
 
+import contextlib
 import json
 import re
 import subprocess
+import tempfile
 import uuid
 from pathlib import Path
 
 from ..contracts import ErrorKind, PreflightReport, Result, RunContext
-from ..safety import build_subprocess_env, resolve_exe
+from ..safety import WriteRootViolation, build_subprocess_env, resolve_exe
 from ..state import sha256_file
 from .cli_base import CLIAdapter, run_cli_process
 from .cli_codex import strip_ansi
@@ -26,6 +28,13 @@ from .docker_base import (
     proxy_env_args,
     validate_image_ref,
     validate_proxy_url,
+)
+from .workspace_sync import (
+    apply_raw_updates,
+    collect_source_files,
+    collect_staging_updates,
+    make_staging_removable,
+    materialize_staging,
 )
 
 VERSION = 'doubao 2.37.2'
@@ -142,15 +151,53 @@ class DoubaoAdapter(CLIAdapter):
                           error_kind=ErrorKind.REJECTED, channel=self.channel)
         name = 'pipeline-doubao-' + uuid.uuid4().hex
         writable = ctx.kind == 'code'
-        args = [*self._common_run(), *self._proxy_env(), *self._profile_args(),
-                '--name', name, '-i',
-                '--mount', _mount(Path(workdir).resolve(), '/workspace', readonly=not writable),
-                IMAGE_ID, self._container_binary(), '-C', '/workspace',
-                '--permission-mode', 'ask_risky', '--output-format', 'stream-json', '-p', '-']
-        try:
-            result = self._exec(args, workdir, ctx, stdin_data=prompt)
-        finally:
-            cleanup_container(self._resolved, name, host=HOST, runner=run_cli_process)
+        isolated = writable and bool(ctx.editable_files)
+        files = {}
+        names = ()
+        if isolated:
+            try:
+                names = tuple(dict.fromkeys((*ctx.context_files, *ctx.editable_files)))
+                files = collect_source_files(workdir, names, label='豆包')
+            except (OSError, ValueError, WriteRootViolation) as error:
+                return Result(False, -1, stderr=str(error), error_kind=ErrorKind.REJECTED, channel=self.channel)
+        with contextlib.ExitStack() as stack:
+            if isolated:
+                stage_parent = None
+                if ctx.attempt_dir:
+                    stage_parent = Path(ctx.attempt_dir)
+                    stage_parent.mkdir(parents=True, exist_ok=True)
+                staging_dir = Path(stack.enter_context(
+                    tempfile.TemporaryDirectory(prefix='pipeline-doubao-ws-', dir=stage_parent)))
+                stack.callback(make_staging_removable, staging_dir)
+                materialize_staging(staging_dir, files, ctx.editable_files)
+                mount_source = staging_dir.resolve()
+                stdin_prompt = (
+                    '容器工作区里只有下面清单中的声明文件。只能修改可编辑文件列表中的相对路径。\n'
+                    f'可读文件：{json.dumps(names, ensure_ascii=False)}\n'
+                    f'可编辑文件：{json.dumps(ctx.editable_files, ensure_ascii=False)}\n\n{prompt}'
+                )
+            else:
+                mount_source = Path(workdir).resolve()
+                stdin_prompt = prompt
+            args = [*self._common_run(), *self._proxy_env(), *self._profile_args(),
+                    '--name', name, '-i',
+                    '--mount', _mount(mount_source, '/workspace', readonly=not writable),
+                    IMAGE_ID, self._container_binary(), '-C', '/workspace',
+                    '--permission-mode', 'ask_risky', '--output-format', 'stream-json', '-p', '-']
+            try:
+                result = self._exec(args, workdir, ctx, stdin_data=stdin_prompt)
+            finally:
+                cleanup_container(self._resolved, name, host=HOST, runner=run_cli_process)
+            if isolated and result.ok:
+                try:
+                    updates = collect_staging_updates(staging_dir, ctx.editable_files, files)
+                    result.changed_files = apply_raw_updates(
+                        workdir, ctx.editable_files, files, updates, label='豆包')
+                except (OSError, ValueError, WriteRootViolation) as error:
+                    result.ok = False
+                    result.error_kind = ErrorKind.REJECTED
+                    detail = f'豆包返回文件或工作树基线未通过核验：{error}'
+                    result.stderr = f'{result.stderr}\n{detail}'.strip() if result.stderr else detail
         return self._finalize(result, ctx)
 
     def _parse(self, proc, workdir: Path, ctx: RunContext) -> Result:

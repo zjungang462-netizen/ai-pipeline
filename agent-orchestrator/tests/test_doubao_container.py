@@ -109,6 +109,85 @@ class DoubaoContainer(unittest.TestCase):
         self.assertFalse(missing.ok)
         self.assertEqual(missing.error_kind, ErrorKind.REJECTED)
 
+    def test_code_stage_with_editable_files_uses_isolated_staging_and_verifies_writeback(self):
+        import csv
+        scratch = TemporaryDirectory()
+        self.addCleanup(scratch.cleanup)
+        root = Path(scratch.name)
+        workspace = root / 'ws'
+        workspace.mkdir()
+        (workspace / 'pricing.py').write_bytes(b'old-price')
+        (workspace / 'readonly.py').write_bytes(b'keep-readonly')
+        (workspace / 'secret_test.py').write_bytes(b'protected-test')
+        attempt_dir = root / 'attempt'
+        adapter = DoubaoAdapter(
+            'doubao', binary=str(root / 'doubao'), image='pipeline-doubao-probe:2.37.2',
+            machine_id=str(root / 'machine-id'), profile='pipeline-doubao-profile')
+        adapter._version = VERSION
+        adapter._resolved = 'docker'
+        ctx = RunContext('t', 'r', 'code', workspace, root, kind='code', attempt_dir=attempt_dir,
+                         context_files=('pricing.py', 'readonly.py'), editable_files=('pricing.py',))
+
+        def fake_exec(args, workdir, context, stdin_data=None):
+            mount_arg = next(item for item in args if isinstance(item, str) and 'target=/workspace' in item)
+            fields = dict(part.split('=', 1) for part in next(csv.reader([mount_arg])) if '=' in part)
+            staging = Path(fields['source'])
+            # 容器只挂载隔离 staging 目录，未声明的保护测试文件不可见。
+            self.assertNotEqual(staging.resolve(), workspace.resolve())
+            self.assertTrue((staging / 'pricing.py').is_file())
+            self.assertTrue((staging / 'readonly.py').is_file())
+            self.assertFalse((staging / 'secret_test.py').exists())
+            # 模拟容器内修改了声明可编辑文件、误改了只读文件并创建了垃圾文件。
+            (staging / 'pricing.py').write_bytes(b'new-price')
+            (staging / 'readonly.py').write_bytes(b'tampered-readonly')
+            (staging / 'junk.tmp').write_bytes(b'junk')
+            return Result(True, 0, text='done', channel='cli_doubao')
+
+        with mock.patch('orchestrator.adapters.cli_doubao.sha256_file', return_value=BINARY_SHA256), \
+                mock.patch.object(adapter, '_exec', side_effect=fake_exec), \
+                mock.patch('orchestrator.adapters.cli_doubao.run_cli_process'):
+            result = adapter.run('fix pricing', workspace, ctx)
+
+        self.assertTrue(result.ok)
+        self.assertEqual(result.changed_files, ['pricing.py'])
+        self.assertEqual((workspace / 'pricing.py').read_bytes(), b'new-price')
+        self.assertEqual((workspace / 'readonly.py').read_bytes(), b'keep-readonly')
+        self.assertEqual((workspace / 'secret_test.py').read_bytes(), b'protected-test')
+        self.assertFalse((workspace / 'junk.tmp').exists())
+
+    def test_code_stage_rejects_writeback_when_host_baseline_changed(self):
+        import csv
+        scratch = TemporaryDirectory()
+        self.addCleanup(scratch.cleanup)
+        root = Path(scratch.name)
+        workspace = root / 'ws'
+        workspace.mkdir()
+        (workspace / 'pricing.py').write_bytes(b'v1')
+        adapter = DoubaoAdapter(
+            'doubao', binary=str(root / 'doubao'), image='pipeline-doubao-probe:2.37.2',
+            machine_id=str(root / 'machine-id'), profile='pipeline-doubao-profile')
+        adapter._version = VERSION
+        adapter._resolved = 'docker'
+        ctx = RunContext('t', 'r', 'code', workspace, root, kind='code', editable_files=('pricing.py',))
+
+        def fake_exec(args, workdir, context, stdin_data=None):
+            mount_arg = next(item for item in args if isinstance(item, str) and 'target=/workspace' in item)
+            fields = dict(part.split('=', 1) for part in next(csv.reader([mount_arg])) if '=' in part)
+            (Path(fields['source']) / 'pricing.py').write_bytes(b'from-container')
+            # 模拟容器执行期间宿主机工作区被外部并发修改。
+            (workspace / 'pricing.py').write_bytes(b'concurrent-host-edit')
+            return Result(True, 0, text='done', channel='cli_doubao')
+
+        with mock.patch('orchestrator.adapters.cli_doubao.sha256_file', return_value=BINARY_SHA256), \
+                mock.patch.object(adapter, '_exec', side_effect=fake_exec), \
+                mock.patch('orchestrator.adapters.cli_doubao.run_cli_process'):
+            result = adapter.run('fix pricing', workspace, ctx)
+
+        self.assertFalse(result.ok)
+        self.assertEqual(result.error_kind, ErrorKind.REJECTED)
+        self.assertIn('工作树已变化', result.stderr)
+        self.assertEqual((workspace / 'pricing.py').read_bytes(), b'concurrent-host-edit')
+
     def test_read_and_edit_events_are_tracked_without_usage(self):
         root = Path('.')
         trace = CLITrace(RunContext('t', 'r', 'code', root, root, kind='code'), channel='cli_doubao')

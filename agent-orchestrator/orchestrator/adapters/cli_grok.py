@@ -4,7 +4,6 @@ from __future__ import annotations
 import base64
 import json
 import os
-import re
 import subprocess
 import tempfile
 import uuid
@@ -12,7 +11,7 @@ from pathlib import Path
 
 from ..cli_telemetry import UsageLedger
 from ..contracts import ErrorKind, PreflightReport, Result, RunContext
-from ..safety import WriteRootViolation, build_subprocess_env, relative_target, resolve_exe
+from ..safety import WriteRootViolation, build_subprocess_env, resolve_exe
 from ..state import sha256_file
 from .cli_base import CLIAdapter, run_cli_process
 from .cli_result_stream import ResultStream
@@ -24,14 +23,18 @@ from .docker_base import (
     proxy_env_args,
     validate_proxy_url,
 )
+from .workspace_sync import (
+    FILE_NAME,
+    MAX_BYTES,
+    MAX_FILES,
+    apply_raw_updates,
+    collect_source_files,
+)
 
 VERSION = 'grok 1.0.89 (28be5bb1bf65)'
 BINARY_SHA256 = 'a3dface51d9bdc71fd121e0481dd02d9b46a721f7a6b892f756480e9666eba1f'
 IMAGE = 'python@sha256:e48f59cdba69a3cbd9ed2cf0f348d90d45a8d350d98134cf1070bc106ee9ed90'
 ENTRYPOINT = Path(__file__).with_name('grok_container.py')
-MAX_BYTES = 512 * 1024
-MAX_FILES = 64
-FILE_NAME = re.compile(r'[\w+., @-]+(?:/[\w+., @-]+)*')
 
 
 def _readonly_mount(source: Path, target: str) -> str:
@@ -106,25 +109,7 @@ class GrokAdapter(CLIAdapter):
 
     @staticmethod
     def _source_files(workdir, names):
-        root = workdir.resolve()
-        if len(names) > MAX_FILES or len({name.casefold() for name in names}) != len(names):
-            raise ValueError('声明文件数量超限或名称重复')
-        files = {}
-        remaining = MAX_BYTES
-        for name in names:
-            if not FILE_NAME.fullmatch(name) or any(part.startswith('.') or part.endswith((' ', '.'))
-                                                    for part in name.split('/')):
-                raise ValueError('Grok 只加载普通项目相对路径')
-            path = relative_target(root, name)
-            if path != root / name or not path.is_file() or path.is_symlink():
-                raise ValueError(f'Grok 声明文件不是工作区内的普通文件：{name}')
-            with path.open('rb') as stream:
-                data = stream.read(remaining + 1)
-            if len(data) > remaining:
-                raise ValueError('Grok 声明文件总大小超限')
-            remaining -= len(data)
-            files[name] = data
-        return files
+        return collect_source_files(workdir, names, label='Grok', max_files=MAX_FILES, max_bytes=MAX_BYTES)
 
     def run(self, prompt: str, workdir: Path, ctx: RunContext) -> Result:
         if self._version != VERSION and not self.preflight().ok:
@@ -185,27 +170,12 @@ class GrokAdapter(CLIAdapter):
 
     @staticmethod
     def _apply_updates(workdir, ctx, original, updates, secrets=()):
-        if set(updates) - set(ctx.editable_files):
-            raise ValueError('拒绝未声明文件')
         data = {key: base64.b64decode(value, validate=True) for key, value in updates.items()}
-        if sum(map(len, data.values())) > MAX_BYTES:
-            raise ValueError('返回文件超限')
-        material = [secret.encode('utf-8') for secret in secrets
-                    if isinstance(secret, str) and len(secret) >= 8]
-        if any(secret in content for secret in material for content in data.values()):
-            raise ValueError('返回文件含有会话密钥')
-        if GrokAdapter._source_files(workdir, tuple(original)) != original:
-            raise ValueError('工作树已变化')
-        applied = []
-        try:
-            for key, content in data.items():
-                GrokAdapter._replace_file(relative_target(workdir, key), content)
-                applied.append(key)
-        except OSError:
-            for key in applied:
-                GrokAdapter._replace_file(relative_target(workdir, key), original[key])
-            raise
-        return list(data)
+        return apply_raw_updates(
+            workdir, ctx.editable_files, original, data,
+            secrets=secrets, label='Grok', max_bytes=MAX_BYTES,
+            replacer=GrokAdapter._replace_file,
+        )
 
     def _parse(self, proc, workdir, ctx):
         result = Result(False, proc.returncode, stdout=proc.stdout, stderr=proc.stderr,
