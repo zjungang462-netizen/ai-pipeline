@@ -15,7 +15,11 @@ from orchestrator.adapters.docker_base import (
     validate_image_ref,
     validate_proxy_url,
 )
-from orchestrator.adapters.verified_runtimes import VERIFIED_RUNTIMES, get_verified_runtime
+from orchestrator.adapters.verified_runtimes import (
+    VERIFIED_RUNTIMES,
+    get_verified_runtime,
+    list_verified_versions,
+)
 from scripts.multi_project_benchmark import CASES
 
 
@@ -83,11 +87,31 @@ class DockerBase(unittest.TestCase):
         for channel, runtime in VERIFIED_RUNTIMES.items():
             with self.subTest(channel=channel):
                 self.assertEqual(get_verified_runtime(channel), runtime)
+                self.assertEqual(get_verified_runtime(channel, runtime.version), runtime)
+                self.assertEqual(get_verified_runtime(channel, runtime.short_version), runtime)
+                self.assertIn(runtime.version, list_verified_versions(channel))
                 self.assertTrue(runtime.version.strip())
                 self.assertRegex(runtime.binary_sha256, re.compile(r'^[0-9a-f]{64}$'))
                 self.assertIn('sha256:', runtime.image)
+                with self.assertRaises(ValueError):
+                    get_verified_runtime(channel, '99.99.99')
         with self.assertRaises(KeyError):
             get_verified_runtime('cli_unknown')
+
+    def test_adapters_bind_explicit_runtime_version_and_reject_unknown(self):
+        from orchestrator.adapters.cli_doubao import DoubaoAdapter
+        from orchestrator.adapters.cli_grok import GrokAdapter
+
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            grok = GrokAdapter('grok', binary=str(root / 'grok'), runtime_version='1.0.89')
+            self.assertEqual(grok.input_fingerprint()['version'], 'grok 1.0.89 (28be5bb1bf65)')
+            doubao = DoubaoAdapter('doubao', runtime_version='2.37.2')
+            self.assertEqual(doubao.input_fingerprint()['version'], 'doubao 2.37.2')
+            with self.assertRaises(ValueError):
+                GrokAdapter('grok', binary=str(root / 'grok'), runtime_version='0.0.1')
+            with self.assertRaises(ValueError):
+                DoubaoAdapter('doubao', runtime_version='0.0.1')
 
     def test_multi_project_benchmark_cases_reproduce_defects_before_fix(self):
         self.assertIn('ledger', CASES)

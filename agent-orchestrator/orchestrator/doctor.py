@@ -124,7 +124,7 @@ def diagnose(path: str | Path) -> dict:
                 if adapter_cfg.type in ('cli_grok', 'cli_doubao'):
                     from .adapters.verified_runtimes import get_verified_runtime
                     from .state import sha256_file
-                    runtime = get_verified_runtime(adapter_cfg.type)
+                    runtime = getattr(adapter, 'runtime', None) or get_verified_runtime(adapter_cfg.type)
                     binary = getattr(adapter, 'binary', None)
                     if binary is None:
                         add('warning' if name not in used else 'error', label+'.binary',

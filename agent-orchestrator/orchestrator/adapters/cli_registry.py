@@ -49,8 +49,10 @@ def build(cfg: AdapterConfig, kind: str = "report") -> Adapter:
     if cls is DshAdapter:
         kwargs.update(permission_mode=o.get('permission_mode','read-only'),proxy_url=o.get('proxy_url'))
     if cls is GrokAdapter:
-        kwargs.update(binary=o.get('binary'), auth_file=o.get('auth_file'), proxy_url=o.get('proxy_url'))
+        kwargs.update(binary=o.get('binary'), auth_file=o.get('auth_file'), proxy_url=o.get('proxy_url'),
+                      runtime_version=o.get('runtime_version'))
     if cls is DoubaoAdapter:
         kwargs.update(binary=o.get('binary'), image=o.get('image'), machine_id=o.get('machine_id'),
-                      profile=o.get('profile'), proxy_url=o.get('proxy_url'))
+                      profile=o.get('profile'), proxy_url=o.get('proxy_url'),
+                      runtime_version=o.get('runtime_version'))
     return cls(**kwargs)

@@ -49,8 +49,9 @@ class GrokAdapter(CLIAdapter):
     needs_login = True
 
     def __init__(self, name, exe=None, extra_env=None, timeout_s=300, *,
-                 binary=None, auth_file=None, proxy_url=None):
+                 binary=None, auth_file=None, proxy_url=None, runtime_version=None):
         super().__init__(name, exe, extra_env, timeout_s)
+        self.runtime = get_verified_runtime(self.channel, runtime_version)
         if not binary or not Path(binary).is_absolute():
             raise ValueError('Grok binary 必须指向已验证的 Linux 程序绝对路径')
         if auth_file and not Path(auth_file).is_absolute():
@@ -73,25 +74,26 @@ class GrokAdapter(CLIAdapter):
         detail = '未找到 Docker'
         if self._resolved:
             try:
-                if sha256_file(self.binary) != BINARY_SHA256:
+                if sha256_file(self.binary) != self.runtime.binary_sha256:
                     raise ValueError('Grok Linux 原生程序 SHA-256 不匹配')
                 proc = run_cli_process(
-                    [self._resolved, *self._run_args(), '--network', 'none', IMAGE, '/opt/grok', '--version'],
+                    [self._resolved, *self._run_args(), '--network', 'none', self.runtime.image, '/opt/grok', '--version'],
                     cwd=None, env=build_subprocess_env(), input=None, timeout=30)
-                if proc.returncode != 0 or proc.stdout.strip() != VERSION:
+                if proc.returncode != 0 or proc.stdout.strip() != self.runtime.version:
                     raise ValueError('本地 Docker Linux 引擎、固定镜像或 Grok 版本探测失败')
                 self._read_auth()
-                self._version = VERSION
+                self._version = self.runtime.version
                 detail = '已核验固定镜像和原生程序版本，已读取会话文件'
             except ValueError as error:
                 detail = str(error)
             except (OSError, subprocess.TimeoutExpired):
                 detail = '无法读取原生程序或完成 Docker 版本探测'
-        return PreflightReport(self.name, self._version == VERSION, self._resolved, self._version,
+        return PreflightReport(self.name, self._version == self.runtime.version, self._resolved, self._version,
                                detail, needs_login=True)
 
     def input_fingerprint(self):
-        return {'protocol': 1, 'binary': BINARY_SHA256, 'image': IMAGE, 'proxy_url': self.proxy_url}
+        return {'protocol': 1, 'version': self.runtime.version, 'binary': self.runtime.binary_sha256,
+                'image': self.runtime.image, 'proxy_url': self.proxy_url}
 
     def _read_auth(self):
         try:
@@ -114,11 +116,11 @@ class GrokAdapter(CLIAdapter):
         return collect_source_files(workdir, names, label='Grok', max_files=MAX_FILES, max_bytes=MAX_BYTES)
 
     def run(self, prompt: str, workdir: Path, ctx: RunContext) -> Result:
-        if self._version != VERSION and not self.preflight().ok:
+        if self._version != self.runtime.version and not self.preflight().ok:
             return Result(False, -1, stderr='Grok 容器预检失败', error_kind=ErrorKind.REJECTED,
                           channel=self.channel)
         try:
-            if sha256_file(self.binary) != BINARY_SHA256:
+            if sha256_file(self.binary) != self.runtime.binary_sha256:
                 raise ValueError('Grok Linux 原生程序 SHA-256 已变化')
             auth, secrets = self._read_auth()
             names = tuple(dict.fromkeys((*ctx.context_files, *ctx.editable_files)))
@@ -143,7 +145,7 @@ class GrokAdapter(CLIAdapter):
                               'timeout': timeout, 'max_bytes': MAX_BYTES,
                               'files': {key: base64.b64encode(data).decode('ascii') for key, data in files.items()}})
         try:
-            result = self._exec([*args, IMAGE, 'python', '-I', '/opt/entry.py'], workdir, ctx,
+            result = self._exec([*args, self.runtime.image, 'python', '-I', '/opt/entry.py'], workdir, ctx,
                                 stdin_data=payload, additional_secrets=secrets)
         finally:
             # Docker 守护进程启动的容器不属于宿主 Docker CLI 的进程树。
