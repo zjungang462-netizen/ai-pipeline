@@ -164,7 +164,8 @@ Claude Code 2.1.325 / 2.1.328 可作为文件工具代理接入你现有的 Deep
 | `cli_qwen` | 0.26.0 的 stdin、JSON 数组兼容与 stream-json Read/Edit 已真机验证；safe/bare 模式、文件工具、实时计量与停止护栏；其它版本未验证 |
 | `cli_qoder` | 1.1.89 真机 stdin/流式成功终态及 Read/Edit 已验证；Ultimate/high/adaptive 真实维护任务通过；token计数不完整、credits分列 |
 | `cli_claude` | Claude Code 2.1.325 / 2.1.328 的真实流式终态与文件工具；默认继承用户兼容连接，已用 DeepSeek Pro/max 跑通维护闭环，不冒充 Claude 原生模型 |
-| `cli_doubao` | 未核实独立官方 CLI，属于未验证预留；调用豆包模型可使用方舟兼容API |
+| `cli_doubao` | 2.37.2 Linux 容器已验证登录与 stream-json；只挂载任务工作区，只读路径上的外部写入被拒绝。成功终态无 token 用量 |
+| `cli_grok` | 1.0.89 Linux 容器已验证登录、streaming-json 实时计量与文件回写核验；容器内仅加载声明文件并由 PreToolUse 钩子限制读写 |
 | `fake` | 仅用于离线演示和确定性回归 |
 
 CLI 子进程使用环境白名单；额外凭据变量须在 `extra_env` 显式列名。Windows 的 Codex 建议配置原生 `codex.exe`，减少 npm `.cmd` 的参数转义影响。CLI 版本未知、缺少完成事件或输出无法解析时，不会按成功处理。样本来源与真实性见 [tests/fixtures/README.md](tests/fixtures/README.md)。

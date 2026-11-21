@@ -5,7 +5,7 @@ import json
 import re
 import threading
 import time
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
 from .state import atomic_write_json
 from .cli_tools import (READ_TOOLS, WRITE_TOOLS, ToolActivity, codex_activity,
@@ -114,6 +114,25 @@ class UsageLedger:
             self._put(('qwen', message['id']), values)
             self.complete = False
 
+    def observe_grok(self, event):
+        kind = event.get('type')
+        raw = event.get('usage')
+        fields = ('input_tokens', 'output_tokens', 'cache_read_input_tokens', 'cache_creation_input_tokens')
+        if kind not in ('usage', 'end') or not isinstance(raw, dict) or not all(
+                type(raw.get(key)) is int and raw[key] >= 0 for key in fields):
+            return
+        tokens = sum(raw[key] for key in fields)
+        if kind == 'end':
+            if type(raw.get('total_tokens')) is not int or raw['total_tokens'] != tokens:
+                return
+            self.final = {'tokens': tokens, 'cli_reported_tokens': tokens,
+                          'cache_read_tokens': raw['cache_read_input_tokens']}
+            self.complete = event.get('stopReason') == 'end_turn'
+        elif isinstance(event.get('signature'), str) and event['signature']:
+            self._put(('grok', event['signature']), {'tokens': tokens, 'cli_reported_tokens': tokens,
+                                                    'cache_read_tokens': raw['cache_read_input_tokens']})
+            self.complete = False
+
     def snapshot(self):
         totals={key:sum(row[key] for row in self.responses.values())
                 for key in ('tokens','cli_reported_tokens','cache_read_tokens')}
@@ -126,6 +145,8 @@ class UsageLedger:
 _ASSISTANT_STREAM_USAGE = {
     'cli_claude': UsageLedger.observe_claude,
     'cli_qwen': UsageLedger.observe_qwen,
+    # 豆包 2.37.2 的成功终态没有 token 用量，工具事件仍按 Read/Edit 映射。
+    'cli_doubao': None,
     # Qoder 的计数仍按其独立终态读取，不用于实时用量结算。
     'cli_qoder': None,
 }
@@ -189,7 +210,8 @@ class CLITrace:
         self.started_tools=set()
         self.dsh_calls={}
         self.dsh_tool_names={}
-        self.qoder_tools={}
+        self.active_tools={}
+        self.qoder_tools=self.active_tools
         self.codex_thread=''
         self.codex_stderr=''
         self.dropping_stderr=False
@@ -261,39 +283,85 @@ class CLITrace:
         except (ValueError,TypeError):return
         if not isinstance(event,dict):return
         self.ledger.observe(event)
-        if self.channel in _ASSISTANT_STREAM_USAGE:
-            observe = _ASSISTANT_STREAM_USAGE[self.channel]
-            if observe is not None:
-                observe(self.ledger, event)
-            message=event.get('message')
-            content=message.get('content',[]) if isinstance(message,dict) else []
-            for item in content if isinstance(content,list) else []:
-                if not isinstance(item,dict):continue
-                if event.get('type')=='assistant' and item.get('type')=='tool_use' and isinstance(item.get('id'),str):
-                    name=item.get('name')
-                    # 仅映射真实抓取的读/写事件；不推断任意工具调用具有写权限。
-                    mapped = _ASSISTANT_TOOL_NAMES.get(name)
-                    if not mapped:continue
-                    key=(self.channel,str(event.get('session_id') or ''),item['id'])
-                    parameters=item.get('input',{})
-                    if not isinstance(parameters,dict):parameters={}
-                    self.qoder_tools[item['id']]=(key,mapped)
-                    self._tool_event(ToolActivity(key,mapped,'ACTIVE',parameters,file_parameter(parameters),
-                                     read_signature(mapped,parameters) if mapped in READ_TOOLS else '',mapped in WRITE_TOOLS))
-                elif event.get('type')=='user' and item.get('type')=='tool_result':
-                    previous=self.qoder_tools.get(item.get('tool_use_id'))
-                    if previous:
-                        key,name=previous
-                        self._tool_event(ToolActivity(key,name,'ERROR' if item.get('is_error') else 'DONE',
-                                                     writes=name in WRITE_TOOLS))
+        if self.channel == 'cli_grok':
+            self._event_grok(event)
             return
-        if self.channel=='cli_codex':
-            if event.get('type')=='thread.started' and isinstance(event.get('thread_id'),str):
-                self.codex_thread=event['thread_id']
-            activity=codex_activity(event,self.codex_thread)
-            if activity:
-                self._tool_event(activity)
+        if self.channel in _ASSISTANT_STREAM_USAGE:
+            self._event_assistant_stream(event)
+            return
+        if self.channel=='cli_codex' and self._event_codex(event):
+            return
+        self._event_dsh_or_step(event)
+
+    def _event_grok(self, event):
+        self.ledger.observe_grok(event)
+        call = event.get('toolCallId')
+        if isinstance(call, str) and event.get('type') == 'tool_call':
+            name = event.get('toolName')
+            if name not in ('read_file', 'search_replace'):
+                self.reason = self.reason or 'tool_error_limit'
                 return
+            raw = event.get('rawInput')
+            raw = raw if isinstance(raw, dict) else {}
+            raw_path = raw.get('target_file' if name == 'read_file' else 'file_path', '')
+            path = ''
+            if isinstance(raw_path, str) and raw_path:
+                posix = PurePosixPath('/workspace') / raw_path
+                if posix.parts[:2] == ('/', 'workspace') and '..' not in posix.parts:
+                    path = '/'.join(posix.parts[2:])
+            allowed = self.ctx.editable_files if name == 'search_replace' else (
+                *self.ctx.context_files, *self.ctx.editable_files)
+            declared = bool(path) and path in allowed
+            key = ('grok', call)
+            self.active_tools[call] = (key, name, declared)
+            self._tool_event(ToolActivity(key, name, 'ACTIVE', filename=path,
+                                          read_signature=read_signature(name, {'path': path})
+                                          if name == 'read_file' else '', writes=name == 'search_replace'))
+        elif event.get('type') == 'tool_call_update' and isinstance(call, str) and call in self.active_tools:
+            status = {'completed': 'DONE', 'failed': 'ERROR'}.get(event.get('status'))
+            if status:
+                key, name, declared = self.active_tools[call]
+                if status == 'DONE' and not declared:
+                    self.reason = self.reason or 'tool_error_limit'
+                self._tool_event(ToolActivity(key, name, status, writes=name == 'search_replace',
+                                              counts_error=declared))
+
+    def _event_assistant_stream(self, event):
+        observe = _ASSISTANT_STREAM_USAGE[self.channel]
+        if observe is not None:
+            observe(self.ledger, event)
+        message=event.get('message')
+        content=message.get('content',[]) if isinstance(message,dict) else []
+        for item in content if isinstance(content,list) else []:
+            if not isinstance(item,dict):continue
+            if event.get('type')=='assistant' and item.get('type')=='tool_use' and isinstance(item.get('id'),str):
+                name=item.get('name')
+                # 仅映射真实抓取的读/写事件；不推断任意工具调用具有写权限。
+                mapped = _ASSISTANT_TOOL_NAMES.get(name)
+                if not mapped:continue
+                key=(self.channel,str(event.get('session_id') or ''),item['id'])
+                parameters=item.get('input',{})
+                if not isinstance(parameters,dict):parameters={}
+                self.active_tools[item['id']]=(key,mapped)
+                self._tool_event(ToolActivity(key,mapped,'ACTIVE',parameters,file_parameter(parameters),
+                                 read_signature(mapped,parameters) if mapped in READ_TOOLS else '',mapped in WRITE_TOOLS))
+            elif event.get('type')=='user' and item.get('type')=='tool_result':
+                previous=self.active_tools.get(item.get('tool_use_id'))
+                if previous:
+                    key,name=previous
+                    self._tool_event(ToolActivity(key,name,'ERROR' if item.get('is_error') else 'DONE',
+                                                 writes=name in WRITE_TOOLS))
+
+    def _event_codex(self, event):
+        if event.get('type')=='thread.started' and isinstance(event.get('thread_id'),str):
+            self.codex_thread=event['thread_id']
+        activity=codex_activity(event,self.codex_thread)
+        if activity:
+            self._tool_event(activity)
+            return True
+        return False
+
+    def _event_dsh_or_step(self, event):
         if event.get('type')=='tool_call' and isinstance(event.get('callId'),str):
             call=event['callId'];index=self.dsh_calls.setdefault(call,len(self.dsh_calls)+1)
             self.dsh_tool_names[call]=event.get('tool')
@@ -355,7 +423,9 @@ class CLITrace:
                 if self.reads[signature]>self.ctx.max_repeated_reads:self.reason=self.reason or 'repeated_read_limit'
         if activity.state in ('DONE','ERROR'):
             self.finished_tools.add(key)
-            self.tool_errors=self.tool_errors+1 if activity.state=='ERROR' else 0
+            # 策略拒绝不是模型工具故障，不能把连续错误计数清零或累加。
+            if activity.state=='ERROR' and activity.counts_error:self.tool_errors+=1
+            elif activity.state=='DONE':self.tool_errors=0
             if activity.state=='DONE' and activity.writes:
                 self.reads.clear()
             if self.tool_errors>=self.ctx.max_tool_errors:self.reason=self.reason or 'tool_error_limit'

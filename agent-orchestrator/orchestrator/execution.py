@@ -245,6 +245,9 @@ class StageExecutor:
                 idle_timeout_s=self.config.autonomy.cli_idle_timeout_s,
                 max_tool_errors=self.config.autonomy.cli_max_tool_errors,
                 max_repeated_reads=self.config.autonomy.cli_max_repeated_reads,
+                context_files=tuple(spec.context_files),
+                editable_files=tuple(self.config.autonomy.allowed_files if self.config.autonomy.enabled
+                                     else spec.context_files) if spec.kind == 'code' else (),
             )
             if self.config.autonomy.enabled or cli:
                 try:

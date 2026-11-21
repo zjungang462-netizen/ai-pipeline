@@ -24,6 +24,7 @@ class ToolActivity:
     filename: str = ''
     read_signature: str = ''
     writes: bool = False
+    counts_error: bool = True
 
 
 def file_parameter(parameters):

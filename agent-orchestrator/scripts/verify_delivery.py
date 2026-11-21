@@ -30,7 +30,8 @@ QUICK_TESTS = ('test_stage1.TestConfig', 'test_stage1.TestState',
                'test_phase2_operations', 'test_phase2_gates', 'test_schema_docs', 'test_test_layers',
                'test_phase5_reporting', 'test_phase5_http', 'test_phase5_ui',
                'test_model_settings', 'test_qoder_1189','test_claude_cli',
-               'test_state_backup', 'test_policy_tuning', 'test_cli_current',
+               'test_state_backup', 'test_policy_tuning', 'test_cli_current', 'test_docker_base',
+               'test_grok_container', 'test_doubao_container',
                'test_failure_evidence.FailureEvidence.test_unreadable_directory_is_recorded_and_other_roots_continue')
 
 
@@ -69,7 +70,7 @@ def digest_files():
     files=[p for directory in ('orchestrator','tests','prompts','scripts','demo')
            for p in (ROOT/directory).rglob('*') if p.is_file() and '__pycache__' not in p.parts]
     files+=list(ROOT.glob('*.example.toml'))
-    files+=[p for p in (ROOT/'README.md',ROOT/'HISTORY.md',ROOT/'RELEASE_NOTES.md',ROOT/'DELIVERY.md',ROOT/'.gitattributes') if p.exists()]
+    files+=[p for p in (ROOT/'README.md',ROOT/'OPERATIONS.md',ROOT/'HISTORY.md',ROOT/'RELEASE_NOTES.md',ROOT/'DELIVERY.md',ROOT/'.gitattributes') if p.exists()]
     return {p.relative_to(ROOT).as_posix():hashlib.sha256(p.read_bytes()).hexdigest() for p in sorted(files)}
 
 

@@ -28,6 +28,7 @@ KNOWN_ADAPTER_TYPES = {
     "cli_qoder",
     "cli_dsh",
     "cli_doubao",
+    "cli_grok",
     "cli_agy",
     "cli_claude",
 }

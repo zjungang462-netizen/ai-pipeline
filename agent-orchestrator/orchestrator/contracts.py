@@ -124,6 +124,8 @@ class RunContext:
     idle_timeout_s: float = 120
     max_tool_errors: int = 3
     max_repeated_reads: int = 4
+    context_files: tuple[str, ...] = ()
+    editable_files: tuple[str, ...] = ()
 
 
 @dataclass

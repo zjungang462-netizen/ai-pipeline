@@ -10,6 +10,7 @@ from .cli_agy import AgyAdapter
 from .cli_qoder import QoderAdapter
 from .cli_doubao import DoubaoAdapter
 from .cli_claude import ClaudeAdapter
+from .cli_grok import GrokAdapter
 
 _REGISTRY = {
     "cli_codex": CodexAdapter,
@@ -19,6 +20,7 @@ _REGISTRY = {
     "cli_qoder": QoderAdapter,
     "cli_doubao": DoubaoAdapter,
     "cli_claude": ClaudeAdapter,
+    "cli_grok": GrokAdapter,
 }
 
 
@@ -46,4 +48,9 @@ def build(cfg: AdapterConfig, kind: str = "report") -> Adapter:
         kwargs.update(model=o.get('model'), proxy_url=o.get('proxy_url'))
     if cls is DshAdapter:
         kwargs.update(permission_mode=o.get('permission_mode','read-only'),proxy_url=o.get('proxy_url'))
+    if cls is GrokAdapter:
+        kwargs.update(binary=o.get('binary'), auth_file=o.get('auth_file'), proxy_url=o.get('proxy_url'))
+    if cls is DoubaoAdapter:
+        kwargs.update(binary=o.get('binary'), image=o.get('image'), machine_id=o.get('machine_id'),
+                      profile=o.get('profile'), proxy_url=o.get('proxy_url'))
     return cls(**kwargs)

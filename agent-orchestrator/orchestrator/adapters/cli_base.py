@@ -262,7 +262,8 @@ class CLIAdapter(Adapter):
 
     # ---- 子进程 ----
     def _exec(self, args: list[str], workdir: Path, ctx: RunContext,
-              stdin_data: str | None = None, env_overrides: dict[str, str] | None = None) -> Result:
+              stdin_data: str | None = None, env_overrides: dict[str, str] | None = None,
+              *, additional_secrets: tuple[str, ...] = ()) -> Result:
         exe = self._ensure_resolved()
         if not exe:
             return Result(ok=False, exit_code=-1, error_kind=ErrorKind.AUTH,
@@ -271,13 +272,15 @@ class CLIAdapter(Adapter):
         allow = list(self.credential_env) + list(self.extra_env)
         env = build_subprocess_env(extra_allow=allow)
         env.update(env_overrides or {})
-        secrets=[v for k,v in env.items() if any(label in k.upper() for label in ('API_KEY','AUTH_TOKEN','ACCESS_TOKEN','CODEX_KEY'))]
+        secrets = {v for k, v in env.items()
+                   if any(label in k.upper() for label in ('API_KEY', 'AUTH_TOKEN', 'ACCESS_TOKEN', 'CODEX_KEY'))}
+        secrets.update(additional_secrets)
+        secrets = sorted((secret for secret in secrets if len(secret) >= 8), key=len, reverse=True)
         trace=CLITrace(ctx,secrets,channel=self.channel)
         def scrub(value):
             value = _dec(value)
-            for key, secret in env.items():
-                if len(secret) >= 8 and any(label in key.upper() for label in ('API_KEY', 'AUTH_TOKEN', 'ACCESS_TOKEN', 'CODEX_KEY')):
-                    value = value.replace(secret, '[REDACTED]')
+            for secret in secrets:
+                value = value.replace(secret, '[REDACTED]')
             return value
         try:
             try:

@@ -1,41 +1,199 @@
-"""保留旧豆包输出的离线解析，实时执行等待真实 CLI 协议验证。"""
+"""豆包 CLI 2.37.2 的已验证 Linux 容器协议。
+
+宿主上的原生 CLI 可以改写工作区外的文件。这里只挂载任务工作区，
+外部样本在只读挂载上的 Edit 会得到 Permission denied，宿主机字节不变。
+成功终态没有 token 用量，不能把退出码 0 当成已知用量。
+"""
 from __future__ import annotations
 
+import json
+import re
+import subprocess
+import uuid
 from pathlib import Path
 
 from ..contracts import ErrorKind, PreflightReport, Result, RunContext
-from .cli_base import CLIAdapter
+from ..safety import build_subprocess_env, resolve_exe
+from ..state import sha256_file
+from .cli_base import CLIAdapter, run_cli_process
 from .cli_codex import strip_ansi
+from .cli_result_stream import ResultStream
+from .docker_base import (
+    DOCKER_HOST as HOST,
+    base_run_args,
+    bind_mount as _mount,
+    cleanup_container,
+    proxy_env_args,
+    validate_image_ref,
+    validate_proxy_url,
+)
 
-MAX_TEXT = 200_000
+VERSION = 'doubao 2.37.2'
+BINARY_SHA256 = '6120b2849c181466d1bfb003e6e9fea9ed97df8ef8e2ada653bf3fe0e99e14d1'
+IMAGE_ID = 'sha256:cd46e779d4ab86102d00ca9bd0bca87f6f839215dc07d0f5c35c4eb65cfefce3'
+PROFILE_NAME = re.compile(r'[A-Za-z0-9][A-Za-z0-9_.-]{0,127}')
 
 
 class DoubaoAdapter(CLIAdapter):
-    channel = "cli_doubao"
-    exe_name = "doubao"
-    version_args = ["--version"]
+    channel = 'cli_doubao'
+    exe_name = 'docker'
     needs_login = True
-    credential_env = []
 
-    def preflight(self) -> PreflightReport:
-        return PreflightReport(adapter=self.name, ok=False,
-                               detail='缺少独立豆包 CLI 的真实协议样本')
+    def __init__(self, name, exe=None, extra_env=None, timeout_s=300, *,
+                 binary=None, image=None, machine_id=None, profile=None, proxy_url=None):
+        super().__init__(name, exe, extra_env, timeout_s)
+        if binary or image or machine_id or profile or proxy_url:
+            if not binary or not Path(binary).is_absolute():
+                raise ValueError('豆包 binary 必须指向已验证 Linux 程序的绝对路径')
+            validate_image_ref(image, '豆包')
+            if not machine_id or not Path(machine_id).is_absolute():
+                raise ValueError('豆包 machine_id 必须是绝对路径')
+            if not isinstance(profile, str) or not PROFILE_NAME.fullmatch(profile):
+                raise ValueError('豆包 profile 必须是 Docker 卷名')
+        if proxy_url:
+            validate_proxy_url(proxy_url, '豆包')
+        if extra_env:
+            raise ValueError('豆包不接受额外环境变量')
+        self.binary = Path(binary).resolve() if binary else None
+        self.image = image
+        self.machine_id = Path(machine_id).resolve() if machine_id else None
+        self.profile = profile
+        self.proxy_url = proxy_url
+
+    def _package_mount(self):
+        return _mount(self.binary.parent, '/opt/doubao', readonly=True)
+
+    def _container_binary(self):
+        return f'/opt/doubao/{self.binary.name}'
+
+    def _common_run(self):
+        return [*base_run_args(host=HOST), '--tmpfs', '/tmp:rw,nosuid,nodev,mode=1777,size=128m',
+                '--env', 'PYTHONDONTWRITEBYTECODE=1', '--env', 'PYTHONPYCACHEPREFIX=/tmp/pyc']
+
+    def _proxy_env(self):
+        return proxy_env_args(self.proxy_url, include_no_proxy=True)
+
+    def _profile_args(self):
+        return ['--env', 'HOME=/profile', '--env', 'XDG_RUNTIME_DIR=/tmp',
+                '--mount', f'type=volume,source={self.profile},target=/profile',
+                '--mount', _mount(self.machine_id, '/etc/machine-id', readonly=True),
+                '--mount', self._package_mount()]
+
+    def preflight(self):
+        self._version = None
+        self._resolved = None
+        if self.binary is None:
+            return PreflightReport(self.name, False, None, None,
+                                   '缺少已验证的豆包 Linux 程序、探针镜像、设备身份和会话卷',
+                                   needs_login=True)
+        self._resolved = resolve_exe(self.exe_name, self.exe)
+        detail = '未找到 Docker'
+        if self._resolved:
+            try:
+                if sha256_file(self.binary) != BINARY_SHA256:
+                    raise ValueError('豆包 Linux 程序 SHA-256 不匹配')
+                image = run_cli_process(
+                    [self._resolved, '--host', HOST, 'image', 'inspect', self.image, '--format', '{{.Id}}'],
+                    cwd=None, env=build_subprocess_env(), input=None, timeout=30)
+                if image.returncode != 0 or image.stdout.strip() != IMAGE_ID:
+                    raise ValueError('豆包探针镜像与已验证映像不一致')
+                version = run_cli_process(
+                    [self._resolved, *self._common_run(), '--network', 'none',
+                     '--env', 'HOME=/tmp', '--env', 'XDG_RUNTIME_DIR=/tmp',
+                     '--mount', self._package_mount(), IMAGE_ID, self._container_binary(), '--version'],
+                    cwd=None, env=build_subprocess_env(), input=None, timeout=60)
+                if version.returncode != 0 or version.stdout.strip() != VERSION:
+                    raise ValueError('豆包版本探测失败')
+                auth = run_cli_process(
+                    [self._resolved, *self._common_run(), *self._proxy_env(), *self._profile_args(),
+                     IMAGE_ID, self._container_binary(), 'auth', 'status'],
+                    cwd=None, env=build_subprocess_env(), input=None, timeout=60)
+                if auth.returncode != 0 or not auth.stdout.lstrip().startswith('登录成功'):
+                    raise ValueError('豆包容器会话未登录')
+                self._version = VERSION
+                detail = '已核验探针镜像、程序版本和容器会话'
+            except ValueError as error:
+                detail = str(error)
+            except (OSError, subprocess.TimeoutExpired):
+                detail = '无法完成豆包容器版本或会话探测'
+        return PreflightReport(self.name, self._version == VERSION, self._resolved, self._version,
+                               detail, needs_login=True)
+
+    def input_fingerprint(self):
+        identity = None
+        if self.machine_id and self.machine_id.is_file():
+            identity = sha256_file(self.machine_id)
+        return {'protocol': 1, 'version': VERSION, 'binary': BINARY_SHA256, 'image': IMAGE_ID,
+                'profile': self.profile, 'machine_id_sha256': identity, 'proxy_url': self.proxy_url}
 
     def run(self, prompt: str, workdir: Path, ctx: RunContext) -> Result:
-        return Result(ok=False, exit_code=-1, channel=self.channel, parse_unknown=True,
-                      error_kind=ErrorKind.PARSE_FAILED,
-                      stderr='缺少独立豆包 CLI 的真实协议样本，没有发起模型请求')
+        if self.binary is None:
+            return Result(False, -1, stderr='缺少独立豆包 CLI 的真实协议样本，没有发起模型请求',
+                          error_kind=ErrorKind.PARSE_FAILED, parse_unknown=True, channel=self.channel)
+        if self._version != VERSION and not self.preflight().ok:
+            return Result(False, -1, stderr='豆包容器预检失败，没有发起模型请求',
+                          error_kind=ErrorKind.REJECTED, channel=self.channel)
+        try:
+            if sha256_file(self.binary) != BINARY_SHA256:
+                return Result(False, -1, stderr='豆包 Linux 程序 SHA-256 已变化',
+                              error_kind=ErrorKind.REJECTED, channel=self.channel)
+        except OSError as error:
+            return Result(False, -1, stderr=f'无法读取豆包 Linux 程序：{error}',
+                          error_kind=ErrorKind.REJECTED, channel=self.channel)
+        name = 'pipeline-doubao-' + uuid.uuid4().hex
+        writable = ctx.kind == 'code'
+        args = [*self._common_run(), *self._proxy_env(), *self._profile_args(),
+                '--name', name, '-i',
+                '--mount', _mount(Path(workdir).resolve(), '/workspace', readonly=not writable),
+                IMAGE_ID, self._container_binary(), '-C', '/workspace',
+                '--permission-mode', 'ask_risky', '--output-format', 'stream-json', '-p', '-']
+        try:
+            result = self._exec(args, workdir, ctx, stdin_data=prompt)
+        finally:
+            cleanup_container(self._resolved, name, host=HOST, runner=run_cli_process)
+        return self._finalize(result, ctx)
 
     def _parse(self, proc, workdir: Path, ctx: RunContext) -> Result:
-        stdout = strip_ansi(proc.stdout or "")
-        stderr = strip_ansi(proc.stderr or "")
+        stdout = strip_ansi(proc.stdout or '')
+        stderr = strip_ansi(proc.stderr or '')
+        usage = {'usage_unknown': True, 'usage_scope': 'doubao_terminal_has_no_token_usage'}
+        combined = f'{stdout}\n{stderr}'
         if proc.returncode != 0:
-            kind = ErrorKind.AUTH if ("login" in stderr.lower() or "登录" in stderr
-                                      or "auth" in stderr.lower()) else ErrorKind.CRASH
-            return Result(ok=False, exit_code=proc.returncode, channel=self.channel,
-                          stdout=stdout, stderr=stderr, text=stdout[:MAX_TEXT],
-                          tool_version=self._version, error_kind=kind)
-        text = stdout.strip()
-        return Result(ok=True, exit_code=0, channel=self.channel,
-                      stdout=stdout, stderr=stderr, text=text[:MAX_TEXT],
-                      tool_version=self._version)
+            err_lower = stderr.lower()
+            is_auth = (
+                proc.returncode in (3, 4)
+                or 'login_required' in combined
+                or '请先登录' in stderr
+                or '未登录' in stderr
+                or 'login' in err_lower
+                or 'authentication' in err_lower
+            )
+            kind = ErrorKind.AUTH if is_auth else ErrorKind.CRASH
+            return Result(False, proc.returncode, stdout=stdout, stderr=stderr, channel=self.channel,
+                          tool_version=self._version, error_kind=kind, usage=usage)
+        if self._version != VERSION:
+            result = self._unknown_version(proc, '未验证的豆包版本')
+            result.usage = usage
+            return result
+        try:
+            events = ResultStream._lines(stdout)
+            results = [event for event in events if event.get('type') == 'result']
+            if len(results) != 1 or events[-1] is not results[0]:
+                raise ValueError
+            final = results[0]
+            body = final.get('result')
+            text = body.get('content') if isinstance(body, dict) else None
+            # 没有越权尝试时，真实终态会省略 permission_denials。
+            denials = final.get('permission_denials', [])
+            if (final.get('subtype') != 'success' or final.get('is_error') is not False
+                    or final.get('tool_calls_truncated') is not False or not isinstance(denials, list)
+                    or not isinstance(text, str) or not text.strip()):
+                raise ValueError
+            if denials:
+                stderr = (stderr + '\n豆包权限拒绝 ' + str(len(denials)) + ' 项').strip()
+            return Result(True, proc.returncode, stdout=stdout, stderr=stderr, text=text,
+                          channel=self.channel, tool_version=self._version, usage=usage)
+        except (ValueError, TypeError, AttributeError, KeyError, json.JSONDecodeError):
+            result = self._unknown_version(proc, '豆包未返回唯一的成功终态')
+            result.usage = usage
+            return result

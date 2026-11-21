@@ -10,7 +10,20 @@
 - 归档、工作树清理和测试产物记录已改为 `Engine` 显式持有的组件。测试输出作为结构化诊断数据传入返工提示，HTTP 回归覆盖客户端断开后重放同一暂停请求。
 - `agent-orchestrator/scripts/multi_project_benchmark.py` 使用独立工作区复现两个业务缺陷，随后由仓库外的保护测试和审查判定结果。DeepSeek API 最终轮两个样例都完成，订单金额 3 次模型调用、报告 2402 tokens，预约容量包含一次返工，共 4 次调用、报告 3948 tokens。两个样例各改动两个模块，保护测试文件哈希保持一致。证据保存在 `D:/work/ai-pipeline-release-056-cb48f023/multi-project-api-final-129e691e/results.json`。
 - 早期 API 试跑出现输出截断、补丁格式或签名错误。固定 Claude Code 2.1.328 试跑中，订单金额触及预算，预约容量编码超时。失败记录均保留于同一交付目录，实际账单金额及其它项目的成功率仍无数据。
-- Grok 1.0.89 仍报告未认证。已在仓库外核验 `@bytedance/doubao-cli` 2.37.2 的 npm 包完整性、Windows 原生包 SHA-256 与 Windows 数字签名。原生 `doubao.exe` 支持标准输入和逐行 JSON，`auth status` 及未登录流式探针均返回退出码 4 和 `login_required`。豆包需要扫码，登录后的终态、计量和文件工具仍待采样。[豆包 CLI](https://www.npmjs.com/package/@bytedance/doubao-cli)
+- Grok 1.0.89 已通过设备授权登录。`streaming-json` 真机样本采集到正文、`tool_call`、`tool_call_update`、用量及 `end` 终态。显式关闭 `search_tool,use_tool` 后，工具清单仅有 `read_file,search_replace`，两者均完成真实文件操作。该轮终态报告 18741 tokens，包含 14592 缓存读取 tokens。Windows `workspace-write` 复验中，内置 `search_replace` 同时改写了工作区内文件和工作区外的临时样本。
+- 已在仓库外核验 `@bytedance/doubao-cli` 2.37.2 的 npm 包完整性、Windows 原生包 SHA-256 与 Windows 数字签名。扫码后，标准输入和 `stream-json` 已完成真实文本与 `Glob`、`Read`、`Edit` 工具调用。`ask_always` 被当前账号拒绝，`ask_risky` 可执行，后者也允许 `Edit` 改写工作区外的临时样本。成功终态未报告 token 用量。未登录探针仍保留退出码 4 和 `login_required` 的记录。[豆包 CLI](https://www.npmjs.com/package/@bytedance/doubao-cli)
+- 两次边界复验仅使用仓库外的临时文件。无人值守接入仍需能约束内置文件工具的执行环境。原始流式记录保存在 `D:/work/ai-pipeline-release-056-cb48f023/` 的 `grok-1.0.89-*` 和 `doubao-cli-2.37.2/authenticated-*` 目录。
+- Grok 1.0.89 的 Linux 原生程序已在 Docker 中通过真实写入边界验证。容器以非 root 用户运行，根文件系统只读，唯一可写的宿主机挂载是测试工作区，临时状态写入内存盘。`search_replace` 成功修改工作区内的样本，尝试修改只读挂载中的工作区外样本时收到只读文件系统错误，宿主机样本 SHA-256 未变。随后用同样的隔离方式完成订单金额样例修复，调用前钩子拒绝了工作区外的读取，保护测试在修复前失败、修复后通过，测试文件哈希一致，DeepSeek 独立审查通过。两项证据位于 `D:/work/ai-pipeline-release-056-cb48f023/grok-container-boundary-0a017ccd/` 下的 `grok-live-explicit-fixtures/verification.json` 和 `isolated-maintenance/verification.json`。本次使用仓库外的验证脚本，正式适配器接入和豆包容器验证待完成。
+
+- 正式 `cli_grok` 适配器已接入配置、CLI 实时计量与回写核验。订单金额用例在 DeepSeek 设计、Grok 容器编码、保护测试、DeepSeek 独立审查四阶段全部通过。测试前失败、修复后通过，保护文件哈希一致。复跑预算 90000 tokens，完成用量 48951 tokens，共 3 次模型调用。证据保存在 `D:/work/ai-pipeline-release-056-cb48f023/grok-formal-adapter-retry-20261120/verification.json`，首轮因工具错误护栏停止的记录一并保留。
+- Grok 隔离回归已加入 Quick。最终 183 项通过，耗时 43.438 秒。带逗号和空格的宿主机路径已用真实 Docker 复验，容器读取到与宿主机一致的样本。
+- 豆包 2.37.2 Linux 原生包的 SHA-256 已核对，补齐系统依赖后容器内可以读取版本并启动登录服务。精简镜像缺少 `/etc/machine-id` 时，设备注册返回 `device_error=9`。给测试容器配置独立且持久的 Linux machine ID 后，设备注册成功。直连登录服务返回 HTTP 403；经本机 `7897` 代理扫码确认后，`auth status` 退出码为 0。容器边界中工作区 `inside.txt` 改为 `TEMP_NEW`，只读挂载的 `outside.txt` 仍为 `TEMP_OLD`，Edit 返回 Permission denied。证据在 `D:/work/ai-pipeline-release-056-cb48f023/doubao-cli-2.37.2/container-boundary-20261121/verification.json`。正式适配器只运行这套容器和 `doubao 2.37.2` 的 stream-json 终态，成功终态不报告 token。没有越权尝试时终态省略 `permission_denials`，不能因此判解析失败。
+
+- 2026-11-21 快速回归 194 项通过，耗时 62.250 秒。随后 Grok 适配器真实调用把 `inside.txt` 写成 `TEMP_NEW`，终态 19099 tokens。豆包适配器同一次调用也写成 `TEMP_NEW`，但因终态缺少 `permission_denials` 被误判解析失败；修正后用已保存流复验为成功。解析修正之后的快速回归再次 194 项通过，耗时 41.547 秒，源码指纹未变。证据分别在 `D:/work/ai-pipeline-release-056-cb48f023/quick-grok-doubao-20261121/`、`adapter-live-20261121/` 和 `quick-after-doubao-parse-20261121/verification.json`。
+- 同一未提交源码的本地全量回归收集 718 项，全部通过，零失败、错误和跳过，源码指纹未变。耗时 885.485 秒，超过 480 秒观察目标。没有模型调用。证据在 `D:/work/ai-pipeline-release-056-cb48f023/full-grok-doubao-20261121/verification.json`。
+- 豆包编码接入两个维护样例。订单金额首轮因容器内生成 `__pycache__` 被白名单拒绝；容器已关闭 Python 字节码写入。重跑后设计、编码、测试、审查均为 done，保护测试由失败变为通过，测试文件哈希未变，3 次模型调用。预约容量的编码在基准 120 秒调用时限内未结束。豆包调用仍无 token 报告，订单金额保留 38046 预扣，API 已报告 1610。证据在 `D:/work/ai-pipeline-release-056-cb48f023/doubao-formal-adapter-20261121/` 与 `doubao-formal-adapter-retry-20261121/results.json`。
+- 预约容量在 240 秒编码时限下一次通过。设计、编码、测试、审查均为 done，保护测试由失败变为通过，测试文件哈希未变，3 次模型调用，耗时 161.047 秒。豆包仍无 token 报告，保留 37883 预扣，API 已报告 1779。此前 120 秒时限会中断编码；另一次编码已完成但实现未通过测试，返工又被 50000 token 上限和未知用量预扣拦住。证据在 `D:/work/ai-pipeline-release-056-cb48f023/doubao-reservations-20261121/` 与 `doubao-reservations-repair-20261121/results.json`。
+- 字节码环境变量纳入豆包容器参数回归后，当前源码再次全量回归。收集 718 项，全部通过，零失败、错误和跳过，源码指纹未变。耗时 458.344 秒，低于 480 秒观察目标。没有模型调用。证据在 `D:/work/ai-pipeline-release-056-cb48f023/full-after-doubao-maintenance-20261121/verification.json`。
 
 ## 0.5.6 当前 CLI 验证
 

@@ -22,6 +22,38 @@ python -m orchestrator.workbench_service run --config workbench.example.toml --d
 
 连续健康检查失败会记 unhealthy，保留仍存活的网页进程供排查，不因未知状态启动第二个实例。正常退出不重启。停止时在守护目录创建名为 `stop` 的文件；只终止守护器自己创建的网页子进程，独立任务进程保持。再次启动前确认旧进程退出并移除 stop。超限、blocked、unhealthy 均须查看 service.json 与 events.jsonl，不自动重置预算、重建任务或清除失败结论。
 
+## 在 Docker 中使用 Grok
+
+```toml
+[adapters.grok]
+type = "cli_grok"
+binary = "D:/tools/grok-1.0.89-linux-x86_64"
+# auth_file 默认使用本机 ~/.grok/auth.json，由 grok login 创建。
+# 如需经本机代理访问服务，从 Docker 内使用可达地址。
+# proxy_url = "http://host.docker.internal:7897"
+timeout_s = 120
+```
+
+将编码阶段的 `adapter` 指向 `grok`，用 `context_files` 声明读入文件。启用自动修复时，`autonomy.allowed_files` 决定哪些现有文件可编辑。其它编码运行使用 `context_files` 作为可编辑范围。每次最多使用 64 个文件、512 KiB 源文件，支持修改现有普通文件。
+
+准备本地 Docker Linux 引擎（Windows 使用 Docker Desktop），并预先拉取适配器中固定的 Python 镜像。启动前核验 Grok 1.0.89 Linux x86-64 原生程序的 SHA-256 和版本。工作区副本、会话文件和进程状态位于容器内存盘。文件工具受调用前钩子限定。流水线收到成功终态且确认宿主机基线一致后，才写回声明文件。CLI 的实时用量包含缓存 tokens，推理 tokens 已计入输出。
+
+## 在 Docker 中使用豆包
+
+```toml
+[adapters.doubao]
+type = "cli_doubao"
+binary = "D:/tools/doubao-cli-2.37.2-linux-x64/doubao"
+image = "pipeline-doubao-probe:2.37.2"
+machine_id = "D:/tools/doubao-cli-2.37.2/machine-id"
+profile = "pipeline-doubao-profile"
+# 如需经本机代理访问服务，从 Docker 内使用可达地址。
+# proxy_url = "http://host.docker.internal:7897"
+timeout_s = 180
+```
+
+只接受已核对 SHA-256 的 2.37.2 Linux 程序和本地探针镜像；`binary` 应位于独立的发行包目录中（容器以只读方式挂载该目录）。会话保存在指定 Docker 卷，设备身份来自 `machine_id`。提示词经标准输入传给 `-p -`。编码阶段以可写方式挂载任务工作区；报告和审查改为只读挂载。成功终态不报告 token，用量保持未知。直连登录服务曾返回 HTTP 403，当前验证通过本机代理完成。
+
 ## 固定任务集
 
 ```powershell

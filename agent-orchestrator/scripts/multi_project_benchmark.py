@@ -72,7 +72,7 @@ for existing, requested, cap in [([], (2, 2), 1), ([(4, 2)], (1, 3), 1), ([], (1
 }
 
 
-def run_case(root, name, adapters, roles):
+def run_case(root, name, adapters, roles, stage_timeout_s=120, max_tokens=50000):
     files, task, assertions = CASES[name]
     case = root / name
     workspace = case / 'workspace'
@@ -106,9 +106,10 @@ def run_case(root, name, adapters, roles):
     ]
     for stage in stages:
         if stage['kind'] != 'test':
-            stage.update(adapter=roles[stage['kind']], timeout_s=120, max_attempts=1, context_files=list(files))
+            timeout = stage_timeout_s if stage['kind'] == 'code' else 120
+            stage.update(adapter=roles[stage['kind']], timeout_s=timeout, max_attempts=1, context_files=list(files))
     cfg = parse_config(dict(task_workdir=str(workspace), state_dir=str(case / 'state'),
-                            run_budget=dict(max_tokens=50000, max_duration_s=360),
+                            run_budget=dict(max_tokens=max_tokens, max_duration_s=max(360, stage_timeout_s + 240)),
                             autonomy=dict(enabled=True, allowed_files=list(files), repair_batch_size=2,
                                           max_repair_rounds=2, output_tokens=4096),
                             adapters=adapters, stages=stages), base_dir=case)
@@ -137,7 +138,12 @@ def main():
     parser.add_argument('--output', required=True, type=Path)
     parser.add_argument('--live-config', required=True, type=Path, help='显式使用其中的真实 API 与编码角色')
     parser.add_argument('--editor-exe', type=Path, help='为配置中的 CLI 编码角色指定固定版本的可执行文件')
+    parser.add_argument('--case', action='append', choices=tuple(CASES), help='只运行指定样例，可重复')
+    parser.add_argument('--stage-timeout', type=int, default=120, help='编码阶段单次调用秒数，默认 120')
+    parser.add_argument('--max-tokens', type=int, default=50000, help='单次样例的运行 token 上限，默认 50000')
     args = parser.parse_args()
+    if args.stage_timeout < 1 or args.max_tokens < 1:
+        parser.error('--stage-timeout 和 --max-tokens 必须为正数')
     config = load_config(args.live_config)
     source = next((item for item in config.adapters.values() if item.type == 'openai_compat'), None)
     if source is None:
@@ -160,9 +166,10 @@ def main():
         parser.error('证据须位于仓库外')
     output.mkdir(parents=True, exist_ok=False)
     rows = []
-    for name in CASES:
+    for name in (tuple(dict.fromkeys(args.case)) if args.case else tuple(CASES)):
         try:
-            row = run_case(output, name, adapters, roles)
+            row = run_case(output, name, adapters, roles, stage_timeout_s=args.stage_timeout,
+                           max_tokens=args.max_tokens)
         except (OSError, ValueError, RuntimeError, subprocess.SubprocessError) as error:
             row = dict(project=name, completed=False, error_type=type(error).__name__)
         rows.append(row)
