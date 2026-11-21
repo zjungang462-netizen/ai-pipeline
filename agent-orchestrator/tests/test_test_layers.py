@@ -1,7 +1,7 @@
 """分层必须完整且互斥，避免 quick/full 重复执行或遗漏新增测试。"""
 import unittest
 
-from scripts.verify_delivery import collect_tests, test_ids
+from scripts.verify_delivery import collect_tests, group_tests_by_module, test_ids
 
 
 class TestLayers(unittest.TestCase):
@@ -15,3 +15,12 @@ class TestLayers(unittest.TestCase):
 
     def test_quick_uses_the_same_tests_as_fast(self):
         self.assertEqual(test_ids(collect_tests(quick=True)),test_ids(collect_tests(suite='fast')))
+
+    def test_group_tests_by_module_preserves_all_ids_deterministically(self):
+        ids = test_ids(collect_tests(suite='fast'))
+        grouped = group_tests_by_module(ids)
+        flattened = [item for _, names in grouped for item in names]
+        self.assertEqual(sorted(flattened), ids)
+        self.assertEqual(len(flattened), len(set(flattened)))
+        counts = [len(names) for _, names in grouped]
+        self.assertEqual(counts, sorted(counts, reverse=True))

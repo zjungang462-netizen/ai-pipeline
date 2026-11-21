@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import argparse
+import concurrent.futures
 import contextlib
 import hashlib
 import http.client
@@ -43,6 +44,126 @@ def test_ids(suite):
         else:ids.append(node.id())
     visit(suite)
     return sorted(ids)
+
+
+def group_tests_by_module(ids):
+    """按顶层测试模块分组，并按用例数降序排列以减少多进程尾延迟。"""
+    groups = {}
+    for identifier in ids:
+        module = identifier.split('.', 1)[0]
+        groups.setdefault(module, []).append(identifier)
+    return sorted(groups.items(), key=lambda item: (-len(item[1]), item[0]))
+
+
+def _run_suite_in_process(suite, log_path, evidence_dir, *, redact_logs=False):
+    durations = []
+
+    class Result(EvidenceResultMixin, unittest.TextTestResult):
+        evidence_output = evidence_dir
+
+        def startTest(self, test):
+            self.started = time.monotonic()
+            super().startTest(test)
+            self.stream.flush()
+
+        def stopTest(self, test):
+            durations.append({'test': test.id(), 'duration_s': round(time.monotonic() - self.started, 3)})
+            super().stopTest(test)
+            self.stream.flush()
+
+    with log_path.open('w', encoding='utf8') as raw_log:
+        log = RedactedLog(raw_log) if redact_logs else raw_log
+        try:
+            with contextlib.redirect_stdout(log), contextlib.redirect_stderr(log):
+                result = unittest.TextTestRunner(stream=log, verbosity=2, resultclass=Result).run(suite)
+        finally:
+            if redact_logs:
+                log.finish()
+    return {
+        'tests_run': result.testsRun,
+        'durations': durations,
+        'failures': [{'test': t.id(), 'traceback': s} for t, s in result.failures],
+        'errors': [{'test': t.id(), 'traceback': s} for t, s in result.errors],
+        'skipped': [{'test': t.id(), 'reason': s} for t, s in result.skipped],
+        'failure_evidence': getattr(result, '_test_evidence_failures', []),
+    }
+
+
+def _worker_main(spec_path, out_path, evidence_dir, *, redact_logs=False):
+    os.chdir(ROOT)
+    sys.path.insert(0, str(ROOT / 'tests'))
+    spec = json.loads(Path(spec_path).read_text(encoding='utf8'))
+    suite = unittest.defaultTestLoader.loadTestsFromNames(spec['tests'])
+    log_path = Path(spec['log_path'])
+    data = _run_suite_in_process(suite, log_path, Path(evidence_dir), redact_logs=redact_logs)
+    data['module'] = spec['module']
+    Path(out_path).write_text(json.dumps(data, ensure_ascii=False), encoding='utf8')
+    return 0
+
+
+def _run_parallel_workers(grouped, output, log_path, evidence_dir, workers, *, redact_logs=False):
+    work_dir = output / '_workers'
+    work_dir.mkdir(parents=True, exist_ok=True)
+    env = dict(os.environ)
+    env.pop('PYTHONPATH', None)
+
+    def run_one(index, module, names):
+        spec_file = work_dir / f'{index:03d}-{module}.in.json'
+        out_file = work_dir / f'{index:03d}-{module}.out.json'
+        worker_log = work_dir / f'{index:03d}-{module}.log'
+        spec_file.write_text(
+            json.dumps({'module': module, 'tests': names, 'log_path': str(worker_log)}, ensure_ascii=False),
+            encoding='utf8',
+        )
+        cmd = [
+            sys.executable, '-X', 'utf8', str(Path(__file__).resolve()),
+            '--worker-input', str(spec_file),
+            '--worker-output', str(out_file),
+            '--worker-evidence', str(evidence_dir),
+        ]
+        if redact_logs:
+            cmd.append('--redact-logs')
+        proc = subprocess.run(cmd, cwd=ROOT, env=env, capture_output=True, text=True,
+                              encoding='utf8', errors='replace')
+        if proc.returncode != 0 or not out_file.is_file():
+            detail = (proc.stderr or proc.stdout or f'worker 退出码 {proc.returncode}').strip()
+            return index, {
+                'module': module,
+                'tests_run': 0,
+                'durations': [],
+                'failures': [],
+                'errors': [{'test': f'{module}.<worker>', 'traceback': detail}],
+                'skipped': [],
+                'failure_evidence': [],
+                'log_path': worker_log,
+            }
+        payload = json.loads(out_file.read_text(encoding='utf8'))
+        payload['log_path'] = worker_log
+        return index, payload
+
+    results = {}
+    with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as pool:
+        futures = [pool.submit(run_one, idx, mod, names) for idx, (mod, names) in enumerate(grouped)]
+        for future in concurrent.futures.as_completed(futures):
+            idx, payload = future.result()
+            results[idx] = payload
+
+    merged = {'tests_run': 0, 'durations': [], 'failures': [], 'errors': [], 'skipped': [], 'failure_evidence': []}
+    with log_path.open('w', encoding='utf8') as combined:
+        for idx in range(len(grouped)):
+            item = results[idx]
+            merged['tests_run'] += item['tests_run']
+            merged['durations'].extend(item['durations'])
+            merged['failures'].extend(item['failures'])
+            merged['errors'].extend(item['errors'])
+            merged['skipped'].extend(item['skipped'])
+            merged['failure_evidence'].extend(item['failure_evidence'])
+            worker_log = item['log_path']
+            if worker_log.is_file():
+                combined.write(f'=== module: {item["module"]} ===\n')
+                combined.write(worker_log.read_text(encoding='utf8', errors='replace'))
+                combined.write('\n')
+    return merged
 
 
 def collect_tests(quick=False, suite=None):
@@ -162,15 +283,27 @@ def smoke(output, redact_logs=False):
 
 def main(argv=None):
     parser=argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('--output',required=True)
+    parser.add_argument('--output',required=False)
     mode=parser.add_mutually_exclusive_group()
     mode.add_argument('--quick', action='store_true', help='fast 的别名，目标总耗时不超过 120 秒')
     mode.add_argument('--suite', choices=('fast','slow','full'), default='full', help='显式测试分层；默认 full')
+    parser.add_argument('--workers', type=int, default=1,
+                        help='按测试模块并发执行的工作进程数（1..16），默认 1；Windows 受进程安全扫描竞争影响建议保持 1')
     parser.add_argument('--slow-threshold', type=float, default=2, help='慢用例记录阈值，秒')
     parser.add_argument('--redact-logs', action='store_true', help='对回归日志与 CLI 冒烟日志脱敏')
     parser.add_argument('--allow-linux-windows-skips', action='store_true',
                         help='仅 Linux 全量矩阵允许已登记的 Windows 专用跳过')
+    parser.add_argument('--worker-input', help=argparse.SUPPRESS)
+    parser.add_argument('--worker-output', help=argparse.SUPPRESS)
+    parser.add_argument('--worker-evidence', help=argparse.SUPPRESS)
     args=parser.parse_args(argv)
+    if args.worker_input:
+        return _worker_main(args.worker_input, args.worker_output, args.worker_evidence,
+                            redact_logs=args.redact_logs)
+    if not args.output:
+        parser.error('--output 为必填参数')
+    if args.workers < 1 or args.workers > 16:
+        parser.error('--workers 必须在 1 到 16 之间')
     if not math.isfinite(args.slow_threshold) or args.slow_threshold<=0:
         parser.error('--slow-threshold 必须为正数')
     selected_mode='fast' if args.quick else args.suite
@@ -187,39 +320,31 @@ def main(argv=None):
     (output/'smoke.json').write_text(json.dumps(info,ensure_ascii=False,indent=2),encoding='utf8')
     print(json.dumps({'smoke':'passed','examples':len(info['examples']),'git':info['git_version'],
                       'node':info['node_version']},ensure_ascii=True),flush=True)
-    durations=[]
-    class Result(EvidenceResultMixin,unittest.TextTestResult):
-        evidence_output=output/'failure-evidence'
-        def startTest(self,test):
-            self.started=time.monotonic()
-            super().startTest(test)
-            self.stream.flush()
-        def stopTest(self,test):
-            durations.append({'test':test.id(),'duration_s':round(time.monotonic()-self.started,3)})
-            super().stopTest(test);self.stream.flush()
     suite=collect_tests(args.quick, suite=selected_mode)
+    ids=test_ids(suite)
     collected=suite.countTestCases()
-    (output/'test-ids.json').write_text(json.dumps(test_ids(suite),indent=2),encoding='utf8')
-    print(json.dumps({'suite':selected_mode,'tests_collected':collected}),flush=True)
+    (output/'test-ids.json').write_text(json.dumps(ids,indent=2),encoding='utf8')
+    print(json.dumps({'suite':selected_mode,'tests_collected':collected,'workers':args.workers}),flush=True)
     log_name='quick-regression.log' if args.quick else selected_mode+'-regression.log'
-    with (output/log_name).open('w',encoding='utf8') as raw_log:
-        log=RedactedLog(raw_log) if args.redact_logs else raw_log
-        try:
-            with contextlib.redirect_stdout(log),contextlib.redirect_stderr(log):
-                result=unittest.TextTestRunner(stream=log,verbosity=2,resultclass=Result).run(suite)
-        finally:
-            if args.redact_logs:log.finish()
-    info['failure_evidence']=getattr(result,'_test_evidence_failures',[])
+    evidence_dir=output/'failure-evidence'
+    if args.workers > 1:
+        run_data=_run_parallel_workers(
+            group_tests_by_module(ids), output, output/log_name, evidence_dir,
+            args.workers, redact_logs=args.redact_logs,
+        )
+    else:
+        run_data=_run_suite_in_process(suite, output/log_name, evidence_dir, redact_logs=args.redact_logs)
+    durations=run_data['durations']
+    info['failure_evidence']=run_data['failure_evidence']
     after=digest_files()
     (output/'source-after.json').write_text(json.dumps(after,ensure_ascii=False,indent=2),encoding='utf8')
     (output/'test-durations.json').write_text(json.dumps(durations,ensure_ascii=False,indent=2),encoding='utf8')
     slow=sorted((r for r in durations if r['duration_s']>=args.slow_threshold),key=lambda r:r['duration_s'],reverse=True)
     (output/'slow-tests.json').write_text(json.dumps({'threshold_s':args.slow_threshold,'tests':slow},indent=2),encoding='utf8')
-    proof={'mode':'quick' if args.quick else selected_mode, 'suite':selected_mode,
+    proof={'mode':'quick' if args.quick else selected_mode, 'suite':selected_mode, 'workers':args.workers,
            'tests_collected':collected, 'log_file':log_name, 'slow_test_count':len(slow),
-           'tests_run':result.testsRun,'failures':[{'test':t.id(),'traceback':s} for t,s in result.failures],
-           'errors':[{'test':t.id(),'traceback':s} for t,s in result.errors],
-           'skipped':[{'test':t.id(),'reason':s} for t,s in result.skipped],
+           'tests_run':run_data['tests_run'],'failures':run_data['failures'],
+           'errors':run_data['errors'],'skipped':run_data['skipped'],
            'source_unchanged':before==after,'duration_s':round(time.monotonic()-started,3),
            'runtime':info,'source_files':len(before),'no_model_calls_requested':True}
     redact_verification(proof)
@@ -242,12 +367,17 @@ def main(argv=None):
                          'test_backend_change_invalidates_profile_fingerprint',
                          'test_invalid_backend_and_shape_are_rejected_before_execution')
         }
-    unexpected_skips = [(test.id(), reason) for test, reason in result.skipped
-                        if (test.id(), reason) not in permitted_skips]
+    unexpected_skips = [(entry['test'], entry['reason']) for entry in run_data['skipped']
+                        if (entry['test'], entry['reason']) not in permitted_skips]
     if args.allow_linux_windows_skips:
         proof['unexpected_skips'] = [entry for entry in proof['skipped']
                                      if (entry['test'], entry['reason']) in unexpected_skips]
-    proof['exit_code']=0 if result.wasSuccessful() and before==after and not unexpected_skips else 1
+    all_passed = (
+        not run_data['failures']
+        and not run_data['errors']
+        and run_data['tests_run'] == collected
+    )
+    proof['exit_code']=0 if all_passed and before==after and not unexpected_skips else 1
     if selected_mode=='fast':
         proof['quick_budget_s']=120
         proof['quick_within_budget']=proof['duration_s']<=120
