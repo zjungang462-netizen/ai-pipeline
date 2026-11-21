@@ -5,7 +5,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from orchestrator.config import parse_config
+from orchestrator.config import ConfigError, parse_config
 from orchestrator.contracts import ErrorKind, Result, RunContext, StageStatus, PreflightReport
 from orchestrator.engine import Engine
 from orchestrator.adapters.base import Adapter
@@ -30,6 +30,28 @@ class TokenAdapter(Adapter):
         return Result(ok=True, exit_code=0, channel=self.channel,
                       text=f"{ctx.stage} 产出", report_files=[report],
                       usage={"tokens": self.tokens})
+
+
+class UnknownUsageAdapter(Adapter):
+    """模拟终态不报告 token 的 CLI 适配器（如豆包 2.37.2）。"""
+    channel = "cli_doubao"
+
+    def __init__(self, name="doubao"):
+        self.name = name
+        self.calls = 0
+
+    def preflight(self):
+        return PreflightReport(adapter=self.name, ok=True)
+
+    def run(self, prompt, workdir, ctx):
+        self.calls += 1
+        report_dir = Path(ctx.runs_dir) / "reports"
+        report_dir.mkdir(parents=True, exist_ok=True)
+        report = report_dir / f"{ctx.stage}_report.md"
+        report.write_text(f"{ctx.stage} #{self.calls}", encoding="utf-8")
+        return Result(ok=True, exit_code=0, channel=self.channel,
+                      text=f"{ctx.stage} #{self.calls}", report_files=[report],
+                      usage={"usage_unknown": True})
 
 
 class TestBudget(unittest.TestCase):
@@ -65,6 +87,68 @@ class TestBudget(unittest.TestCase):
             res = eng.run()
             self.assertEqual(res["requirements"], StageStatus.DONE.value)
             self.assertEqual(eng.state.usage_total["tokens"], 100)
+
+    def test_max_model_calls_blocks_before_third_call_without_counting_test_stage(self):
+        import sys
+        with tempfile.TemporaryDirectory() as d:
+            raw = {
+                "task_workdir": "ws", "state_dir": ".state",
+                "run_budget": {"unlimited_tokens": True, "max_duration_s": 120, "max_model_calls": 2},
+                "adapters": {"api": {"type": "fake"}},
+                "stages": [
+                    {"name": "s1", "adapter": "api", "prompt": "a", "kind": "report"},
+                    {"name": "t1", "kind": "test", "test_cmd": [sys.executable, "-c", "print('ok')"]},
+                    {"name": "s2", "adapter": "api", "prompt": "b", "kind": "report"},
+                    {"name": "s3", "adapter": "api", "prompt": "c", "kind": "report"},
+                ],
+            }
+            cfg = parse_config(raw, base_dir=Path(d))
+            adapter = TokenAdapter(tokens=10)
+            eng = Engine(cfg, {"api": adapter}, run_id="b-calls", task="t")
+            res = eng.run()
+            self.assertEqual(res["s1"], StageStatus.DONE.value)
+            self.assertEqual(res["t1"], StageStatus.DONE.value)
+            self.assertEqual(res["s2"], StageStatus.DONE.value)
+            self.assertEqual(res["s3"], StageStatus.FAILED.value)
+            self.assertIn("模型调用次数", eng.state.stage("s3").error)
+            self.assertEqual(eng.state.usage_total["model_calls"], 2)
+
+    def test_max_unknown_calls_allows_bounded_calls_then_blocks_before_exceeding(self):
+        with tempfile.TemporaryDirectory() as d:
+            raw = {
+                "task_workdir": "ws", "state_dir": ".state",
+                "run_budget": {"unlimited_tokens": True, "max_duration_s": 120, "max_unknown_calls": 2},
+                "adapters": {"doubao": {"type": "fake"}},
+                "stages": [
+                    {"name": "s1", "adapter": "doubao", "prompt": "a", "kind": "report"},
+                    {"name": "s2", "adapter": "doubao", "prompt": "b", "kind": "report"},
+                    {"name": "s3", "adapter": "doubao", "prompt": "c", "kind": "report"},
+                ],
+            }
+            cfg = parse_config(raw, base_dir=Path(d))
+            adapter = UnknownUsageAdapter()
+            eng = Engine(cfg, {"doubao": adapter}, run_id="b-unknown", task="t")
+            res = eng.run()
+            self.assertEqual(res["s1"], StageStatus.DONE.value)
+            self.assertEqual(res["s2"], StageStatus.DONE.value)
+            self.assertEqual(res["s3"], StageStatus.FAILED.value)
+            self.assertIn("未知用量调用次数", eng.state.stage("s3").error)
+            self.assertEqual(adapter.calls, 2)
+            self.assertEqual(eng.state.usage_total["unknown_calls"], 2)
+
+    def test_invalid_call_budgets_are_rejected_by_config(self):
+        with tempfile.TemporaryDirectory() as d:
+            for field in ("max_model_calls", "max_unknown_calls"):
+                for bad in (0, -1, 1.5, True, "2"):
+                    with self.subTest(field=field, bad=bad):
+                        raw = {
+                            "task_workdir": "ws", "state_dir": ".state",
+                            "run_budget": {field: bad},
+                            "adapters": {"api": {"type": "fake"}},
+                            "stages": [{"name": "s1", "adapter": "api", "prompt": "a", "kind": "report"}],
+                        }
+                        with self.assertRaises(ConfigError):
+                            parse_config(raw, base_dir=Path(d))
 
 
 if __name__ == "__main__":

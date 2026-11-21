@@ -59,6 +59,8 @@ class RunBudget:
     max_tokens: int | None = config_field('运行累计 token 上限；unlimited_tokens=true 时不设置', default=None, numeric=True, integer=True, minimum=0)
     max_duration_s: int | None = config_field('运行累计秒数上限；无人值守时必须为正数', default=None, numeric=True, minimum=0)
     unlimited_tokens: bool = config_field('显式取消运行/阶段/输出 token 限额，保留墙钟与轮次约束；模型服务仍可能有自身上限', default=False)
+    max_model_calls: int | None = config_field('运行累计模型调用次数上限；可选正整数，适用于无 token 上报的 CLI 预算兜底', default=None, numeric=True, integer=True, minimum=1)
+    max_unknown_calls: int | None = config_field('运行累计未知 token 用量调用次数上限；可选正整数', default=None, numeric=True, integer=True, minimum=1)
 
 
 @dataclass
@@ -341,13 +343,15 @@ def parse_config(raw: dict[str, Any], base_dir: Path | None = None) -> Config:
     budget_raw = raw.get("run_budget", {})
     _require(isinstance(budget_raw, dict), "[run_budget] 必须是表")
     _reject_unknown(budget_raw, _BUDGET_KEYS, "[run_budget]")
-    for key in ("max_tokens", "max_duration_s"):
+    for key in ("max_tokens", "max_duration_s", "max_model_calls", "max_unknown_calls"):
         if budget_raw.get(key) is not None:
             _schema_number(budget_raw[key], RunBudget, key, f"run_budget.{key}")
     budget = RunBudget(
         max_tokens=budget_raw.get("max_tokens"),
         max_duration_s=budget_raw.get("max_duration_s"),
         unlimited_tokens=budget_raw.get('unlimited_tokens', False),
+        max_model_calls=budget_raw.get("max_model_calls"),
+        max_unknown_calls=budget_raw.get("max_unknown_calls"),
     )
     _require(type(budget.unlimited_tokens) is bool, 'run_budget.unlimited_tokens 必须是布尔值')
     if budget.unlimited_tokens:

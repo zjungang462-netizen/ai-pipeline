@@ -25,6 +25,9 @@ class BudgetPolicy:
         tokens = result.usage.get('known_tokens',0) if unknown else result.usage.get('tokens') or 0
         self.state.usage_total["tokens"] += tokens
         self.state.usage_total["duration_s"] += result.usage.get("duration_s") or 0.0
+        is_model_call = bool(result.channel)
+        if is_model_call:
+            self.state.usage_total["model_calls"] = self.state.usage_total.get("model_calls", 0) + 1
         credits=result.usage.get('qoder_credits')
         if credits is not None:
             import math
@@ -35,9 +38,13 @@ class BudgetPolicy:
             used = self.state.stage_usage.setdefault(stage, {"tokens": 0, "duration_s": 0.0})
             used['tokens'] += tokens
             used['duration_s'] += result.usage.get('duration_s') or 0
+            if is_model_call:
+                used['model_calls'] = used.get('model_calls', 0) + 1
             if credits is not None:used['qoder_credits']=used.get('qoder_credits',0)+credits
             if result.usage.get('usage_unknown'):
                 used['unknown_calls']=used.get('unknown_calls',0)+1
+                if not call_id:
+                    self.state.usage_total['unknown_calls'] = self.state.usage_total.get('unknown_calls', 0) + 1
             for field in ('backend_model','backend_endpoint'):
                 if isinstance(result.usage.get(field),str):used[field]=result.usage[field]
         self.state.save()
@@ -60,11 +67,24 @@ class BudgetPolicy:
         if spec.max_duration_s is not None and duration > spec.max_duration_s:
             raise BudgetExceeded(
                 f"阶段 {spec.name} 时长超限: {duration:.0f}s > {spec.max_duration_s}s")
+        if b.max_model_calls is not None and used.get("model_calls", 0) > b.max_model_calls:
+            raise BudgetExceeded(
+                f"run 模型调用次数超限: {used.get('model_calls', 0)} > {b.max_model_calls}")
+        if b.max_unknown_calls is not None and used.get("unknown_calls", 0) > b.max_unknown_calls:
+            raise BudgetExceeded(
+                f"run 未知用量调用次数超限: {used.get('unknown_calls', 0)} > {b.max_unknown_calls}")
 
     def before_call(self, spec: StageSpec, prompt: str = "") -> float:
         estimate = max(1, len(prompt) // 3) if spec.kind != "test" else 0
         run = self.state.usage_total
         stage = self.state.stage_usage.get(spec.name, {})
+        if spec.kind != "test":
+            if self.limits.max_model_calls is not None and run.get("model_calls", 0) >= self.limits.max_model_calls:
+                raise BudgetExceeded(
+                    f"run 模型调用次数预算耗尽，调用前拦截: {run.get('model_calls', 0)} >= {self.limits.max_model_calls}")
+            if self.limits.max_unknown_calls is not None and run.get("unknown_calls", 0) >= self.limits.max_unknown_calls:
+                raise BudgetExceeded(
+                    f"run 未知用量调用次数预算耗尽，调用前拦截: {run.get('unknown_calls', 0)} >= {self.limits.max_unknown_calls}")
         for label, used, max_tokens, max_duration in (
                 ("run", run, self.limits.max_tokens, self.limits.max_duration_s),
                 (f"阶段 {spec.name}", stage, spec.max_tokens, spec.max_duration_s)):

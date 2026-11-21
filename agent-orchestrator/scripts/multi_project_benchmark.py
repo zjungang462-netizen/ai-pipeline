@@ -72,7 +72,8 @@ for existing, requested, cap in [([], (2, 2), 1), ([(4, 2)], (1, 3), 1), ([], (1
 }
 
 
-def run_case(root, name, adapters, roles, stage_timeout_s=120, max_tokens=50000):
+def run_case(root, name, adapters, roles, stage_timeout_s=120, max_tokens=50000, *,
+             unlimited_tokens=False, max_model_calls=None, max_unknown_calls=None):
     files, task, assertions = CASES[name]
     case = root / name
     workspace = case / 'workspace'
@@ -108,8 +109,17 @@ def run_case(root, name, adapters, roles, stage_timeout_s=120, max_tokens=50000)
         if stage['kind'] != 'test':
             timeout = stage_timeout_s if stage['kind'] == 'code' else 120
             stage.update(adapter=roles[stage['kind']], timeout_s=timeout, max_attempts=1, context_files=list(files))
+    run_budget = dict(max_duration_s=max(360, stage_timeout_s + 240))
+    if unlimited_tokens:
+        run_budget['unlimited_tokens'] = True
+    else:
+        run_budget['max_tokens'] = max_tokens
+    if max_model_calls is not None:
+        run_budget['max_model_calls'] = max_model_calls
+    if max_unknown_calls is not None:
+        run_budget['max_unknown_calls'] = max_unknown_calls
     cfg = parse_config(dict(task_workdir=str(workspace), state_dir=str(case / 'state'),
-                            run_budget=dict(max_tokens=max_tokens, max_duration_s=max(360, stage_timeout_s + 240)),
+                            run_budget=run_budget,
                             autonomy=dict(enabled=True, allowed_files=list(files), repair_batch_size=2,
                                           max_repair_rounds=2, output_tokens=4096),
                             adapters=adapters, stages=stages), base_dir=case)
@@ -141,9 +151,17 @@ def main():
     parser.add_argument('--case', action='append', choices=tuple(CASES), help='只运行指定样例，可重复')
     parser.add_argument('--stage-timeout', type=int, default=120, help='编码阶段单次调用秒数，默认 120')
     parser.add_argument('--max-tokens', type=int, default=50000, help='单次样例的运行 token 上限，默认 50000')
+    parser.add_argument('--unlimited-tokens', action='store_true',
+                        help='关闭 token 上限，改由时长与调用次数预算约束（适用于豆包等无 token 上报的 CLI）')
+    parser.add_argument('--max-model-calls', type=int, help='单次样例的模型调用次数上限')
+    parser.add_argument('--max-unknown-calls', type=int, help='单次样例的未知 token 用量调用次数上限')
     args = parser.parse_args()
     if args.stage_timeout < 1 or args.max_tokens < 1:
         parser.error('--stage-timeout 和 --max-tokens 必须为正数')
+    if args.max_model_calls is not None and args.max_model_calls < 1:
+        parser.error('--max-model-calls 必须为正数')
+    if args.max_unknown_calls is not None and args.max_unknown_calls < 1:
+        parser.error('--max-unknown-calls 必须为正数')
     config = load_config(args.live_config)
     source = next((item for item in config.adapters.values() if item.type == 'openai_compat'), None)
     if source is None:
@@ -169,7 +187,8 @@ def main():
     for name in (tuple(dict.fromkeys(args.case)) if args.case else tuple(CASES)):
         try:
             row = run_case(output, name, adapters, roles, stage_timeout_s=args.stage_timeout,
-                           max_tokens=args.max_tokens)
+                           max_tokens=args.max_tokens, unlimited_tokens=args.unlimited_tokens,
+                           max_model_calls=args.max_model_calls, max_unknown_calls=args.max_unknown_calls)
         except (OSError, ValueError, RuntimeError, subprocess.SubprocessError) as error:
             row = dict(project=name, completed=False, error_type=type(error).__name__)
         rows.append(row)

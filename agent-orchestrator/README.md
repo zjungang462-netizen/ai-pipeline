@@ -124,6 +124,8 @@ Claude Code 2.1.325 / 2.1.328 可作为文件工具代理接入你现有的 Deep
 | run_budget | `max_tokens` | `int | None` | `null` | >= 0；运行累计 token 上限；unlimited_tokens=true 时不设置 |
 | run_budget | `max_duration_s` | `int | None` | `null` | >= 0；运行累计秒数上限；无人值守时必须为正数 |
 | run_budget | `unlimited_tokens` | `bool` | `false` | 显式取消运行/阶段/输出 token 限额，保留墙钟与轮次约束；模型服务仍可能有自身上限 |
+| run_budget | `max_model_calls` | `int | None` | `null` | >= 1；运行累计模型调用次数上限；可选正整数，适用于无 token 上报的 CLI 预算兜底 |
+| run_budget | `max_unknown_calls` | `int | None` | `null` | >= 1；运行累计未知 token 用量调用次数上限；可选正整数 |
 | autonomy | `enabled` | `bool` | `false` | 显式开启无人值守 |
 | autonomy | `auto_approve` | `list[str]` | `[]` | 预授权自动批准的阶段名列表 |
 | autonomy | `allowed_files` | `list[str]` | `[]` | 允许修改的相对文件路径白名单 |
