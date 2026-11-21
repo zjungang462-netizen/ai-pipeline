@@ -10,6 +10,7 @@ import re
 
 from . import artifacts
 from .contracts import StageSpec
+from .lessons import load_approved_lessons_text
 from .safety import WriteRootViolation, relative_target
 
 _UPSTREAM_REPORT_LIMIT = 20000
@@ -160,6 +161,10 @@ class PromptContextMixin:
         if spec.context_files and (spec.kind == 'code' or cli):
             label = '当前声明文件原文（只读上下文）' if cli else '当前文件原文（仅用于构造精确补丁）'
             rendered += '\n\n' + label + '：\n' + self._source_context(spec)
+        if spec.kind in ('code', 'report'):
+            lessons_text = load_approved_lessons_text(self.config.state_dir)
+            if lessons_text:
+                rendered += '\n\n' + lessons_text
         if self.config.autonomy.enabled:
             if spec.kind == 'code':
                 rendered += (f'\n\n执行约束：本轮最多修改 {self.config.autonomy.repair_batch_size} 个文件。'

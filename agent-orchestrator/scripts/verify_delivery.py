@@ -33,7 +33,7 @@ QUICK_TESTS = ('test_stage1.TestConfig', 'test_stage1.TestState',
                'test_model_settings', 'test_qoder_1189','test_claude_cli',
                'test_state_backup', 'test_state_migration', 'test_policy_tuning', 'test_cli_current', 'test_docker_base',
                'test_grok_container', 'test_doubao_container', 'test_streaming_discussion', 'test_notifications',
-               'test_deploy', 'test_remote_worker', 'test_cli_extensions',
+               'test_deploy', 'test_remote_worker', 'test_cli_extensions', 'test_self_optimization',
                'test_failure_evidence.FailureEvidence.test_unreadable_directory_is_recorded_and_other_roots_continue')
 
 

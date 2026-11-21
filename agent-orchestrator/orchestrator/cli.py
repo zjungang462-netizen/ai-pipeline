@@ -342,6 +342,51 @@ def cmd_worker_serve(args) -> int:
     return 0
 
 
+def cmd_lessons_propose(args) -> int:
+    from .lessons import propose_lessons
+    from .state import atomic_write_json
+
+    proposal = propose_lessons(
+        Path(args.state_dir),
+        min_occurrences=args.min_occurrences,
+        max_items=args.max_items,
+    )
+    if args.output:
+        out_path = Path(args.output).resolve()
+        state_root = Path(args.state_dir).resolve()
+        if out_path.is_relative_to(state_root):
+            raise ValueError('经验提案输出文件必须位于状态目录之外')
+        atomic_write_json(out_path, proposal)
+    print(json.dumps(proposal, ensure_ascii=False, indent=2))
+    return 0
+
+
+def cmd_lessons_approve(args) -> int:
+    from .lessons import approve_lessons
+
+    proposal_path = Path(args.proposal)
+    proposal = json.loads(proposal_path.read_text(encoding='utf-8'))
+    target = approve_lessons(Path(args.state_dir), proposal, max_items=args.max_items)
+    print(json.dumps({
+        'approved_file': str(target),
+        'items': len(proposal.get('items') or []),
+        'proposal_hash': proposal.get('proposal_hash'),
+    }, ensure_ascii=False, indent=2))
+    return 0
+
+
+def cmd_route_recommend(args) -> int:
+    from .model_router import recommend_adapters
+
+    report = recommend_adapters(
+        Path(args.state_dir),
+        stage_kind=args.stage_kind,
+        min_runs=args.min_runs,
+    )
+    print(json.dumps(report, ensure_ascii=False, indent=2))
+    return 0
+
+
 def main(argv=None) -> int:
     p = argparse.ArgumentParser(prog="orchestrator", description="多智能体开发流水线编排器")
     from ._version import __version__
@@ -447,6 +492,25 @@ def main(argv=None) -> int:
     sp.add_argument("--config")
     sp.add_argument("--last", type=int, default=20)
     sp.set_defaults(func=cmd_tune)
+
+    sp = sub.add_parser("lessons-propose", help="扫描历史审查/测试失败，生成待审批的高频经验提案")
+    sp.add_argument("--state-dir", required=True)
+    sp.add_argument("--min-occurrences", type=int, default=2)
+    sp.add_argument("--max-items", type=int, default=12)
+    sp.add_argument("--output", help="可选：将提案 JSON 写入状态目录之外的文件")
+    sp.set_defaults(func=cmd_lessons_propose)
+
+    sp = sub.add_parser("lessons-approve", help="校验提案哈希并批准写入 approved_lessons.json")
+    sp.add_argument("--state-dir", required=True)
+    sp.add_argument("--proposal", required=True, help="lessons-propose 生成的提案 JSON 路径")
+    sp.add_argument("--max-items", type=int, default=12)
+    sp.set_defaults(func=cmd_lessons_approve)
+
+    sp = sub.add_parser("route-recommend", help="基于终态 metrics.json 按阶段类型推荐模型与工具路由")
+    sp.add_argument("--state-dir", required=True)
+    sp.add_argument("--stage-kind", choices=("code", "report", "review"))
+    sp.add_argument("--min-runs", type=int, default=2)
+    sp.set_defaults(func=cmd_route_recommend)
 
     sp = sub.add_parser("approve-tune", help="批准提案，只写入新的配置副本")
     sp.add_argument("--state-dir", required=True)
