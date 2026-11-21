@@ -169,7 +169,7 @@ class PromptContextMixin:
             if spec.kind == 'code':
                 rendered += (f'\n\n执行约束：本轮最多修改 {self.config.autonomy.repair_batch_size} 个文件。'
                              f'只可修改 {self.config.autonomy.allowed_files}；不要修改测试或其他文件。')
-                rendered += ('直接修改当前任务工作区的允许文件，必须产生真实文件变更；最后简述实际修改。'
+                rendered += ('直接用文件读写/编辑工具修改当前任务工作区的允许文件（不要调用 shell/终端命令，测试由编排器统一执行），必须产生真实文件变更；最后简述实际修改。'
                              if cli else '优先修复失败证据中最靠前的一类问题，输出 # patch: 路径和 edits JSON；'
                              '目标原文必须唯一匹配，不要输出解释。')
             elif spec.kind == 'review':
