@@ -7,7 +7,10 @@ function renderBudgetAlerts(run){
  if(alerts.length)box.textContent+='。请核对当前进度；提示不会增加预算。';show(box,alerts.length>0);
  show($('token-progress'),!!run.budget?.max_tokens);
  const modelBox=$('active-models');
- modelBox.textContent=(run.models||[]).map(m=>`${m.name}: ${m.model||m.effective_model||'工具默认'}${m.reasoning_effort?' · 思考 '+m.reasoning_effort:''}${m.thinking?' · thinking '+m.thinking:''}${m.review_json_mode?' · JSON审查':''}${m.observed_models?.length?' · 实报模型 '+m.observed_models.join(', '):''}${m.observed_backend_endpoints?.length?' · 实报连接 '+m.observed_backend_endpoints.join(', '):m.backend_endpoint?' · 连接配置 '+m.backend_endpoint:''}`).join('；')+(run.budget?.unlimited_tokens?'；本次不限制 token，仍受工具上限、时长和轮次约束。':'')+(run.usage?.qoder_credits!=null?`；Qoder 已报告 ${run.usage.qoder_credits} credits；token 计数不完整，不能按免费调用理解。`:'');
+ const callLimits=[];
+ if(run.budget?.max_model_calls)callLimits.push(`模型调用上限 ${num(run.budget.max_model_calls)} 次`);
+ if(run.budget?.max_unknown_calls)callLimits.push(`未知用量上限 ${num(run.budget.max_unknown_calls)} 次`);
+ modelBox.textContent=(run.models||[]).map(m=>`${m.name}: ${m.model||m.effective_model||'工具默认'}${m.reasoning_effort?' · 思考 '+m.reasoning_effort:''}${m.thinking?' · thinking '+m.thinking:''}${m.review_json_mode?' · JSON审查':''}${m.observed_models?.length?' · 实报模型 '+m.observed_models.join(', '):''}${m.observed_backend_endpoints?.length?' · 实报连接 '+m.observed_backend_endpoints.join(', '):m.backend_endpoint?' · 连接配置 '+m.backend_endpoint:''}`).join('；')+(run.budget?.unlimited_tokens?'；本次不限制 token，仍受工具上限、时长和轮次约束。':'')+(callLimits.length?'；'+callLimits.join('，')+'。':'')+(run.usage?.qoder_credits!=null?`；Qoder 已报告 ${run.usage.qoder_credits} credits；token 计数不完整，不能按免费调用理解。`:'');
  show(modelBox,!!modelBox.textContent);
 }
 

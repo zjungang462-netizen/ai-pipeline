@@ -21,9 +21,11 @@ class Element{
    throw Error('unexpected '+url);},toast:message=>messages.push(message),select(){},renderTaskScope(){}});
  vm.runInContext(`const $=id=>document.getElementById(id);function el(tag,cls,text){const n=document.createElement(tag);if(text!==undefined)n.textContent=text;return n;}function show(){};const num=n=>String(n);const labels={done:'完成',failed:'失败'};let parent=null,taskProjectsFresh=true;const projects=[{id:'p',config_hash:'hash',models:[{name:'api',type:'openai_compat',model:'fixture-model',supports_effort:true,supports_thinking:true}]}],runs=[{id:'a',run_id:'a'},{id:'b',run_id:'b'}];`,context);
  vm.runInContext(fs.readFileSync(path.join(dir,'insights.js'),'utf8'),context);
- vm.runInContext(`renderBudgetAlerts({budget_alerts:[{dimension:'tokens',ratio:.85}]})`,context);
+ vm.runInContext(`renderBudgetAlerts({budget_alerts:[{dimension:'tokens',ratio:.85}],budget:{unlimited_tokens:true,max_model_calls:6,max_unknown_calls:3}})`,context);
  assert.ok(nodes.get('budget-alert').textContent.includes('85%'));
  assert.ok(nodes.get('budget-alert').textContent.includes('不会增加预算'));
+ assert.ok(nodes.get('active-models').textContent.includes('模型调用上限 6 次'));
+ assert.ok(nodes.get('active-models').textContent.includes('未知用量上限 3 次'));
  const pending=vm.runInContext('loadTaskTemplates(false)',context);
  vm.runInContext('parent={id:"derive"}',context);
  resolveTemplates({templates:[{id:'t',name:'stale',usable:true}]});await pending;
@@ -71,5 +73,19 @@ class Element{
  streams[1].listeners.update({data:'broken JSON'});
  streams[1].listeners.update({data:JSON.stringify({cursor:5,kind:'message',payload:{}})});
  assert.equal(vm.runInContext('events.size',replay),1);
+ // Streaming discussion events collapse into a single live bubble and yield to final archived message.
+ const collapseSrc=app.slice(app.indexOf('function collapseStreamingDiscussion('),app.indexOf('function renderFeed('));
+ const streamCtx=vm.createContext({Map,Set});
+ vm.runInContext(collapseSrc,streamCtx);
+ const collapsed=vm.runInContext(`collapseStreamingDiscussion([
+  {cursor:1,created:10,kind:'discussion_turn_start',payload:{thread_id:'t1',role:'developer'}},
+  {cursor:2,created:11,kind:'discussion_token',payload:{thread_id:'t1',role:'developer',delta:'建议'}},
+  {cursor:3,created:12,kind:'discussion_token',payload:{thread_id:'t1',role:'developer',delta:'修复'}},
+  {cursor:4,created:13,kind:'discussion_turn_end',payload:{thread_id:'t1',role:'developer',status:'done'}}
+ ])`,streamCtx);
+ assert.equal(collapsed.length,1);
+ assert.equal(collapsed[0].kind,'discussion_stream');
+ assert.equal(collapsed[0].payload.text,'建议修复');
+ assert.equal(collapsed[0].payload.finished,true);
  console.log('INSIGHTS_UI_OK');
 })().catch(error=>{console.error(error);process.exitCode=1;});
