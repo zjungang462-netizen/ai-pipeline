@@ -1,3 +1,10 @@
+# 0.5.7：容器隔离底座、调用次数预算、核心模块解耦与扩展主入口
+
+- **容器适配器体系化与安全加固**：新增 `cli_grok` 与 `cli_doubao` 2.37.2 容器适配器，抽离 `docker_base.py`、`workspace_sync.py` 与多版本 `verified_runtimes.py` 三层公共底座；豆包编码阶段声明可编辑文件时使用隔离临时工作区副本并经宿主机基线核验后原子回写；`doctor` 补充容器二进制 SHA-256 与豆包低预算告警静态核验。
+- **无用量 CLI 预算策略与基准扩展**：`run_budget` 新增 `max_model_calls` 与 `max_unknown_calls` 调用次数上限并同步至 `metrics.json`、`reporting` 与 `README.md` 配置表；`multi_project_benchmark.py` 新增分账退款样例 `ledger` 与 `--unlimited-tokens` / `--max-model-calls` / `--max-unknown-calls` 参数。
+- **核心模块解耦与验收加速**：拆分全仓四个最大模块（`collaboration/service.py` → `run_listing.py`、`state.py` → `state_io.py`、`engine.py` → `deferred_recovery.py`、`review_policy.py` → `prompt_context.py`）；`artifacts.py` 减少高频 `git` 子进程调用；`verify_delivery.py` 增加可选 `--workers` 分片并发执行。
+- **单人自用长期扩展接入主入口**：新增逐 token 实时会诊（`openai_compat` SSE 解析 + `discussion_stream.py` + `PIPELINE_STREAM_DISCUSSION=1`）、契约化状态迁移注册表（`state-migrate`，不臆造未验证 `v1→v2`）、脱敏状态通知 Webhook（飞书/钉钉/Slack/通用 JSON，`PIPELINE_WEBHOOK_URL`）、带审批哈希绑定的受控部署执行器（`deploy`）与双向 HMAC 防重放远程 Worker 协议（`worker-serve`）。
+
 # 0.5.6：当前 CLI 真机文件工具与调用前版本门禁
 
 - 增加 Codex 0.170.0、反重力 1.5.12 / 1.5.13、Qwen 0.26.0 真实读写夹具、来源指纹与严格终态回归；未知版本在模型调用前停止。
