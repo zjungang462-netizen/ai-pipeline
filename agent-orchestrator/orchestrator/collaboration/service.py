@@ -17,6 +17,7 @@ from .storage import Store, Conflict, identifier
 from .projection import project, directory, lifecycle, artifact_list, read_json, stage_target, SummaryCache
 from .execution_scope import execution_scope
 from .read_cache import ReadCache, file_stamp
+from . import run_listing
 
 
 class Service:
@@ -188,333 +189,31 @@ class Service:
                 data['capabilities'][action] = False
         return self.redact(data)
 
+    _CURSOR_VERSION = run_listing.CURSOR_VERSION
+    _CURSOR_MAX_LEN = run_listing.CURSOR_MAX_LEN
+    _STATUS_GROUPS = run_listing.STATUS_GROUPS
+
     def list_runs(self, limit=100, before=None):
         """列表只读摘要；产物、会诊和长记录在进入任务房间后加载。"""
-        result = []
-        with self.store.session():
-            for run in self.store.runs(limit, before):
-                task, status = self._summary_cache.read(run)
-                result.append({'id': run['id'], 'run_id': run['run_id'],
-                               'project_id': run['project_id'], 'created': run['created'],
-                               'task': task,
-                               'lifecycle': status, 'managed': bool(run['managed'])})
-        return self.redact(result)
-
-    # ── 游标格式：URL-safe Base64(JSON {"v":1,"ch":"<created.hex()>","id":"<id>","bh":"<before.hex()|null>",
-    #                                       "qh":"<q_normalized|null>","pi":"<project_id|null>","st":"<status>"})
-    _CURSOR_VERSION = 3
-    _CURSOR_MAX_LEN = 8192  # 容纳 200 个 Unicode 字符编码后的合法查询
-
-    # 合法 status 值及其对应的底层 lifecycle 集合
-    _STATUS_GROUPS: dict[str, set[str] | None] = {
-        'all': None,
-        'running': {'pending', 'running', 'recovering'},
-        'paused': {'paused'},
-        'waiting_approval': {'waiting_approval'},
-        'waiting_external': {'waiting_external'},
-        'waiting_owner': {'waiting_owner'},
-        'done': {'done'},
-        'failed': {'failed', 'timeout', 'cancelled'},
-    }
+        return run_listing.list_runs(self.store, self._summary_cache, self.redact, limit=limit, before=before)
 
     def _encode_cursor(self, created: float, run_id: str, before: float | None,
                        q: str = '', project_id: str = '', status: str = 'all',
                        sort: str = 'newest') -> str:
-        payload = json.dumps({
-            'v': self._CURSOR_VERSION,
-            'ch': float(created).hex(),
-            'id': run_id,
-            'bh': float(before).hex() if before is not None else None,
-            'qh': q if q else None,
-            'pi': project_id if project_id else None,
-            'st': status,
-            'sort': sort,
-        }, separators=(',', ':')).encode('utf-8')
-        return base64.urlsafe_b64encode(payload).decode('ascii')
+        return run_listing.encode_cursor(created, run_id, before, q, project_id, status, sort)
 
     def _decode_cursor(self, cursor: str) -> tuple[float, str, float | None, str, str, str, str]:
-        """游标绑定筛选和时间方向；旧版本保持最新在前。"""
-        if not isinstance(cursor, str) or not 1 <= len(cursor) <= self._CURSOR_MAX_LEN:
-            raise ValueError('游标格式无效')
-        try:
-            payload = base64.b64decode(cursor + '=' * (-len(cursor) % 4), altchars=b'-_', validate=True)
-            obj = json.loads(payload.decode('utf-8'))
-        except (ValueError, UnicodeError):
-            raise ValueError('游标格式无效')
-        if not isinstance(obj, dict) or type(obj.get('v')) is not int:
-            raise ValueError('游标版本不支持')
-        # 兼容旧版 v=1 游标（无筛选字段），视为无筛选
-        if obj['v'] == 1:
-            if set(obj) != {'v', 'ch', 'id', 'bh'}:
-                raise ValueError('游标版本不支持')
-            try:
-                if not isinstance(obj['ch'], str) or not isinstance(obj['id'], str):
-                    raise ValueError('游标字段类型错误')
-                created = float.fromhex(obj['ch'])
-                run_id = obj['id']
-                bh = obj.get('bh')
-                if bh is not None and not isinstance(bh, str):
-                    raise ValueError('游标边界类型错误')
-                before = float.fromhex(bh) if bh is not None else None
-            except (KeyError, ValueError, TypeError, OverflowError):
-                raise ValueError('游标字段无效')
-            if not isinstance(run_id, str) or not run_id:
-                raise ValueError('游标 id 无效')
-            import math
-            if not math.isfinite(created) or (before is not None and not math.isfinite(before)):
-                raise ValueError('游标时间戳无效')
-            return created, run_id, before, '', '', 'all', 'newest'
-        elif obj['v'] in (2, self._CURSOR_VERSION):
-            fields = {'v', 'ch', 'id', 'bh', 'qh', 'pi', 'st'}
-            if obj['v'] == self._CURSOR_VERSION:
-                fields.add('sort')
-            if set(obj) != fields:
-                raise ValueError('游标版本不支持')
-            try:
-                if not isinstance(obj['ch'], str) or not isinstance(obj['id'], str):
-                    raise ValueError('游标字段类型错误')
-                created = float.fromhex(obj['ch'])
-                run_id = obj['id']
-                bh = obj.get('bh')
-                if bh is not None and not isinstance(bh, str):
-                    raise ValueError('游标边界类型错误')
-                before = float.fromhex(bh) if bh is not None else None
-                qh = obj.get('qh')
-                if qh is not None and (not isinstance(qh,str) or len(qh)>600):
-                    raise ValueError('游标关键词类型或长度错误')
-                q = qh if isinstance(qh, str) else ''
-                pi = obj.get('pi')
-                if pi is not None and (not isinstance(pi,str) or len(pi)>512):
-                    raise ValueError('游标项目类型或长度错误')
-                project_id = pi if isinstance(pi, str) else ''
-                st = obj.get('st', 'all')
-                if not isinstance(st, str) or st not in self._STATUS_GROUPS:
-                    raise ValueError('游标状态无效')
-                sort = obj.get('sort', 'newest')
-                if not isinstance(sort, str) or sort not in ('newest', 'oldest'):
-                    raise ValueError('游标排序无效')
-            except (KeyError, ValueError, TypeError, OverflowError):
-                raise ValueError('游标字段无效')
-            if not isinstance(run_id, str) or not run_id:
-                raise ValueError('游标 id 无效')
-            import math
-            if not math.isfinite(created) or (before is not None and not math.isfinite(before)):
-                raise ValueError('游标时间戳无效')
-            return created, run_id, before, q, project_id, st, sort
-        else:
-            raise ValueError('游标版本不支持')
+        return run_listing.decode_cursor(cursor)
 
     def list_runs_page(self, limit: int = 50, before: float | None = None, cursor: str | None = None,
                        q: str | None = None, project_id: str | None = None,
                        status: str | None = None, sort: str | None = None):
         """稳定游标分页，支持全历史筛选；返回 {runs, has_more, next_cursor}。"""
-        import math
-
-        # None 表示遗漏；显式空关键词、空项目不能被游标中的旧条件覆盖。
-        supplied_q, supplied_project, supplied_status = q is not None, project_id is not None, status is not None
-        q = '' if q is None else q
-        project_id = '' if project_id is None else project_id
-        status = 'all' if status is None else status
-        supplied_sort = sort is not None
-        sort = 'newest' if sort is None else sort
-        if not isinstance(sort, str) or sort not in ('newest', 'oldest'):
-            raise ValueError('sort 必须为 newest/oldest 之一')
-
-        # 验证筛选参数
-        if not isinstance(q, str):
-            raise ValueError('q 必须为字符串')
-        q_norm = q.strip().casefold()  # 规范化关键词
-        if len(q) > 200:
-            raise ValueError('q 最多 200 字符')
-        if not isinstance(project_id, str):
-            raise ValueError('project_id 必须为字符串')
-        if len(project_id) > 512:
-            raise ValueError('project_id 过长')
-        if not isinstance(status, str) or status not in self._STATUS_GROUPS:
-            raise ValueError(f'status 必须为 {"/".join(self._STATUS_GROUPS)} 之一')
-
-        # 夹取 limit
-        limit = max(1, min(100, limit))
-        if before is not None and not math.isfinite(before):
-            raise ValueError('分页时间边界必须为有限数')
-
-        # 解码游标
-        cur_created: float | None = None
-        cur_id: str | None = None
-        cursor_before: float | None = None
-        cursor_q: str = ''
-        cursor_project_id: str = ''
-        cursor_status: str = 'all'
-        # 判断调用方是否显式提供了筛选参数（URL 中有 q/project_id/status）
-        # 若只传 cursor 不传筛选参数，则从游标中恢复筛选条件；
-        # 若显式传了筛选参数但与游标不一致，则返回400。
-        caller_has_filters = supplied_q or supplied_project or supplied_status
-        if cursor is not None:
-            cur_created, cur_id, cursor_before, cursor_q, cursor_project_id, cursor_status, cursor_sort = self._decode_cursor(cursor)
-            # 遗漏范围参数时继承游标；显式改变任何已绑定参数都必须重置分页。
-            if before is not None and before != cursor_before:
-                raise ValueError('游标与当前时间范围不一致，请重置分页')
-            before = cursor_before
-            cursor_q_norm = cursor_q.strip().casefold() if cursor_q else ''
-            if ((supplied_q and q_norm != cursor_q_norm)
-                    or (supplied_project and project_id != cursor_project_id)
-                    or (supplied_status and status != cursor_status)
-                    or (supplied_sort and sort != cursor_sort)):
-                raise ValueError('游标与当前筛选条件不一致，请重置分页')
-            q_norm = cursor_q_norm
-            project_id = cursor_project_id
-            status = cursor_status
-            sort = cursor_sort
-
-        # 排序方向仅来自已验证枚举，禁止把请求值直接拼进 SQL。
-        direction, comparison = ('ASC', '>') if sort == 'oldest' else ('DESC', '<')
-
-        result = []
-        # 构建基础 SQL：按 created DESC, id DESC 遍历全部历史
-        # 续页条件：(created < cur_created) OR (created = cur_created AND id < cur_id)
-        params: list = []
-        where_parts: list[str] = []
-
-        if before is not None:
-            where_parts.append('created < ?')
-            params.append(before)
-
-        if cur_created is not None and cur_id is not None:
-            where_parts.append(
-                f'(created {comparison} ? OR (created = ? AND id {comparison} ?))'
-            )
-            params.extend([cur_created, cur_created, cur_id])
-
-        # project_id 精确匹配可在 SQL 层过滤（无需逐行跳过）
-        if project_id:
-            where_parts.append('project_id = ?')
-            params.append(project_id)
-
-        where_sql = ('WHERE ' + ' AND '.join(where_parts)) if where_parts else ''
-
-        # 状态组和关键词需要在 Python 层过滤（读取 state/job），因此需要全量遍历
-        # 每次批量取 BATCH 条，积累足够 limit+1 条匹配记录后停止
-        BATCH = 200
-        status_set = self._STATUS_GROUPS.get(status)  # None 表示不过滤状态
-        need_filter = bool(q_norm) or status_set is not None
-
-        with self.store.session():
-            if not need_filter:
-                # 无关键词/状态过滤：一次取 limit+1 条
-                fetch_sql = f"""
-                    SELECT *
-                    FROM runs
-                    {where_sql}
-                    ORDER BY created {direction}, id {direction}
-                    LIMIT ?
-                """
-                fetch_params = params + [limit + 1]
-                with self.store.connect() as db:
-                    rows = db.execute(fetch_sql, fetch_params).fetchall()
-                has_more = len(rows) > limit
-                for row in rows[:limit]:
-                    full_run = dict(row)
-                    task_text, lc = self._summary_cache.read(full_run)
-                    result.append({
-                        'id': full_run['id'], 'run_id': full_run['run_id'],
-                        'project_id': full_run['project_id'], 'created': full_run['created'],
-                        'task': task_text,
-                        'lifecycle': lc, 'managed': bool(full_run['managed']),
-                    })
-            else:
-                # 有关键词或状态过滤：批量遍历全部历史直到收集足够结果
-                # 使用游标记录已扫描到的位置，实现分批遍历
-                scan_created: float | None = cur_created
-                scan_id: str | None = cur_id
-                exhausted = False
-                found_count = 0  # 已匹配并放入 result
-                has_more = False
-
-                while not exhausted and found_count <= limit:
-                    # 构建批次 WHERE
-                    batch_where_parts = list(where_parts)  # 包含 before / project_id 条件
-                    batch_params = list(params)
-
-                    if scan_created is not None and scan_id is not None:
-                        # 续批：从上一批最后一条之后继续
-                        batch_where_parts.append(
-                            f'(created {comparison} ? OR (created = ? AND id {comparison} ?))'
-                        )
-                        batch_params.extend([scan_created, scan_created, scan_id])
-                    # 移除已被 cur_created/cur_id 替代的游标续页条件（避免重复）
-                    # 注：where_parts 中若有游标条件，scan_* 初始值已是 cur_*，会重复添加
-                    # 重建 batch_where_parts 以避免重复
-                    batch_where_parts2: list[str] = []
-                    batch_params2: list = []
-                    if before is not None:
-                        batch_where_parts2.append('created < ?')
-                        batch_params2.append(before)
-                    if project_id:
-                        batch_where_parts2.append('project_id = ?')
-                        batch_params2.append(project_id)
-                    if scan_created is not None and scan_id is not None:
-                        batch_where_parts2.append(
-                            f'(created {comparison} ? OR (created = ? AND id {comparison} ?))'
-                        )
-                        batch_params2.extend([scan_created, scan_created, scan_id])
-                    batch_where_sql = ('WHERE ' + ' AND '.join(batch_where_parts2)) if batch_where_parts2 else ''
-
-                    fetch_sql = f"""
-                        SELECT *
-                        FROM runs
-                        {batch_where_sql}
-                        ORDER BY created {direction}, id {direction}
-                        LIMIT ?
-                    """
-                    with self.store.connect() as db:
-                        batch_rows = db.execute(fetch_sql, batch_params2 + [BATCH]).fetchall()
-
-                    if len(batch_rows) < BATCH:
-                        exhausted = True
-
-                    for row in batch_rows:
-                        full_run = dict(row)
-                        task_text, lc = self._summary_cache.read(full_run)
-
-                        # 状态匹配
-                        if status_set is not None and lc not in status_set:
-                            continue
-
-                        # 关键词匹配（casefold 子串，%/_/' 不作通配符）
-                        if q_norm:
-                            task_cf = task_text.casefold()
-                            run_id_cf = full_run['run_id'].casefold()
-                            if q_norm not in task_cf and q_norm not in run_id_cf:
-                                continue
-
-                        # 匹配成功
-                        if found_count < limit:
-                            result.append({
-                                'id': full_run['id'], 'run_id': full_run['run_id'],
-                                'project_id': full_run['project_id'], 'created': full_run['created'],
-                                'task': task_text,
-                                'lifecycle': lc, 'managed': bool(full_run['managed']),
-                            })
-                        found_count += 1
-                        if found_count > limit:
-                            has_more = True
-                            break
-
-                    if found_count > limit:
-                        break
-
-                    if batch_rows:
-                        last_row = dict(batch_rows[-1])
-                        scan_created = last_row['created']
-                        scan_id = last_row['id']
-
-        next_cursor: str | None = None
-        if has_more and result:
-            last = result[-1]
-            next_cursor = self._encode_cursor(last['created'], last['id'], before,
-                                              q_norm, project_id, status, sort)
-
-        return self.redact({'runs': result, 'has_more': has_more, 'next_cursor': next_cursor})
+        return run_listing.list_runs_page(
+            self.store, self._summary_cache, self.redact,
+            limit=limit, before=before, cursor=cursor,
+            q=q, project_id=project_id, status=status, sort=sort,
+        )
 
     def create_run(self, project_id, task, idem, parent=None, expected_config_hash=None, execution_options=None):
         if not isinstance(task, str) or not task.strip() or len(task) > 64000:
