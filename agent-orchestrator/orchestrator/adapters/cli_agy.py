@@ -15,7 +15,7 @@ from .cli_base import CLIAdapter
 from .cli_codex import strip_ansi
 from .cli_result_stream import jsonl_objects
 
-SUPPORTED_VERSIONS = frozenset(('1.5.9', '1.5.12', '1.5.13'))
+SUPPORTED_VERSIONS = frozenset(('1.5.9', '1.5.12', '1.5.13', '1.5.14'))
 
 
 class AgyAdapter(CLIAdapter):

@@ -106,7 +106,7 @@ class CurrentCLI(unittest.TestCase):
         last = raw.splitlines()[-1]
         for value in (raw + last, raw + '{"event":"step_update"}', '\n'.join(raw.splitlines()[:-1])):
             self.assertFalse(self.parse(AgyAdapter('a'), value, '1.5.12').ok)
-        self.assertFalse(self.parse(AgyAdapter('a'), raw, '1.5.14').ok)
+        self.assertFalse(self.parse(AgyAdapter('a'), raw, '1.5.15').ok)
         self.assertFalse(self.parse(AgyAdapter('a'), raw, 'agy 9.999.0').ok)
 
     def test_qwen_real_stream_and_legacy_array_share_strict_terminal_parser(self):
@@ -178,7 +178,7 @@ class CurrentCLI(unittest.TestCase):
 
     def test_unknown_or_failed_version_prevents_model_execution(self):
         for cls, known, unknown in ((CodexAdapter, 'codex-cli 0.170.0', 'codex-cli 0.170.1'),
-                                    (AgyAdapter, '1.5.13', '1.5.14'),
+                                    (AgyAdapter, '1.5.14', '1.5.15'),
                                     (QwenAdapter, '0.26.0', 'qwen-code 9.0')):
             for code, stdout, stderr in ((0, unknown, ''), (1, known, ''), (0, '', known)):
                 with self.subTest(cls=cls.__name__, code=code, stdout=stdout), \
