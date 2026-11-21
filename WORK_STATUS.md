@@ -6,7 +6,12 @@
 - `run_budget` 新增 `max_model_calls` 与 `max_unknown_calls` 调用次数上限（同步 `metrics.json`、`reporting` 与配置表），解决无 token 上报 CLI 多轮返工被未知用量预扣拦住的问题；`multi_project_benchmark.py` 新增 `ledger` 分账退款样例与调用次数参数。
 - 完成四大核心大模块低风险拆分（`collaboration/service.py`、`state.py`、`engine.py`、`review_policy.py`）、`artifacts.py` 减少冗余 `git` 子进程、以及 `verify_delivery.py --workers` 并发执行选项与 `.gitignore` 规则补齐。
 - 落地并接入主入口五项单人自用长期扩展：逐 token 实时会诊（`PIPELINE_STREAM_DISCUSSION=1`）、契约化状态迁移注册表（`state-migrate`，默认干跑且不臆造未验证 v1→v2）、飞书/钉钉/Slack 脱敏 Webhook 通知（`PIPELINE_WEBHOOK_URL`）、受控部署执行器（`deploy`，默认干跑 + 审批哈希绑定）与双向 HMAC 防重放远程 Worker 协议（`worker-serve`）。按当前自用定位跳过多用户 RBAC。
-- 本地离线快速交付验收（`verify_delivery.py --quick`）229/229 全部通过，零失败、错误和跳过，9 份示例与 CLI/HTTP 冒烟全通，233 份源码指纹一致。远端 GitHub Actions Windows/Linux 全量矩阵验收及新样例实机基准待远端触发后补录。
+- 本地离线快速交付验收（`verify_delivery.py --quick`）229/229 全部通过，零失败、错误和跳过，9 份示例与 CLI/HTTP 冒烟全通，233 份源码指纹一致；`scripts/precommit.py --base-ref 7eb2dd8` 通过（18 项配置检查、0 凭据/漂移问题）。
+- 真机实测（`deepseek-chat`）：
+  - 流式 SSE 探针（`OpenAICompatAdapter(stream_tokens=True)`）真机通过，精确获取流尾用量（27 tokens，0.579s，无 `usage_unknown`）；
+  - `multi_project_benchmark.py --case invoice --unlimited-tokens --max-model-calls 6` 四阶段（design/coding/testing/review）全部 `done`，保护测试由失败变为通过且哈希未变，3 次调用、2468 tokens、耗时 6.562s（证据：`D:/work/ai-pipeline-live-057-invoice-20261121/results.json`）；并基于该真实运行状态通过 `orchestrator deploy` 完成干跑 + 审批哈希绑定受控部署审计留证（`deploy-c2e7cce39f08`）；
+  - 新样例 `ledger` 同参数真机试跑中，模型将 `settle()` 返回值误写为 `refunded`，被保护测试准确拦截且测试哈希未变（3 次调用、3453 tokens、9.672s），失败证据保留于 `D:/work/ai-pipeline-live-057-ledger-20261121/results.json`。
+- 远端 GitHub Actions Windows/Linux 全量矩阵验收待远端触发后核对。
 
 ## 0.5.6 交付和跨项目验收
 
