@@ -29,6 +29,7 @@ from .docker_base import (
     validate_image_ref,
     validate_proxy_url,
 )
+from .verified_runtimes import get_verified_runtime
 from .workspace_sync import (
     apply_raw_updates,
     collect_source_files,
@@ -37,9 +38,10 @@ from .workspace_sync import (
     materialize_staging,
 )
 
-VERSION = 'doubao 2.37.2'
-BINARY_SHA256 = '6120b2849c181466d1bfb003e6e9fea9ed97df8ef8e2ada653bf3fe0e99e14d1'
-IMAGE_ID = 'sha256:cd46e779d4ab86102d00ca9bd0bca87f6f839215dc07d0f5c35c4eb65cfefce3'
+_RUNTIME = get_verified_runtime('cli_doubao')
+VERSION = _RUNTIME.version
+BINARY_SHA256 = _RUNTIME.binary_sha256
+IMAGE_ID = _RUNTIME.image
 PROFILE_NAME = re.compile(r'[A-Za-z0-9][A-Za-z0-9_.-]{0,127}')
 
 

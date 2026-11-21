@@ -23,6 +23,7 @@ from .docker_base import (
     proxy_env_args,
     validate_proxy_url,
 )
+from .verified_runtimes import get_verified_runtime
 from .workspace_sync import (
     FILE_NAME,
     MAX_BYTES,
@@ -31,9 +32,10 @@ from .workspace_sync import (
     collect_source_files,
 )
 
-VERSION = 'grok 1.0.89 (28be5bb1bf65)'
-BINARY_SHA256 = 'a3dface51d9bdc71fd121e0481dd02d9b46a721f7a6b892f756480e9666eba1f'
-IMAGE = 'python@sha256:e48f59cdba69a3cbd9ed2cf0f348d90d45a8d350d98134cf1070bc106ee9ed90'
+_RUNTIME = get_verified_runtime('cli_grok')
+VERSION = _RUNTIME.version
+BINARY_SHA256 = _RUNTIME.binary_sha256
+IMAGE = _RUNTIME.image
 ENTRYPOINT = Path(__file__).with_name('grok_container.py')
 
 

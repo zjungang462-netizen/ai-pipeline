@@ -69,6 +69,40 @@ for existing, requested, cap in [([], (2, 2), 1), ([(4, 2)], (1, 3), 1), ([], (1
     else:
         raise AssertionError((existing, requested, cap))
 '''),
+    'ledger': (
+        {'ledger.py': 'def apply_refund(paid_cents, refunded_cents, amount_cents):\n'
+                      '    return refunded_cents + amount_cents\n',
+         'reconcile.py': 'from ledger import apply_refund\n\n'
+                         'def settle(paid_cents, events):\n'
+                         '    refunded = 0\n'
+                         '    for event_id, amount in events:\n'
+                         '        refunded = apply_refund(paid_cents, refunded, amount)\n'
+                         '    return paid_cents - refunded\n'},
+        '只修改 ledger.py 和 reconcile.py。所有金额须为整数分（bool 不算整数）：paid_cents 非负、'
+        'refunded_cents 非负且不超过 paid_cents、单次退款 amount_cents 为正整数且不能使累计退款超过 paid_cents，'
+        '否则抛 ValueError。settle 接收一次性 iterable，每项为 (event_id, amount_cents) 二元组，'
+        'event_id 须为非空字符串；相同 event_id 金额一致时幂等忽略，金额不一致时抛 ValueError。'
+        '公开签名必须保持为 apply_refund(paid_cents, refunded_cents, amount_cents) 和 settle(paid_cents, events)。',
+        '''from ledger import apply_refund
+from reconcile import settle
+assert apply_refund(1000, 200, 300) == 500
+assert settle(1000, iter([('r1', 300), ('r1', 300), ('r2', 700)])) == 0
+assert settle(500, []) == 500
+for args in [(100, 50, 51), (100, 0, 0), (100, 0, -10), (100, -1, 10), (True, 0, 1), (100, 0, True), (100, 0, 1.5)]:
+    try:
+        apply_refund(*args)
+    except ValueError:
+        pass
+    else:
+        raise AssertionError(args)
+for bad_events in [[('r1', 100), ('r1', 200)], [('', 10)], [(123, 10)], [('r1',)]]:
+    try:
+        settle(500, bad_events)
+    except ValueError:
+        pass
+    else:
+        raise AssertionError(bad_events)
+'''),
 }
 
 
