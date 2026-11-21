@@ -87,5 +87,13 @@ class Element{
  assert.equal(collapsed[0].kind,'discussion_stream');
  assert.equal(collapsed[0].payload.text,'建议修复');
  assert.equal(collapsed[0].payload.finished,true);
+ const cliCollapsed=vm.runInContext(`collapseStreamingDiscussion([
+  {cursor:10,created:100,kind:'cli_progress',payload:{stage:'code_review',tool:'',file:'',known_tokens:0}},
+  {cursor:11,created:102,kind:'cli_progress',payload:{stage:'code_review',tool:'',file:'',known_tokens:16000}},
+  {cursor:12,created:104,kind:'cli_progress',payload:{stage:'code_review',tool:'read_file',file:'a.js',known_tokens:16000}}
+ ])`,streamCtx);
+ assert.equal(cliCollapsed.length,2);
+ assert.equal(cliCollapsed[0].payload._repeat,2);
+ assert.equal(cliCollapsed[0].payload.known_tokens,16000);
  console.log('INSIGHTS_UI_OK');
 })().catch(error=>{console.error(error);process.exitCode=1;});
