@@ -91,5 +91,90 @@ main{flex:1;min-width:0;display:flex;flex-direction:column}.topbar{height:52px;f
 .unlimited-option input[type="checkbox"]{width:16px!important;height:16px;margin:0;accent-color:var(--accent);flex-shrink:0}
 .subtle-note{margin:6px 0 0;font-size:11px;color:#7f9187}
 .task-scope-box{background:#f2f8f4;border-color:#d4e5da;color:#3d5c4c;margin-top:0;margin-bottom:8px}
-@media(max-width:680px){.welcome-cards{grid-template-columns:1fr}.usage-stats{grid-template-columns:repeat(3,1fr)}.task-top-grid,.model-picker-row,.adapter-extra-grid,.template-save-row{grid-template-columns:1fr}.task-dialog-head,.task-dialog-body,.task-dialog-foot{padding-left:16px;padding-right:16px}}
+/* 控制页升级：横向阶段进度条、角色区分消息卡片、Markdown 排版与紧凑动态流 */
+.stage-stepper{display:flex;align-items:center;gap:10px;padding:10px 28px 12px;background:#fafcfa;border-top:1px solid #edf2ee;border-bottom:1px solid var(--line);overflow-x:auto;flex-shrink:0;scrollbar-width:thin}
+.stepper-item{display:flex;align-items:center;gap:9px;padding:7px 12px;border-radius:10px;background:#fff;border:1px solid #dde7e0;min-width:0;flex-shrink:0;box-shadow:var(--shadow-sm);transition:border-color .15s,background .15s}
+.stepper-item.done{background:#f2f9f4;border-color:#c2decb}
+.stepper-item.running{background:#eef5fc;border-color:#b6d2ee}
+.stepper-item.awaiting_approval,.stepper-item.waiting_approval{background:#fdf7e7;border-color:#e5ce91}
+.stepper-item.failed,.stepper-item.timeout{background:#fdf1ed;border-color:#e8c1b4}
+.stepper-dot{width:22px;height:22px;border-radius:50%;display:grid;place-items:center;font-size:11px;font-weight:700;background:#e6ede8;color:#5d7368;flex-shrink:0}
+.stepper-item.done .stepper-dot{background:#2d7a53;color:#fff}
+.stepper-item.running .stepper-dot{background:#3174b8;color:#fff}
+.stepper-item.awaiting_approval .stepper-dot,.stepper-item.waiting_approval .stepper-dot{background:#c58c24;color:#fff}
+.stepper-item.failed .stepper-dot,.stepper-item.timeout .stepper-dot{background:#bf553b;color:#fff}
+.stepper-info{display:flex;flex-direction:column;line-height:1.3}
+.stepper-name{font-size:12px;font-weight:600;color:var(--ink);white-space:nowrap}
+.stepper-state{font-size:10px;color:var(--muted);white-space:nowrap}
+.stepper-approve{margin-left:6px;padding:4px 10px;border-radius:6px;background:#c58c24;color:#fff;font-size:11px;font-weight:600;white-space:nowrap}
+.stepper-approve:hover{background:#a9741a}
+/* 角色区分与富文本消息卡片 */
+.message{gap:12px;margin:18px 0;align-items:flex-start}
+.message .avatar{width:34px;height:34px;border-radius:10px;font-size:13px;font-weight:700;box-shadow:var(--shadow-sm)}
+.message.role-human .avatar{background:linear-gradient(135deg,#285f4b,#1e4a3a);color:#fff}
+.message.role-review .avatar{background:linear-gradient(135deg,#4f5bd5,#3a46b0);color:#fff}
+.message.role-plan .avatar{background:linear-gradient(135deg,#c98222,#a56614);color:#fff}
+.message.role-code .avatar{background:linear-gradient(135deg,#1d7a5f,#155d47);color:#fff}
+.message.role-tool .avatar{background:linear-gradient(135deg,#2d6f9e,#1f547a);color:#fff}
+.message.role-agent .avatar{background:linear-gradient(135deg,#4b6b5d,#375246);color:#fff}
+.message-head{flex-wrap:wrap;gap:6px;margin-bottom:6px}
+.message-role{font-size:13px;font-weight:650;color:var(--ink)}
+.source-label{padding:2px 7px;border-radius:999px;font-size:10px;font-weight:600;border:0}
+.source-label.role-human{background:#e1f1e8;color:#1f5a42}
+.source-label.role-review{background:#eaecfc;color:#3944a8}
+.source-label.role-plan{background:#fbf0dc;color:#925b11}
+.source-label.role-code{background:#e2f4ee;color:#175f49}
+.source-label.role-tool{background:#e3f0f9;color:#205880}
+.source-label.role-agent{background:#ebf0ed;color:#4a6156}
+.source-label.live-badge{background:#e6f4ec;color:#1f6847}
+.meta-chip{display:inline-flex;align-items:center;padding:2px 7px;border-radius:5px;background:#f0f4f1;border:1px solid #dfe7e1;color:#5a6e63;font-size:10px;font-weight:500}
+.meta-chip.model-chip-tag{background:#f3f5fb;border-color:#dce2f2;color:#465480;font-family:Consolas,"Microsoft YaHei",monospace}
+.message-body{padding:15px 18px;border:1px solid #dde6df;border-radius:4px 12px 12px 12px;background:#fff;color:#273b34;font-size:13px;line-height:1.75;white-space:normal;box-shadow:var(--shadow-sm)}
+.message.role-human .message-body{background:#edf6f0;border-color:#cde2d4;border-left:3px solid #285f4b}
+.message.role-review .message-body{border-left:3px solid #4f5bd5}
+.message.role-plan .message-body{border-left:3px solid #c98222}
+.message.role-code .message-body{border-left:3px solid #1d7a5f}
+.message.role-tool .message-body{background:#f7fafc;border-color:#d4e3ee;border-left:3px solid #2d6f9e;padding:12px 14px}
+.message-body-wrap{position:relative}
+.message-body-wrap.collapsible .message-body{max-height:340px;overflow:hidden}
+.message-body-wrap.collapsible:after{content:"";position:absolute;left:1px;right:1px;bottom:34px;height:68px;background:linear-gradient(180deg,rgba(255,255,255,0),rgba(255,255,255,.96));pointer-events:none;border-radius:0 0 11px 11px}
+.expand-toggle{display:inline-flex;align-items:center;gap:4px;margin-top:8px;padding:5px 12px;border-radius:999px;background:#fff;border:1px solid #cfdcd3;color:#2d5c48;font-size:11px;font-weight:600}
+.expand-toggle:hover{background:#eef5f0;border-color:#a8c4b2}
+.message-footer{display:flex;align-items:center;flex-wrap:wrap;gap:8px;margin-top:8px}
+.message-footer .evidence-ref{margin-top:0;border-radius:6px;padding:4px 10px}
+.copy-msg-btn{margin-left:auto;font-size:11px;padding:3px 8px;color:#667a70}
+/* Markdown 排版 */
+.md-body>*:first-child{margin-top:0}.md-body>*:last-child{margin-bottom:0}
+.md-h{margin:14px 0 6px;font-weight:650;color:#172b24;line-height:1.45}
+h2.md-h{font-size:16px;padding-bottom:4px;border-bottom:1px solid #edf2ee}
+h3.md-h{font-size:14.5px}
+h4.md-h{font-size:13.5px;color:#2c4a3e}
+.md-p{margin:7px 0;white-space:pre-wrap;overflow-wrap:anywhere}
+.md-list{margin:6px 0;padding-left:20px}
+.md-list li{margin:4px 0;overflow-wrap:anywhere}
+.md-quote{margin:8px 0;padding:8px 12px;border-left:3px solid #9abaa8;background:#f4f8f5;border-radius:0 6px 6px 0;color:#445c50;white-space:pre-wrap}
+.md-hr{border:0;height:1px;background:#e4ece6;margin:12px 0}
+.md-inline-code{padding:1px 5px;border-radius:4px;background:#eef3f0;border:1px solid #dce6df;color:#244b3b;font:12px/1.5 Consolas,"Microsoft YaHei",monospace}
+.md-code-block{margin:10px 0;border-radius:8px;overflow:hidden;border:1px solid #283832;background:#192521;color:#e5f0ea}
+.md-code-head{display:flex;align-items:center;justify-content:space-between;padding:5px 12px;background:#22322c;border-bottom:1px solid #2e433b;font-size:11px;color:#9fb8ab}
+.md-code-copy{padding:2px 8px;border-radius:4px;background:#314940;color:#dfece4;font-size:10px}
+.md-code-copy:hover{background:#3f5e52}
+.md-code-block pre{margin:0;padding:12px 14px;overflow:auto;max-height:380px;font:12px/1.65 Consolas,"Microsoft YaHei",monospace;white-space:pre}
+.md-table-wrap{margin:10px 0;overflow-x:auto;border:1px solid #dce6df;border-radius:8px}
+.md-table{width:100%;border-collapse:collapse;font-size:12px;background:#fff}
+.md-table th{background:#f2f7f4;color:#274438;font-weight:600;text-align:left;padding:8px 10px;border-bottom:1px solid #dce6df;white-space:nowrap}
+.md-table td{padding:7px 10px;border-bottom:1px solid #edf2ee;color:#334940;vertical-align:top}
+.md-table tbody tr:last-child td{border-bottom:0}
+.md-table tbody tr:hover{background:#f8fbf9}
+.tool-output{margin:0;white-space:pre-wrap;overflow-wrap:anywhere;font:12px/1.65 Consolas,"Microsoft YaHei",monospace;color:#274457;max-height:320px;overflow:auto}
+/* 紧凑动态事件流 */
+.event{padding:5px 10px;margin:2px 0;border-radius:7px;transition:background .12s}
+.event:hover{background:rgba(255,255,255,.7)}
+.event-icon.cli{background:#eef5fc;border-color:#c8ddf1;color:#2e6da4;font-size:10px}
+.event-icon.ok{background:#e7f5ec;border-color:#bfe2cb;color:#27754e}
+.event-icon.fail{background:#fdece7;border-color:#ebbfb2;color:#b8482f;font-weight:700}
+.event-fail .event-title{color:#a8442e;font-weight:600}
+.event-ok .event-title{color:#2c6b4a;font-weight:550}
+.artifact-head-actions{display:flex;align-items:center;gap:8px}
+@media(max-width:680px){.welcome-cards{grid-template-columns:1fr}.usage-stats{grid-template-columns:repeat(3,1fr)}.task-top-grid,.model-picker-row,.adapter-extra-grid,.template-save-row{grid-template-columns:1fr}.task-dialog-head,.task-dialog-body,.task-dialog-foot{padding-left:16px;padding-right:16px}.stage-stepper{padding:8px 14px 10px}}
 @media(prefers-reduced-motion:reduce){.run-status.running:before,.run-status.recovering:before,.stream-cursor{animation:none!important}}
