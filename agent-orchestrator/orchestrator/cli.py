@@ -70,6 +70,8 @@ def cmd_run(args) -> int:
     print(f"可写根: {[str(r) for r in guard.roots]}")
     print(f"\n开始 run_id={run_id}\n")
     results = eng.run()   # run() 内部 prepare()，避免重复初始化
+    from .notifications import notify_from_env
+    notify_from_env(run_id=run_id, results=results, usage=eng.state.usage_total)
     return _print_results(results)
 
 
@@ -80,6 +82,8 @@ def cmd_resume(args) -> int:
         print(f"未找到 run: {args.run_id}")
         return 2
     results = eng.run(resume_wait=not (eng.state.run_dir / 'job.json').exists())
+    from .notifications import notify_from_env
+    notify_from_env(run_id=args.run_id, results=results, usage=eng.state.usage_total)
     return _print_results(results)
 
 
@@ -259,6 +263,85 @@ def cmd_state_restore(args) -> int:
     return 0
 
 
+def cmd_state_migrate(args) -> int:
+    from .state_migration import DEFAULT_MIGRATION_REGISTRY
+    receipt = DEFAULT_MIGRATION_REGISTRY.migrate_file(
+        Path(args.state_file),
+        target_version=args.target_version,
+        apply=bool(args.apply),
+        backup_dir=Path(args.backup_dir) if args.backup_dir else None,
+    )
+    print(json.dumps(receipt, ensure_ascii=False, indent=2))
+    return 0
+
+
+def cmd_deploy(args) -> int:
+    from .deploy import DeployApproval, DeployRejected, DeploySpec, execute_deploy
+    from .state import RunState
+
+    command = list(args.command or [])
+    if command and command[0] == '--':
+        command = command[1:]
+    if not command:
+        raise ValueError('deploy 必须在 -- 后提供固定 argv 命令')
+    cfg = load_config(args.config)
+    state = RunState(cfg.state_dir, args.run_id)
+    if not state.load():
+        print(f'未找到 run: {args.run_id}')
+        return 2
+    spec = DeploySpec(
+        name=args.name,
+        command=tuple(command),
+        timeout_s=args.timeout,
+        allow_env=tuple(args.allow_env or ()),
+    )
+    approval = None
+    if args.apply and args.approve_hash:
+        approval = DeployApproval(
+            run_id=args.run_id,
+            outputs_hash=args.approve_hash,
+            commit_sha=args.approve_commit,
+            approved_by=args.approved_by,
+        )
+    try:
+        receipt = execute_deploy(
+            spec, state, cfg.task_workdir, tuple(args.require_stage),
+            approval=approval, dry_run=not args.apply,
+        )
+    except DeployRejected as error:
+        print(f'部署拒绝：{error}')
+        return 2
+    print(json.dumps(receipt, ensure_ascii=False, indent=2))
+    return 0 if receipt['ok'] else 1
+
+
+def cmd_worker_serve(args) -> int:
+    import os
+    from .remote_worker import RemoteJobReceipt, RemoteWorkerServer
+
+    secret = os.environ.get(args.secret_env, '').strip()
+    if not secret:
+        raise ValueError(f'环境变量 {args.secret_env} 未设置')
+
+    def _reject_unconfigured(spec):
+        return RemoteJobReceipt(
+            job_id=spec.job_id,
+            worker_id=args.worker_id,
+            status='rejected',
+            exit_code=-1,
+            stderr='未挂载具体执行器回调',
+        )
+
+    server = RemoteWorkerServer(args.worker_id, secret, _reject_unconfigured, host=args.host, port=args.port)
+    print(json.dumps({'worker_id': args.worker_id, 'host': args.host, 'port': server.port}, ensure_ascii=False), flush=True)
+    server.start()
+    try:
+        server._thread.join()
+    except KeyboardInterrupt:
+        server.close()
+    return 0
+
+
 def main(argv=None) -> int:
     p = argparse.ArgumentParser(prog="orchestrator", description="多智能体开发流水线编排器")
     from ._version import __version__
@@ -278,6 +361,37 @@ def main(argv=None) -> int:
     sp.add_argument('--backup', required=True)
     sp.add_argument('--output', required=True)
     sp.set_defaults(func=cmd_state_restore)
+
+    sp = sub.add_parser('state-migrate', help='契约化 schema 迁移（默认干跑，仅 --apply 写入并先备份原字节）')
+    sp.add_argument('--state-file', required=True)
+    sp.add_argument('--target-version', type=int)
+    mig_mode = sp.add_mutually_exclusive_group()
+    mig_mode.add_argument('--dry-run', action='store_true', help='只预览（默认）')
+    mig_mode.add_argument('--apply', action='store_true', help='加锁备份后原子写入')
+    sp.add_argument('--backup-dir')
+    sp.set_defaults(func=cmd_state_migrate)
+
+    sp = sub.add_parser('deploy', help='受控部署执行器（默认干跑，--apply 强制前置阶段与审批哈希绑定）')
+    sp.add_argument('config', help='TOML 配置文件路径')
+    sp.add_argument('--run-id', required=True)
+    sp.add_argument('--name', default='deploy')
+    sp.add_argument('--require-stage', action='append', required=True, help='前置必须 DONE 的阶段名，可重复')
+    dep_mode = sp.add_mutually_exclusive_group()
+    dep_mode.add_argument('--dry-run', action='store_true', help='仅干跑检查（默认）')
+    dep_mode.add_argument('--apply', action='store_true', help='校验审批后执行固定 argv')
+    sp.add_argument('--approve-hash', help='前置阶段组合 outputs_hash 审批凭据')
+    sp.add_argument('--approve-commit', help='代码提交 SHA 审批凭据')
+    sp.add_argument('--approved-by', default='owner')
+    sp.add_argument('--timeout', type=int, default=120)
+    sp.add_argument('--allow-env', action='append', default=[])
+    sp.set_defaults(func=cmd_deploy, command=[])
+
+    sp = sub.add_parser('worker-serve', help='启动受控远程 Worker 服务端（需 HMAC 密钥环境变量）')
+    sp.add_argument('--worker-id', required=True)
+    sp.add_argument('--secret-env', required=True)
+    sp.add_argument('--host', default='127.0.0.1')
+    sp.add_argument('--port', type=int, default=8770)
+    sp.set_defaults(func=cmd_worker_serve)
 
     sp = sub.add_parser('export-usage', help='导出运行/阶段/工具用量CSV；不估算真实账单')
     sp.add_argument('--state-dir', required=True)
@@ -355,7 +469,15 @@ def main(argv=None) -> int:
     sp.add_argument('--port', type=int, default=8765)
     sp.set_defaults(func=cmd_dashboard)
 
-    args = p.parse_args(argv)
+    raw_argv = list(sys.argv[1:] if argv is None else argv)
+    deploy_command: list[str] = []
+    if raw_argv[:1] == ['deploy'] and '--' in raw_argv:
+        sep = raw_argv.index('--')
+        deploy_command = raw_argv[sep + 1:]
+        raw_argv = raw_argv[:sep]
+    args = p.parse_args(raw_argv)
+    if args.cmd == 'deploy':
+        args.command = deploy_command
     if args.cmd in ("resume", "status", "approve", "rerun-from") and not args.run_id:
         p.error(f"{args.cmd} 需要 --run-id")
     try:

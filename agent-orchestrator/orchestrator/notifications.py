@@ -180,3 +180,39 @@ class WebhookNotifier:
             except (urllib.error.URLError, TimeoutError, OSError) as error:
                 receipts.append(NotificationReceipt(target.name, False, error=type(error).__name__))
         return receipts
+
+
+def notify_from_env(
+    *,
+    run_id: str,
+    results: dict[str, str],
+    usage: dict | None = None,
+    url_env: str = 'PIPELINE_WEBHOOK_URL',
+    format_env: str = 'PIPELINE_WEBHOOK_FORMAT',
+    secret_env: str = 'PIPELINE_WEBHOOK_SECRET',
+) -> list[NotificationReceipt]:
+    """当环境变量配置了 Webhook 时发送脱敏状态摘要；未配置时直接返回空列表。"""
+    if not os.environ.get(url_env, '').strip():
+        return []
+    fmt = os.environ.get(format_env, 'generic').strip().lower() or 'generic'
+    if fmt not in SUPPORTED_FORMATS:
+        fmt = 'generic'
+    values = list(results.values())
+    if any(v == 'failed' for v in values):
+        event = 'failed'
+    elif any(v == 'awaiting_approval' for v in values):
+        event = 'awaiting_approval'
+    elif any(v == 'waiting_owner' for v in values):
+        event = 'waiting_owner'
+    elif any(v == 'waiting_external' for v in values):
+        event = 'waiting_external'
+    elif values and all(v == 'done' for v in values):
+        event = 'done'
+    else:
+        return []
+    focus_stage = next((name for name, status in results.items() if status == event), '')
+    summary = ', '.join(f'{k}={v}' for k, v in results.items())
+    target = WebhookTarget(name='env_webhook', url_env=url_env, format=fmt, secret_env=secret_env)
+    return WebhookNotifier((target,)).notify(
+        run_id=run_id, event=event, stage=focus_stage, summary=summary, usage=usage
+    )
