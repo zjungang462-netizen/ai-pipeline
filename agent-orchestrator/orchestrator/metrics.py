@@ -70,7 +70,9 @@ def write_metrics(engine, results: dict[str, str]) -> None:
     data['stage_usage'] = state.stage_usage
     data['run_budget'] = {'max_tokens': config.run_budget.max_tokens,
                           'max_duration_s': config.run_budget.max_duration_s,
-                          'unlimited_tokens': config.run_budget.unlimited_tokens}
+                          'unlimited_tokens': config.run_budget.unlimited_tokens,
+                          'max_model_calls': config.run_budget.max_model_calls,
+                          'max_unknown_calls': config.run_budget.max_unknown_calls}
     data['billing_cost_status'] = 'not_reported'
     if 'qoder_credits' in state.usage_total:data['qoder_credits']=state.usage_total['qoder_credits']
     # 单写者持有 run 锁，先写完整临时文件，再以不覆盖的链接发布。

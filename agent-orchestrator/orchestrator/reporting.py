@@ -121,7 +121,9 @@ def usage_summary(run_id, state, metrics=None):
                          billing_cost=None, currency='', cost_status='not_reported'))
     return dict(run_id=run_id, source='immutable_metrics' if frozen else 'live_state',
                 tokens=tokens, reported_tokens=reported, reserved_tokens=reserved,
-                duration_s=number(usage.get('duration_s')), unknown_calls=number(usage.get('unknown_calls', 0)),
+                duration_s=number(usage.get('duration_s')),
+                model_calls=number(usage.get('model_calls')),
+                unknown_calls=number(usage.get('unknown_calls', 0)),
                 qoder_credits=number(usage.get('qoder_credits')),
                 token_status='incomplete' if usage.get('unknown_calls') else 'not_recorded' if tokens is None else 'reported',
                 billing_cost=None, cost_status='not_reported', stages=rows,

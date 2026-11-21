@@ -135,6 +135,13 @@ class TestBudget(unittest.TestCase):
             self.assertIn("未知用量调用次数", eng.state.stage("s3").error)
             self.assertEqual(adapter.calls, 2)
             self.assertEqual(eng.state.usage_total["unknown_calls"], 2)
+            import json
+            from orchestrator.reporting import usage_summary
+            metrics = json.loads((eng.state.run_dir / "metrics.json").read_text(encoding="utf-8"))
+            self.assertEqual(metrics["run_budget"]["max_unknown_calls"], 2)
+            self.assertIsNone(metrics["run_budget"]["max_model_calls"])
+            summary = usage_summary("b-unknown", {}, metrics)
+            self.assertEqual(summary["model_calls"], 2)
 
     def test_invalid_call_budgets_are_rejected_by_config(self):
         with tempfile.TemporaryDirectory() as d:

@@ -121,6 +121,37 @@ def diagnose(path: str | Path) -> dict:
                     add('error', label+'.extra_env', '需要环境变量名字符串数组')
                 if getattr(adapter, 'timeout_s', 0) <= 0:
                     add('error', label+'.timeout_s', '超时必须为正数')
+                if adapter_cfg.type in ('cli_grok', 'cli_doubao'):
+                    from .adapters.verified_runtimes import get_verified_runtime
+                    from .state import sha256_file
+                    runtime = get_verified_runtime(adapter_cfg.type)
+                    binary = getattr(adapter, 'binary', None)
+                    if binary is None:
+                        add('warning' if name not in used else 'error', label+'.binary',
+                            '未配置已验证的容器 Linux 原生程序路径', '参考 OPERATIONS.md 配置容器适配器参数')
+                    elif not binary.is_file():
+                        add('error' if name in used else 'warning', label+'.binary',
+                            '配置的容器 Linux 原生程序文件不存在', '检查 binary 绝对路径')
+                    elif sha256_file(binary) != runtime.binary_sha256:
+                        add('error' if name in used else 'warning', label+'.binary',
+                            '容器 Linux 原生程序 SHA-256 与已验证版本不匹配',
+                            f'需要已验证版本 {runtime.version}')
+                    if adapter_cfg.type == 'cli_grok':
+                        auth_file = getattr(adapter, 'auth_file', None)
+                        if auth_file and not auth_file.is_file():
+                            add('warning', label+'.auth_file',
+                                '未找到 Grok 会话文件，运行前需先登录', '先执行 grok login 或检查 auth_file 路径')
+                    elif adapter_cfg.type == 'cli_doubao':
+                        machine_id = getattr(adapter, 'machine_id', None)
+                        if machine_id is not None and not machine_id.is_file():
+                            add('error' if name in used else 'warning', label+'.machine_id',
+                                '配置的豆包 machine_id 文件不存在', '准备持久化的 Linux machine-id 文件')
+                        if (name in used and not cfg.run_budget.unlimited_tokens
+                                and cfg.run_budget.max_tokens is not None
+                                and cfg.run_budget.max_tokens < 80000):
+                            add('warning', 'run_budget.max_tokens',
+                                '豆包终态不报告 token，有限 token 预算下多轮返工易被未知用量预扣拦截',
+                                '建议启用 unlimited_tokens=true 并配置 max_duration_s 与 max_model_calls/max_unknown_calls')
             add('ok', label, '适配器配置可构造；未执行版本、登录或网络探测')
         except (ValueError, TypeError, KeyError, OSError, OverflowError):
             add('error', label, '适配器参数无效', '检查 type、exe、timeout_s、模型和代理参数的类型及范围')

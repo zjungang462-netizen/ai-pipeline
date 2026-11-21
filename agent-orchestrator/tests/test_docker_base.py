@@ -128,3 +128,33 @@ class DockerBase(unittest.TestCase):
             for name in CASES:
                 with self.subTest(case=name):
                     self.assertNotEqual(outcomes.get(name), 'passed', f'{name} 初始保护断言未复现缺陷')
+
+    def test_doctor_checks_container_binary_sha256_and_doubao_budget_warning(self):
+        from orchestrator.doctor import diagnose
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            ws = root / 'ws'
+            ws.mkdir()
+            fake_bin = root / 'doubao'
+            fake_bin.write_bytes(b'wrong-bytes')
+            machine_id = root / 'machine-id'
+            machine_id.write_text('0123456789abcdef\n', encoding='utf8')
+            cfg = root / 'doubao.toml'
+            cfg.write_text(
+                f'task_workdir = "ws"\nstate_dir = "state"\n'
+                f'[run_budget]\nmax_tokens = 50000\nmax_duration_s = 300\n'
+                f'[adapters.doubao]\ntype = "cli_doubao"\n'
+                f'binary = "{fake_bin.as_posix()}"\n'
+                f'image = "pipeline-doubao-probe:2.37.2"\n'
+                f'machine_id = "{machine_id.as_posix()}"\n'
+                f'profile = "pipeline-doubao-profile"\n'
+                f'[[stages]]\nname = "review"\nkind = "report"\nadapter = "doubao"\nprompt = "check"\n',
+                encoding='utf8',
+            )
+            with mock.patch('orchestrator.safety.resolve_exe', return_value='docker'):
+                report = diagnose(cfg)
+            self.assertFalse(report['ok'])
+            fields = {(c['level'], c['field']): c['message'] for c in report['checks']}
+            self.assertIn(('error', 'adapters.doubao.binary'), fields)
+            self.assertIn('SHA-256', fields[('error', 'adapters.doubao.binary')])
+            self.assertIn(('warning', 'run_budget.max_tokens'), fields)
