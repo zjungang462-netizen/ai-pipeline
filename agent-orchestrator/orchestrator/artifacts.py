@@ -6,6 +6,7 @@
 """
 from __future__ import annotations
 
+import hashlib
 import os
 import re
 import shutil
@@ -14,6 +15,8 @@ import tempfile
 from pathlib import Path
 
 from .state import sha256_file
+
+_VERIFIED_GIT_VERSION: dict[tuple[str, int], bool] = {}
 
 
 class GitError(RuntimeError):
@@ -81,16 +84,28 @@ def resolve_git(git: GitContext | None = None) -> str | None:
     for cand in candidates:
         if not cand:
             continue
-        if Path(cand).is_file() or shutil.which(cand):
-            try:
-                proc = subprocess.run([cand, "--version"], capture_output=True,
-                                      text=True, timeout=15)
-                if proc.returncode == 0:
-                    if git is not None:
-                        git.executable = cand
-                    return cand
-            except (OSError, subprocess.TimeoutExpired):
-                continue
+        resolved = cand if Path(cand).is_file() else shutil.which(cand)
+        if not resolved:
+            continue
+        try:
+            cache_key = (str(Path(resolved).resolve()), Path(resolved).stat().st_mtime_ns)
+        except OSError:
+            cache_key = None
+        if cache_key is not None and _VERIFIED_GIT_VERSION.get(cache_key):
+            if git is not None:
+                git.executable = cand
+            return cand
+        try:
+            proc = subprocess.run([cand, "--version"], capture_output=True,
+                                  text=True, timeout=15)
+            if proc.returncode == 0:
+                if cache_key is not None:
+                    _VERIFIED_GIT_VERSION[cache_key] = True
+                if git is not None:
+                    git.executable = cand
+                return cand
+        except (OSError, subprocess.TimeoutExpired):
+            continue
     return None
 
 
@@ -136,20 +151,27 @@ def ensure_repo(workdir: Path, exclude: Path | None = None, *, git: GitContext |
     """
     workdir = Path(workdir)
     workdir.mkdir(parents=True, exist_ok=True)
-    if not (workdir / ".git").exists():
+    fresh = not (workdir / ".git").exists()
+    if fresh:
         _git(["init", "-q"], workdir, git=git)
-        _git(["config", "user.email", "orchestrator@local"], workdir, git=git)
-        _git(["config", "user.name", "orchestrator"], workdir, git=git)
+        cfg_file = workdir / ".git" / "config"
+        if cfg_file.is_file():
+            with cfg_file.open("a", encoding="utf-8", newline="\n") as stream:
+                stream.write("\n[user]\n\temail = orchestrator@local\n\tname = orchestrator\n")
+        else:
+            _git(["config", "user.email", "orchestrator@local"], workdir, git=git)
+            _git(["config", "user.name", "orchestrator"], workdir, git=git)
     # 无任何提交时建基线：有既有文件就提交清单，否则空提交。
-    head = _git(["rev-parse", "--verify", "HEAD"], workdir, check=False, git=git)
-    if head.returncode != 0:
+    has_head = False if fresh else (_git(["rev-parse", "--verify", "HEAD"], workdir, check=False, git=git).returncode == 0)
+    if not has_head:
         existing = [p.relative_to(workdir).as_posix()
                     for p in workspace_files(workdir, exclude=exclude)]
-        if existing:
-            commit_files(workdir, existing, "baseline: existing workspace", git=git)
-        head = _git(["rev-parse", "--verify", "HEAD"], workdir, check=False, git=git)
-        if head.returncode != 0:
-            _git(["commit", "-q", "--allow-empty", "-m", "baseline"], workdir, git=git)
+        committed = commit_files(workdir, existing, "baseline: existing workspace", git=git) if existing else None
+        if not committed:
+            if existing:
+                has_head = _git(["rev-parse", "--verify", "HEAD"], workdir, check=False, git=git).returncode == 0
+            if not has_head:
+                _git(["commit", "-q", "--allow-empty", "-m", "baseline"], workdir, git=git)
 
 
 def head_sha(workdir: Path, *, git: GitContext | None = None) -> str:
@@ -411,11 +433,13 @@ def verified_workspace_tree(workdir: Path, exclude: Path | None = None, *, git: 
                 for path in paths.values()):
             return None
         if paths:
-            # 批量重读原文。不使用 Git 的 stat 缓存、ignore 或换行转换来证明内容。
-            actual = _git(["hash-object", "--no-filters", "--stdin-paths"], root,
-                          stdin="".join(path.as_posix() + "\n" for path in paths.values()), git=git)
-            if actual.stdout.splitlines() != [blobs[name] for name in paths]:
-                return None
+            # 批量重读原文计算 Git blob OID（blob <size>\0<bytes>），不使用 Git stat 缓存或换行转换。
+            algo = hashlib.sha256 if len(tree) == 64 else hashlib.sha1
+            for name, path in paths.items():
+                data = path.read_bytes()
+                digest = algo(f"blob {len(data)}\0".encode("ascii") + data).hexdigest()
+                if digest != blobs[name]:
+                    return None
         return tree
     except (GitError, OSError, ValueError):
         return None
