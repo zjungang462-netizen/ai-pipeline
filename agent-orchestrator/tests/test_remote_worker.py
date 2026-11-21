@@ -87,3 +87,41 @@ class RemoteWorkerTests(unittest.TestCase):
             with self.assertRaises(ValueError):
                 client.dispatch(spec, workdir=ws, context_files=('app.py',))
             self.assertEqual((ws / 'secret_test.py').read_bytes(), b'protected')
+
+    def test_replay_duplicate_job_expired_timestamp_and_oversized_body_are_rejected(self):
+        import json
+        import urllib.error
+        import urllib.request
+        from orchestrator.remote_worker import compute_signature
+
+        secret = 'worker-replay-secret-20261121'
+        os.environ['TEST_REMOTE_REPLAY_SECRET'] = secret
+        self.addCleanup(lambda: os.environ.pop('TEST_REMOTE_REPLAY_SECRET', None))
+
+        server = RemoteWorkerServer(
+            'w-replay', secret,
+            lambda spec: RemoteJobReceipt(spec.job_id, 'w-replay', 'done', 0, text='ok'),
+        )
+        server.start()
+        self.addCleanup(server.close)
+        client = RemoteWorkerClient(f'http://127.0.0.1:{server.port}', 'TEST_REMOTE_REPLAY_SECRET')
+
+        spec = RemoteJobSpec('job-once', 'run-1', 'review', 'report', 'hi')
+        receipt, _ = client.dispatch(spec)
+        self.assertEqual(receipt.status, 'done')
+
+        # 重复 job_id 重放必须被 409 拒绝
+        with self.assertRaisesRegex(RemoteWorkerError, '409'):
+            client.dispatch(spec)
+
+        # 过期时间戳必须被 403 拒绝
+        body = json.dumps({'job_id': 'job-old', 'run_id': 'r', 'stage': 's', 'kind': 'report', 'prompt': 'p'}).encode()
+        old_ts = '1000000000'
+        req = urllib.request.Request(
+            f'http://127.0.0.1:{server.port}/jobs', data=body, method='POST',
+            headers={'Content-Type': 'application/json', 'X-Worker-Timestamp': old_ts,
+                     'X-Worker-Signature-256': compute_signature(body, secret, timestamp=old_ts)},
+        )
+        with self.assertRaises(urllib.error.HTTPError) as ctx:
+            urllib.request.urlopen(req, timeout=5)
+        self.assertEqual(ctx.exception.code, 403)

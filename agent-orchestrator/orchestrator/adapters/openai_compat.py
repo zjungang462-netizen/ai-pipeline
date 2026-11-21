@@ -20,7 +20,15 @@ from ..contracts import ErrorKind, PreflightReport, Result, RunContext
 from .base import Adapter
 
 
-def parse_sse_stream(lines, on_token: Callable[[str], None] | None = None) -> dict:
+MAX_SSE_BYTES = 4 * 1024 * 1024
+
+
+def parse_sse_stream(
+    lines,
+    on_token: Callable[[str], None] | None = None,
+    *,
+    max_bytes: int = MAX_SSE_BYTES,
+) -> dict:
     """解析 OpenAI 兼容 SSE 流（data: {...} / data: [DONE]），逐块回调增量文本。"""
     chunks: list[str] = []
     usage: dict = {}
@@ -29,7 +37,12 @@ def parse_sse_stream(lines, on_token: Callable[[str], None] | None = None) -> di
     finish_reason = None
     saw_data = False
     done = False
+    total_bytes = 0
     for raw_line in lines:
+        raw_len = len(raw_line) if isinstance(raw_line, (bytes, bytearray)) else len(str(raw_line).encode("utf-8"))
+        total_bytes += raw_len
+        if total_bytes > max_bytes:
+            raise ValueError(f"SSE 流超出最大字节上限 ({max_bytes})")
         line = raw_line.decode("utf-8", errors="replace") if isinstance(raw_line, (bytes, bytearray)) else str(raw_line)
         line = line.strip()
         if not line or line.startswith(":"):
@@ -202,15 +215,19 @@ class OpenAICompatAdapter(Adapter):
                           usage={'usage_unknown': True, 'duration_s': duration})
 
         usage = data.get("usage", {}) or {}
+        raw_total = usage.get("total_tokens")
+        valid_total = type(raw_total) is int and raw_total >= 0
+        raw_prompt = usage.get("prompt_tokens")
+        raw_completion = usage.get("completion_tokens")
         result = Result(
             ok=True, exit_code=0, channel=self.channel, text=text,
             stdout=body, tool_version=self.model,
-            usage={"tokens": usage.get("total_tokens", 0),
-                   "prompt_tokens": usage.get("prompt_tokens", 0),
-                   "completion_tokens": usage.get("completion_tokens", 0),
+            usage={"tokens": raw_total if valid_total else 0,
+                   "prompt_tokens": raw_prompt if (type(raw_prompt) is int and raw_prompt >= 0) else 0,
+                   "completion_tokens": raw_completion if (type(raw_completion) is int and raw_completion >= 0) else 0,
                    "duration_s": duration},
         )
-        if 'total_tokens' not in usage:
+        if not valid_total:
             result.usage['usage_unknown'] = True
         if not isinstance(text, str):
             result.ok, result.parse_unknown = False, True

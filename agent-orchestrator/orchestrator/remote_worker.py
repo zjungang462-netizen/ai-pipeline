@@ -20,6 +20,9 @@ from .adapters.workspace_sync import apply_raw_updates, collect_source_files
 
 _LOOPBACK_HOSTS = {'127.0.0.1', 'localhost', '::1'}
 _TERMINAL_STATUSES = {'done', 'failed', 'timeout', 'rejected'}
+MAX_REQUEST_BYTES = 4 * 1024 * 1024
+MAX_CLOCK_SKEW_S = 300
+_MAX_SEEN_JOBS = 4096
 
 
 class RemoteWorkerError(RuntimeError):
@@ -66,15 +69,16 @@ def validate_worker_url(url: str) -> str:
     raise ValueError('Worker URL 仅允许 https://（或本机 loopback http://）')
 
 
-def compute_signature(body: bytes, secret: str) -> str:
-    digest = hmac.new(secret.encode('utf-8'), body, hashlib.sha256).hexdigest()
+def compute_signature(body: bytes, secret: str, timestamp: str = '') -> str:
+    material = (f'{timestamp}.'.encode('ascii') + body) if timestamp else body
+    digest = hmac.new(secret.encode('utf-8'), material, hashlib.sha256).hexdigest()
     return f'sha256={digest}'
 
 
-def verify_signature(body: bytes, secret: str, header_value: str) -> bool:
+def verify_signature(body: bytes, secret: str, header_value: str, timestamp: str = '') -> bool:
     if not secret or not isinstance(header_value, str):
         return False
-    expected = compute_signature(body, secret)
+    expected = compute_signature(body, secret, timestamp=timestamp)
     return hmac.compare_digest(expected, header_value.strip())
 
 
@@ -114,21 +118,26 @@ class RemoteWorkerClient:
         payload_dict = asdict(spec)
         payload_dict['files_b64'] = files_b64
         body = json.dumps(payload_dict, ensure_ascii=False).encode('utf-8')
+        ts = str(int(time.time()))
         headers = {
             'Content-Type': 'application/json; charset=utf-8',
-            'X-Worker-Signature-256': compute_signature(body, secret),
+            'X-Worker-Timestamp': ts,
+            'X-Worker-Signature-256': compute_signature(body, secret, timestamp=ts),
         }
         req = urllib.request.Request(f'{self.endpoint}/jobs', data=body, headers=headers, method='POST')
         try:
             with urllib.request.urlopen(req, timeout=min(self.timeout_s, spec.timeout_s)) as resp:
-                resp_body = resp.read()
+                resp_body = resp.read(MAX_REQUEST_BYTES + 1)
+                if len(resp_body) > MAX_REQUEST_BYTES:
+                    raise RemoteWorkerError('远程 Worker 回执体积超限')
                 sig = resp.headers.get('X-Worker-Signature-256', '')
+                resp_ts = resp.headers.get('X-Worker-Timestamp', '')
         except urllib.error.HTTPError as error:
             raise RemoteWorkerError(f'远程 Worker 返回 HTTP {error.code}') from None
         except (urllib.error.URLError, TimeoutError, OSError) as error:
             raise RemoteWorkerError(f'远程 Worker 通信失败: {error}') from None
 
-        if not verify_signature(resp_body, secret, sig):
+        if not verify_signature(resp_body, secret, sig, timestamp=resp_ts):
             raise RemoteWorkerError('远程 Worker 回执签名校验失败')
         try:
             data = json.loads(resp_body.decode('utf-8'))
@@ -172,6 +181,8 @@ class RemoteWorkerServer:
         self._secret = secret
         self._executor = executor
         self.started_at = time.time()
+        self._seen_lock = threading.Lock()
+        self._seen_jobs: dict[str, float] = {}
         parent = self
 
         class Handler(BaseHTTPRequestHandler):
@@ -183,7 +194,9 @@ class RemoteWorkerServer:
                 self.send_response(code)
                 self.send_header('Content-Type', 'application/json; charset=utf-8')
                 if sign:
-                    self.send_header('X-Worker-Signature-256', compute_signature(raw, parent._secret))
+                    ts = str(int(time.time()))
+                    self.send_header('X-Worker-Timestamp', ts)
+                    self.send_header('X-Worker-Signature-256', compute_signature(raw, parent._secret, timestamp=ts))
                 self.end_headers()
                 self.wfile.write(raw)
 
@@ -197,10 +210,29 @@ class RemoteWorkerServer:
                 if self.path != '/jobs':
                     self._send_json(404, {'error': 'not_found'})
                     return
-                length = int(self.headers.get('Content-Length', '0'))
+                try:
+                    length = int(self.headers.get('Content-Length', '0'))
+                except ValueError:
+                    self._send_json(400, {'error': 'invalid_content_length'})
+                    return
+                if length < 0:
+                    self._send_json(400, {'error': 'invalid_content_length'})
+                    return
+                if length > MAX_REQUEST_BYTES:
+                    self._send_json(413, {'error': 'payload_too_large'})
+                    return
                 raw = self.rfile.read(length) if length else b''
+                ts = self.headers.get('X-Worker-Timestamp', '').strip()
+                try:
+                    ts_val = int(ts)
+                except ValueError:
+                    self._send_json(403, {'error': 'invalid_timestamp'})
+                    return
+                if abs(time.time() - ts_val) > MAX_CLOCK_SKEW_S:
+                    self._send_json(403, {'error': 'timestamp_out_of_window'})
+                    return
                 sig = self.headers.get('X-Worker-Signature-256', '')
-                if not verify_signature(raw, parent._secret, sig):
+                if not verify_signature(raw, parent._secret, sig, timestamp=ts):
                     self._send_json(403, {'error': 'invalid_signature'})
                     return
                 try:
@@ -216,6 +248,18 @@ class RemoteWorkerServer:
                         timeout_s=int(data.get('timeout_s', 120)),
                         inputs_hash=data.get('inputs_hash', ''),
                     )
+                except (ValueError, KeyError, TypeError) as error:
+                    self._send_json(400, {'error': str(error)})
+                    return
+                with parent._seen_lock:
+                    if spec.job_id in parent._seen_jobs:
+                        self._send_json(409, {'error': 'duplicate_job_id'})
+                        return
+                    if len(parent._seen_jobs) >= _MAX_SEEN_JOBS:
+                        oldest = min(parent._seen_jobs, key=parent._seen_jobs.get)
+                        parent._seen_jobs.pop(oldest, None)
+                    parent._seen_jobs[spec.job_id] = time.time()
+                try:
                     receipt = parent._executor(spec)
                 except (ValueError, KeyError, TypeError) as error:
                     self._send_json(400, {'error': str(error)})

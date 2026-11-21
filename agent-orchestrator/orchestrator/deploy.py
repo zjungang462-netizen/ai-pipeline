@@ -2,6 +2,8 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import os
+import shutil
 import subprocess
 import time
 import uuid
@@ -95,30 +97,35 @@ def execute_deploy(
     """按固定 argv 执行受控部署或干跑，并落盘不可变审计回执。"""
     gate = verify_deploy_gate(state, required_stages, approval, dry_run=dry_run)
     argv = list(spec.dry_run_command if (dry_run and spec.dry_run_command) else spec.command)
+    env = build_subprocess_env(extra_allow=list(spec.allow_env))
+    secrets = [
+        value for key, value in (*env.items(), *os.environ.items())
+        if isinstance(value, str) and len(value) >= 8
+        and any(label in key.upper() for label in ('API_KEY', 'AUTH_TOKEN', 'ACCESS_TOKEN', 'SECRET', 'PASSWORD'))
+    ]
+    redactor = StreamRedactor(secrets)
+    safe_argv = [redactor.feed(arg, final=True) for arg in argv]
     if dry_run and not spec.dry_run_command:
+        entry = argv[0]
+        entry_path = Path(entry)
+        exists = (entry_path.is_file() if (entry_path.is_absolute() or '/' in entry or '\\' in entry)
+                  else bool(shutil.which(entry)))
         receipt = {
             'deploy_id': 'deploy-' + uuid.uuid4().hex[:12],
             'name': spec.name,
             'dry_run': True,
             'executed': False,
-            'ok': True,
-            'exit_code': 0,
-            'command': argv,
+            'ok': exists,
+            'exit_code': 0 if exists else -1,
+            'command': safe_argv,
             'gate': gate,
             'duration_s': 0.0,
-            'stdout': 'dry-run preview only (no command executed)',
-            'stderr': '',
+            'stdout': 'dry-run preview only (no command executed)' if exists else '',
+            'stderr': '' if exists else f'部署命令入口不存在或不可执行: {safe_argv[0]}',
         }
         _write_deploy_receipt(state.run_dir, receipt)
         return receipt
 
-    env = build_subprocess_env(extra_allow=list(spec.allow_env))
-    secrets = [
-        value for key, value in env.items()
-        if isinstance(value, str) and len(value) >= 8
-        and any(label in key.upper() for label in ('API_KEY', 'AUTH_TOKEN', 'ACCESS_TOKEN', 'SECRET', 'PASSWORD'))
-    ]
-    redactor = StreamRedactor(secrets)
     started = time.monotonic()
     try:
         proc = subprocess.run(
@@ -153,7 +160,7 @@ def execute_deploy(
         'executed': True,
         'ok': ok,
         'exit_code': exit_code,
-        'command': argv,
+        'command': safe_argv,
         'gate': gate,
         'approved_by': approval.approved_by if approval and not dry_run else None,
         'duration_s': round(time.monotonic() - started, 3),

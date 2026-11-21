@@ -62,6 +62,10 @@ class StreamingDiscussionTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             parse_sse_stream(lines[:-1])
 
+        # 超出 max_bytes 必须拒绝
+        with self.assertRaises(ValueError):
+            parse_sse_stream(lines, max_bytes=32)
+
     def test_openai_compat_stream_tokens_reports_usage_and_marks_missing_usage_unknown(self):
         sse_with_usage = [
             'data: {"id":"c1","model":"m1","choices":[{"delta":{"content":"第一段"}}]}',

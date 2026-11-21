@@ -85,3 +85,16 @@ class DeployExecutorTests(unittest.TestCase):
             saved = json.loads(receipt_file.read_text(encoding='utf-8'))
             self.assertEqual(saved['approved_by'], 'owner')
             self.assertEqual(saved['gate']['commit_sha'], 'abc1234')
+
+            # 干跑无 dry_run_command 时缺失命令入口返回 ok=False，且回执 command 脱敏已知密钥
+            import os
+            os.environ['TEST_DEPLOY_SECRET'] = 'deploy-secret-token-998877'
+            self.addCleanup(lambda: os.environ.pop('TEST_DEPLOY_SECRET', None))
+            missing_spec = DeploySpec(
+                name='missing-cmd',
+                command=('definitely_missing_deploy_bin_xyz', '--token', 'deploy-secret-token-998877'),
+            )
+            bad_dry = execute_deploy(missing_spec, state, ws, ('testing', 'review'), dry_run=True)
+            self.assertFalse(bad_dry['ok'])
+            self.assertNotIn('deploy-secret-token-998877', ' '.join(bad_dry['command']))
+            self.assertIn('[REDACTED]', ' '.join(bad_dry['command']))
