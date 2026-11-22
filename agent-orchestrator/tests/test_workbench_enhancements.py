@@ -249,6 +249,35 @@ prompt = "设计：{{task}}"
                              ['gemini-4-neon-high', 'claude-opus-5-5-high'])
             self.assertTrue(catalog['adapters']['openai_compat']['installed'])
 
+        # 6. 动态多节点配置（自由添加 5 个自定义节点，支持不同工具/模型/审批/打回目标）
+        status, dyn, _ = req('POST', '/api/projects/register', {
+            'name': 'multi-5',
+            'workdir': str(target_repo),
+            'stages': [
+                {'name': 'lead', 'kind': 'report', 'adapter_type': 'cli_agy', 'model': 'gemini-pro-orchestrator-neon'},
+                {'name': 'design', 'kind': 'report', 'adapter_type': 'cli_agy', 'model': 'claude-opus-5-5-high', 'approval': True},
+                {'name': 'coding', 'kind': 'code', 'adapter_type': 'cli_codex', 'model': 'gpt-5.4'},
+                {'name': 'cross_review', 'kind': 'review', 'adapter_type': 'cli_agy', 'model': 'claude-sonnet-5-5-high', 'feedback_to': 'coding'},
+                {'name': 'final_review', 'kind': 'review', 'adapter_type': 'openai_compat', 'model': 'deepseek-chat', 'feedback_to': 'coding'},
+            ],
+            'proxy_url': 'http://127.0.0.1:7897',
+        }, {**auth_headers, 'Idempotency-Key': 'idem-dyn5-12345678'})
+        self.assertEqual(status, 201)
+        self.assertEqual(len(dyn['models']), 5)
+        self.assertEqual([m['name'] for m in dyn['models']],
+                         ['lead_agent', 'design_agent', 'coding_agent', 'cross_review_agent', 'final_review_agent'])
+
+        # 拒绝重复节点名
+        status, _, _ = req('POST', '/api/projects/register', {
+            'name': 'dup-stage',
+            'workdir': str(target_repo),
+            'stages': [
+                {'name': 'step1', 'kind': 'report', 'adapter_type': 'cli_agy'},
+                {'name': 'step1', 'kind': 'code', 'adapter_type': 'cli_agy'},
+            ],
+        }, {**auth_headers, 'Idempotency-Key': 'idem-dup-12345678'})
+        self.assertEqual(status, 400)
+
 
 if __name__ == '__main__':
     unittest.main()

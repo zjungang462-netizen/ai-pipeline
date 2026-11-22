@@ -14,7 +14,14 @@ from .execution_scope import execution_scope
 from .model_settings import describe_models
 
 _PROJECT_NAME_RE = re.compile(r'^[A-Za-z0-9][A-Za-z0-9._-]{0,47}$')
+_STAGE_NAME_RE = re.compile(r'^[A-Za-z0-9][A-Za-z0-9_-]{0,31}$')
 _PROMPTS_ROOT = Path(__file__).resolve().parents[2] / 'prompts'
+_ALLOWED_STAGE_KINDS = frozenset(('report', 'code', 'review'))
+_DEFAULT_PROMPTS_BY_KIND = {
+    'report': '你是资深技术专家。请仅使用只读方式分析需求与上游产物，输出结构化、可执行的分析或方案文档。\n\n任务：{task}\n\n上游产物：{upstream}',
+    'code': '你是实现工程师。请严格按照上游方案与人工审批附注修改当前工作目录中的相关文件。直接用文件读写/编辑工具修改（不要调用 shell/终端命令），仅改动方案涉及的文件；完成后简述实际修改清单。\n\n任务：{task}\n\n上游方案：{upstream}\n\n审查返工反馈：{feedback}',
+    'review': '你是独立代码复核员。请对照任务与上游方案核查本次改动，确认问题已彻底修复且未引入新缺陷，输出唯一合法的 review_verdict.json（包含 verdict 与 issues）。\n\n任务：{task}\n\n上游产物与代码改动：{upstream}',
+}
 _ALLOWED_STAGE_ADAPTER_TYPES = frozenset((
     'cli_agy', 'openai_compat', 'cli_codex', 'cli_claude', 'cli_qwen', 'cli_qoder', 'cli_grok', 'cli_doubao',
 ))
@@ -144,125 +151,220 @@ def register_managed_project(service, payload: dict[str, Any]) -> dict[str, Any]
     evidence_review = (_PROMPTS_ROOT / 'evidence_review.md').as_posix()
     verified_plan = (_PROMPTS_ROOT / 'verified_repair_plan.md').as_posix()
 
-    lines = [
-        f'# 由工作台生成的本地项目配置（preset = {preset}，按阶段独立适配器）',
-        f'state_dir = {_toml_str(state_dir.as_posix())}',
-        f'task_workdir = {_toml_str(workdir.as_posix())}',
-        '',
-        '[run_budget]',
-        'max_tokens = 350000',
-        f'max_duration_s = {max_duration_s}',
-        f'max_model_calls = {max_model_calls}',
-        'max_unknown_calls = 2',
-        '',
-    ]
+    raw_stages = payload.get('stages')
+    if raw_stages is not None:
+        if not isinstance(raw_stages, list) or not 1 <= len(raw_stages) <= 12:
+            raise ValueError('动态节点列表 stages 须包含 1..12 个节点')
+        dynamic_stages: list[dict[str, Any]] = []
+        seen_names: list[str] = []
+        for idx, item in enumerate(raw_stages, 1):
+            if not isinstance(item, dict):
+                raise ValueError(f'第 {idx} 个节点必须是对象')
+            sname = str(item.get('name') or '').strip()
+            if not _STAGE_NAME_RE.fullmatch(sname):
+                raise ValueError(f'第 {idx} 个节点名不合法：{sname!r}（仅允许字母/数字/下划线/短横线）')
+            if sname in seen_names:
+                raise ValueError(f'节点名重复：{sname}')
+            kind = str(item.get('kind') or 'report').strip()
+            if kind not in _ALLOWED_STAGE_KINDS:
+                raise ValueError(f'节点 {sname} 类型必须为 report / code / review 之一')
+            atype = str(item.get('adapter_type') or item.get('type') or 'cli_agy').strip()
+            if atype not in _ALLOWED_STAGE_ADAPTER_TYPES:
+                raise ValueError(f'节点 {sname} 的适配器类型不受支持：{atype}')
+            default_model = api_model if atype == 'openai_compat' else (agy_model if atype == 'cli_agy' else '')
+            model = str(item.get('model') if item.get('model') is not None else default_model).strip()
+            approval = bool(item.get('approval', False))
+            feedback_to = str(item.get('feedback_to') or '').strip()
+            if feedback_to:
+                if kind != 'review':
+                    raise ValueError(f'仅 review 节点可配置 feedback_to（节点 {sname}）')
+                if feedback_to not in seen_names:
+                    raise ValueError(f'节点 {sname} 的 feedback_to ({feedback_to}) 必须指向之前的节点')
+            max_rounds = int(item.get('max_rounds', 2 if feedback_to else 1))
+            if not 1 <= max_rounds <= 5:
+                raise ValueError(f'节点 {sname} 的 max_rounds 须在 1..5 之间')
+            prompt = str(item.get('prompt') or '').strip() or _DEFAULT_PROMPTS_BY_KIND[kind]
+            seen_names.append(sname)
+            dynamic_stages.append({
+                'name': sname,
+                'kind': kind,
+                'adapter_name': f'{sname}_agent',
+                'adapter_type': atype,
+                'model': model,
+                'approval': approval,
+                'feedback_to': feedback_to,
+                'max_rounds': max_rounds,
+                'prompt': prompt,
+            })
 
-    stage_adapter_names: dict[str, str] = {}
-    for stage_name, default_type in _PRESET_DEFAULT_STAGES[preset]:
-        override = stage_adapters.get(stage_name) if isinstance(stage_adapters.get(stage_name), dict) else {}
-        atype = str(override.get('type') or default_type).strip()
-        if atype not in _ALLOWED_STAGE_ADAPTER_TYPES:
-            raise ValueError(f'阶段 {stage_name} 的适配器类型不受支持：{atype}')
-        default_model = api_model if atype == 'openai_compat' else (agy_model if atype == 'cli_agy' else '')
-        model = str(override.get('model') if override.get('model') is not None else default_model).strip()
-        adapter_name = f'{stage_name}_agent'
-        stage_adapter_names[stage_name] = adapter_name
-        lines.append(f'[adapters.{adapter_name}]')
-        lines.append(f'type = {_toml_str(atype)}')
-        if atype == 'openai_compat':
-            lines.append(f'base_url = {_toml_str(api_base_url)}')
-            lines.append(f'api_key_env = {_toml_str(api_key_env)}')
-            lines.append(f'model = {_toml_str(model or api_model)}')
-            lines.append('review_json_mode = true')
-        elif atype == 'cli_agy':
-            if model:
-                lines.append(f'model = {_toml_str(model)}')
-            lines.append(f'allow_patch_probe = {"true" if allow_patch_probe else "false"}')
-            if proxy_url:
-                lines.append(f'proxy_url = {_toml_str(proxy_url)}')
-        else:
-            if model:
-                lines.append(f'model = {_toml_str(model)}')
-            if atype in ('cli_grok', 'cli_doubao') and proxy_url:
-                lines.append(f'proxy_url = {_toml_str(proxy_url)}')
-        lines.append('')
+        lines = [
+            f'# 由工作台生成的动态多节点本地项目配置（共 {len(dynamic_stages)} 个节点）',
+            f'state_dir = {_toml_str(state_dir.as_posix())}',
+            f'task_workdir = {_toml_str(workdir.as_posix())}',
+            '',
+            '[run_budget]',
+            'max_tokens = 350000',
+            f'max_duration_s = {max_duration_s}',
+            f'max_model_calls = {max_model_calls}',
+            'max_unknown_calls = 2',
+            '',
+        ]
+        for st in dynamic_stages:
+            atype = st['adapter_type']
+            lines.append(f'[adapters.{st["adapter_name"]}]')
+            lines.append(f'type = {_toml_str(atype)}')
+            if atype == 'openai_compat':
+                lines.append(f'base_url = {_toml_str(api_base_url)}')
+                lines.append(f'api_key_env = {_toml_str(api_key_env)}')
+                lines.append(f'model = {_toml_str(st["model"] or api_model)}')
+                lines.append('review_json_mode = true')
+            elif atype == 'cli_agy':
+                if st['model']:
+                    lines.append(f'model = {_toml_str(st["model"])}')
+                lines.append(f'allow_patch_probe = {"true" if allow_patch_probe else "false"}')
+                if proxy_url:
+                    lines.append(f'proxy_url = {_toml_str(proxy_url)}')
+            else:
+                if st['model']:
+                    lines.append(f'model = {_toml_str(st["model"])}')
+                if atype in ('cli_grok', 'cli_doubao') and proxy_url:
+                    lines.append(f'proxy_url = {_toml_str(proxy_url)}')
+            lines.append('')
 
-    if preset == 'review_only':
-        lines += [
-            '[[stages]]',
-            'name = "code_review"',
-            'kind = "report"',
-            f'adapter = {_toml_str(stage_adapter_names["code_review"])}',
-            f'prompt = {_toml_str(evidence_review)}',
-            'timeout_s = 240',
-            'max_attempts = 1',
-        ]
-    elif preset == 'review_plan_fix':
-        lines += [
-            '[[stages]]',
-            'name = "code_review"',
-            'kind = "report"',
-            f'adapter = {_toml_str(stage_adapter_names["code_review"])}',
-            f'prompt = {_toml_str(evidence_review)}',
-            'timeout_s = 240',
-            'max_attempts = 1',
-            '',
-            '[[stages]]',
-            'name = "repair_plan"',
-            'kind = "report"',
-            f'adapter = {_toml_str(stage_adapter_names["repair_plan"])}',
-            'approval = true',
-            f'prompt = {_toml_str(verified_plan)}',
-            'timeout_s = 240',
-            'max_attempts = 1',
-            '',
-            '[[stages]]',
-            'name = "coding"',
-            'kind = "code"',
-            f'adapter = {_toml_str(stage_adapter_names["coding"])}',
-            'prompt = "你是实现工程师。请严格按照已批准的修复方案与人工审批附注修改当前工作目录中的相关文件。直接用文件读写/编辑工具修改（不要调用 shell/终端命令），仅改动方案涉及的文件；完成后简述实际修改清单。\\n\\n任务：{task}\\n\\n上游审查与修复方案：{upstream}\\n\\n终审返工反馈：{feedback}"',
-            'timeout_s = 240',
-            'max_attempts = 1',
-            '',
-            '[[stages]]',
-            'name = "final_review"',
-            'kind = "review"',
-            f'adapter = {_toml_str(stage_adapter_names["final_review"])}',
-            'prompt = "你是独立代码复核员。请对照任务与已批准的修复方案核查本次代码改动（累积 diff），确认采纳项已彻底修复且未引入新缺陷，输出唯一合法的 review_verdict.json。\\n\\n任务：{task}\\n\\n上游产物与代码改动：{upstream}"',
-            'feedback_to = "coding"',
-            'max_rounds = 2',
-            'timeout_s = 120',
-            'max_attempts = 1',
-        ]
+        for st in dynamic_stages:
+            lines.append('[[stages]]')
+            lines.append(f'name = {_toml_str(st["name"])}')
+            lines.append(f'kind = {_toml_str(st["kind"])}')
+            lines.append(f'adapter = {_toml_str(st["adapter_name"])}')
+            if st['approval']:
+                lines.append('approval = true')
+            if st['feedback_to']:
+                lines.append(f'feedback_to = {_toml_str(st["feedback_to"])}')
+                lines.append(f'max_rounds = {st["max_rounds"]}')
+            lines.append(f'prompt = {_toml_str(st["prompt"])}')
+            lines.append(f'timeout_s = {240 if st["adapter_type"].startswith("cli_") else 120}')
+            lines.append('max_attempts = 1')
+            lines.append('')
     else:
-        lines += [
-            '[[stages]]',
-            'name = "design"',
-            'kind = "report"',
-            f'adapter = {_toml_str(stage_adapter_names["design"])}',
-            'approval = true',
-            'prompt = "你是技术架构师。请针对任务输出简洁、可执行的实现方案与修改清单，供负责人审批后进入编码。\\n\\n任务：{task}\\n\\n上游产物：{upstream}"',
-            'timeout_s = 120',
-            'max_attempts = 1',
+        lines = [
+            f'# 由工作台生成的本地项目配置（preset = {preset}，按阶段独立适配器）',
+            f'state_dir = {_toml_str(state_dir.as_posix())}',
+            f'task_workdir = {_toml_str(workdir.as_posix())}',
             '',
-            '[[stages]]',
-            'name = "coding"',
-            'kind = "code"',
-            f'adapter = {_toml_str(stage_adapter_names["coding"])}',
-            'prompt = "你是实现工程师。请严格按照已批准的方案与人工附注修改工作区文件，直接用文件编辑工具修改（不要调用 shell/终端命令）。\\n\\n任务：{task}\\n\\n上游方案：{upstream}\\n\\n审查反馈：{feedback}"',
-            'timeout_s = 240',
-            'max_attempts = 1',
+            '[run_budget]',
+            'max_tokens = 350000',
+            f'max_duration_s = {max_duration_s}',
+            f'max_model_calls = {max_model_calls}',
+            'max_unknown_calls = 2',
             '',
-            '[[stages]]',
-            'name = "review"',
-            'kind = "review"',
-            f'adapter = {_toml_str(stage_adapter_names["review"])}',
-            'prompt = "你是代码审查员。请核对任务需求与代码变更，输出唯一合法的 review_verdict.json。\\n\\n任务：{task}\\n\\n上游产物：{upstream}"',
-            'feedback_to = "coding"',
-            'max_rounds = 2',
-            'timeout_s = 120',
-            'max_attempts = 1',
         ]
+
+        stage_adapter_names: dict[str, str] = {}
+        for stage_name, default_type in _PRESET_DEFAULT_STAGES[preset]:
+            override = stage_adapters.get(stage_name) if isinstance(stage_adapters.get(stage_name), dict) else {}
+            atype = str(override.get('type') or default_type).strip()
+            if atype not in _ALLOWED_STAGE_ADAPTER_TYPES:
+                raise ValueError(f'阶段 {stage_name} 的适配器类型不受支持：{atype}')
+            default_model = api_model if atype == 'openai_compat' else (agy_model if atype == 'cli_agy' else '')
+            model = str(override.get('model') if override.get('model') is not None else default_model).strip()
+            adapter_name = f'{stage_name}_agent'
+            stage_adapter_names[stage_name] = adapter_name
+            lines.append(f'[adapters.{adapter_name}]')
+            lines.append(f'type = {_toml_str(atype)}')
+            if atype == 'openai_compat':
+                lines.append(f'base_url = {_toml_str(api_base_url)}')
+                lines.append(f'api_key_env = {_toml_str(api_key_env)}')
+                lines.append(f'model = {_toml_str(model or api_model)}')
+                lines.append('review_json_mode = true')
+            elif atype == 'cli_agy':
+                if model:
+                    lines.append(f'model = {_toml_str(model)}')
+                lines.append(f'allow_patch_probe = {"true" if allow_patch_probe else "false"}')
+                if proxy_url:
+                    lines.append(f'proxy_url = {_toml_str(proxy_url)}')
+            else:
+                if model:
+                    lines.append(f'model = {_toml_str(model)}')
+                if atype in ('cli_grok', 'cli_doubao') and proxy_url:
+                    lines.append(f'proxy_url = {_toml_str(proxy_url)}')
+            lines.append('')
+
+        if preset == 'review_only':
+            lines += [
+                '[[stages]]',
+                'name = "code_review"',
+                'kind = "report"',
+                f'adapter = {_toml_str(stage_adapter_names["code_review"])}',
+                f'prompt = {_toml_str(evidence_review)}',
+                'timeout_s = 240',
+                'max_attempts = 1',
+            ]
+        elif preset == 'review_plan_fix':
+            lines += [
+                '[[stages]]',
+                'name = "code_review"',
+                'kind = "report"',
+                f'adapter = {_toml_str(stage_adapter_names["code_review"])}',
+                f'prompt = {_toml_str(evidence_review)}',
+                'timeout_s = 240',
+                'max_attempts = 1',
+                '',
+                '[[stages]]',
+                'name = "repair_plan"',
+                'kind = "report"',
+                f'adapter = {_toml_str(stage_adapter_names["repair_plan"])}',
+                'approval = true',
+                f'prompt = {_toml_str(verified_plan)}',
+                'timeout_s = 240',
+                'max_attempts = 1',
+                '',
+                '[[stages]]',
+                'name = "coding"',
+                'kind = "code"',
+                f'adapter = {_toml_str(stage_adapter_names["coding"])}',
+                'prompt = "你是实现工程师。请严格按照已批准的修复方案与人工审批附注修改当前工作目录中的相关文件。直接用文件读写/编辑工具修改（不要调用 shell/终端命令），仅改动方案涉及的文件；完成后简述实际修改清单。\\n\\n任务：{task}\\n\\n上游审查与修复方案：{upstream}\\n\\n终审返工反馈：{feedback}"',
+                'timeout_s = 240',
+                'max_attempts = 1',
+                '',
+                '[[stages]]',
+                'name = "final_review"',
+                'kind = "review"',
+                f'adapter = {_toml_str(stage_adapter_names["final_review"])}',
+                'prompt = "你是独立代码复核员。请对照任务与已批准的修复方案核查本次代码改动（累积 diff），确认采纳项已彻底修复且未引入新缺陷，输出唯一合法的 review_verdict.json。\\n\\n任务：{task}\\n\\n上游产物与代码改动：{upstream}"',
+                'feedback_to = "coding"',
+                'max_rounds = 2',
+                'timeout_s = 120',
+                'max_attempts = 1',
+            ]
+        else:
+            lines += [
+                '[[stages]]',
+                'name = "design"',
+                'kind = "report"',
+                f'adapter = {_toml_str(stage_adapter_names["design"])}',
+                'approval = true',
+                'prompt = "你是技术架构师。请针对任务输出简洁、可执行的实现方案与修改清单，供负责人审批后进入编码。\\n\\n任务：{task}\\n\\n上游产物：{upstream}"',
+                'timeout_s = 120',
+                'max_attempts = 1',
+                '',
+                '[[stages]]',
+                'name = "coding"',
+                'kind = "code"',
+                f'adapter = {_toml_str(stage_adapter_names["coding"])}',
+                'prompt = "你是实现工程师。请严格按照已批准的方案与人工附注修改工作区文件，直接用文件编辑工具修改（不要调用 shell/终端命令）。\\n\\n任务：{task}\\n\\n上游方案：{upstream}\\n\\n审查反馈：{feedback}"',
+                'timeout_s = 240',
+                'max_attempts = 1',
+                '',
+                '[[stages]]',
+                'name = "review"',
+                'kind = "review"',
+                f'adapter = {_toml_str(stage_adapter_names["review"])}',
+                'prompt = "你是代码审查员。请核对任务需求与代码变更，输出唯一合法的 review_verdict.json。\\n\\n任务：{task}\\n\\n上游产物：{upstream}"',
+                'feedback_to = "coding"',
+                'max_rounds = 2',
+                'timeout_s = 120',
+                'max_attempts = 1',
+            ]
 
     tmp_path = config_path.with_suffix('.toml.tmp')
     tmp_path.write_text('\n'.join(lines) + '\n', encoding='utf-8')

@@ -270,20 +270,33 @@ if($('route-scan'))$('route-scan').onclick=async()=>{
 };
 const PM_PRESET_STAGES={
  review_plan_fix:[
-  {name:'code_review',label:'01 代码审查',type:'cli_agy',model:'gemini-3.8-pro-high'},
-  {name:'repair_plan',label:'02 修复方案（审批）',type:'cli_agy',model:'gemini-3.8-flash-high'},
-  {name:'coding',label:'03 代码实现',type:'cli_agy',model:'gemini-3.8-flash-high'},
-  {name:'final_review',label:'04 终审复核',type:'openai_compat',model:'deepseek-chat'},
+  {name:'code_review',kind:'report',adapter_type:'cli_agy',model:'gemini-4-neon-high',approval:false,feedback_to:'',prompt:''},
+  {name:'repair_plan',kind:'report',adapter_type:'cli_agy',model:'gemini-3.8-flash-high',approval:true,feedback_to:'',prompt:''},
+  {name:'coding',kind:'code',adapter_type:'cli_agy',model:'gemini-3.8-flash-high',approval:false,feedback_to:'',prompt:''},
+  {name:'final_review',kind:'review',adapter_type:'openai_compat',model:'deepseek-chat',approval:false,feedback_to:'coding',prompt:''},
+ ],
+ multi_agent_5:[
+  {name:'lead',kind:'report',adapter_type:'cli_agy',model:'gemini-pro-orchestrator-neon',approval:false,feedback_to:'',prompt:'你是技术指挥官。请拆解任务目标、明确模块边界与验收标准。\n\n任务：{task}\n\n上游产物：{upstream}'},
+  {name:'design',kind:'report',adapter_type:'cli_agy',model:'claude-opus-5-5-high',approval:true,feedback_to:'',prompt:'你是系统架构师。请基于指挥拆解输出具体文件改动方案与边界条件。\n\n任务：{task}\n\n上游产物：{upstream}'},
+  {name:'coding',kind:'code',adapter_type:'cli_agy',model:'gemini-3.8-flash-high',approval:false,feedback_to:'',prompt:''},
+  {name:'cross_review',kind:'review',adapter_type:'cli_agy',model:'claude-sonnet-5-5-high',approval:false,feedback_to:'coding',prompt:''},
+  {name:'final_review',kind:'review',adapter_type:'openai_compat',model:'deepseek-chat',approval:false,feedback_to:'coding',prompt:''},
  ],
  review_only:[
-  {name:'code_review',label:'01 只读代码审查',type:'cli_agy',model:'gemini-3.8-pro-high'},
+  {name:'code_review',kind:'report',adapter_type:'cli_agy',model:'gemini-4-neon-high',approval:false,feedback_to:'',prompt:''},
  ],
  standard_dev:[
-  {name:'design',label:'01 方案设计（审批）',type:'openai_compat',model:'deepseek-reasoner'},
-  {name:'coding',label:'02 代码实现',type:'cli_agy',model:'gemini-3.8-flash-high'},
-  {name:'review',label:'03 独立审查',type:'openai_compat',model:'deepseek-chat'},
+  {name:'design',kind:'report',adapter_type:'openai_compat',model:'deepseek-chat',approval:true,feedback_to:'',prompt:''},
+  {name:'coding',kind:'code',adapter_type:'cli_agy',model:'gemini-3.8-flash-high',approval:false,feedback_to:'',prompt:''},
+  {name:'review',kind:'review',adapter_type:'openai_compat',model:'deepseek-chat',approval:false,feedback_to:'coding',prompt:''},
  ],
 };
+let pmDraftStages=[];
+function resetProjectDraftFromPreset(){
+ const preset=$('pm-preset')?.value||'review_plan_fix';
+ pmDraftStages=(PM_PRESET_STAGES[preset]||PM_PRESET_STAGES.review_plan_fix).map(s=>({...s}));
+ renderProjectStageEditor();
+}
 function populateProjectModelSelect(sel,type,preferred){
  const models=catalogModelsFor(type);
  sel.replaceChildren(Object.assign(el('option','','自定义 / 工具默认'),{value:''}));
@@ -297,13 +310,33 @@ function populateProjectModelSelect(sel,type,preferred){
  else sel.value='';
 }
 function renderProjectStageEditor(){
- const list=$('pm-stage-list'),preset=$('pm-preset')?.value||'review_plan_fix';
+ const list=$('pm-stage-list');
  if(!list)return;
+ if(!pmDraftStages.length)pmDraftStages=PM_PRESET_STAGES.review_plan_fix.map(s=>({...s}));
  list.replaceChildren();
- for(const st of PM_PRESET_STAGES[preset]||[]){
-  const row=el('div','pm-stage-row');
-  row.dataset.stage=st.name;
-  const nameEl=el('div','pm-stage-label',st.label);
+ pmDraftStages.forEach((st,idx)=>{
+  const card=el('div','pm-node-card');
+  const head=el('div','pm-node-head');
+  const numBadge=el('span','stage-number',String(idx+1).padStart(2,'0'));
+  const nameInp=el('input','pm-node-name');nameInp.value=st.name;nameInp.maxLength=32;nameInp.placeholder='节点英文名（如 lead / coding）';
+  nameInp.oninput=()=>{st.name=nameInp.value.trim();};
+  const kindSel=el('select','pm-node-kind');
+  for(const [k,v] of [['report','方案/报告 (report)'],['code','代码实现 (code)'],['review','独立审查 (review)']]){
+   kindSel.append(Object.assign(el('option','',v),{value:k}));
+  }
+  kindSel.value=st.kind;
+  kindSel.onchange=()=>{st.kind=kindSel.value;if(st.kind!=='review')st.feedback_to='';renderProjectStageEditor();};
+  const ops=el('div','pm-node-ops');
+  const upBtn=el('button','icon-button','↑');upBtn.type='button';upBtn.title='上移';upBtn.disabled=idx===0;
+  upBtn.onclick=()=>{const t=pmDraftStages[idx-1];pmDraftStages[idx-1]=pmDraftStages[idx];pmDraftStages[idx]=t;renderProjectStageEditor();};
+  const downBtn=el('button','icon-button','↓');downBtn.type='button';downBtn.title='下移';downBtn.disabled=idx===pmDraftStages.length-1;
+  downBtn.onclick=()=>{const t=pmDraftStages[idx+1];pmDraftStages[idx+1]=pmDraftStages[idx];pmDraftStages[idx]=t;renderProjectStageEditor();};
+  const delBtn=el('button','icon-button','×');delBtn.type='button';delBtn.title='删除节点';delBtn.disabled=pmDraftStages.length<=1;
+  delBtn.onclick=()=>{pmDraftStages.splice(idx,1);renderProjectStageEditor();};
+  ops.append(upBtn,downBtn,delBtn);
+  head.append(numBadge,nameInp,kindSel,ops);
+
+  const body=el('div','pm-node-grid');
   const typeSel=el('select','pm-stage-type');
   for(const [k,v] of Object.entries(ADAPTER_TYPE_LABELS)){
    if(k==='fake'||k==='cli_dsh')continue;
@@ -311,22 +344,52 @@ function renderProjectStageEditor(){
    const badge=entry?(entry.installed?`（可用${entry.source==='live_cli'||entry.source==='live_api'?'·'+entry.models.length:''}）`:'（未检测到）'):'';
    typeSel.append(Object.assign(el('option','',v+badge),{value:k}));
   }
-  typeSel.value=st.type;
+  typeSel.value=st.adapter_type||'cli_agy';
   const modelSel=el('select','pm-stage-model-select');
   const modelInp=el('input','pm-stage-model');
   modelInp.maxLength=160;modelInp.placeholder='手动输入模型 ID（可选）';
-  populateProjectModelSelect(modelSel,st.type,st.model);
-  modelInp.value=modelSel.value||st.model;
-  typeSel.onchange=()=>{populateProjectModelSelect(modelSel,typeSel.value,'');modelInp.value=modelSel.value;};
-  modelSel.onchange=()=>{if(modelSel.value)modelInp.value=modelSel.value;};
-  modelInp.oninput=()=>{const v=modelInp.value.trim();const ids=catalogModelsFor(typeSel.value).map(m=>m.id);modelSel.value=ids.includes(v)?v:'';};
-  const modelCol=el('div','pm-model-combo');
-  modelCol.append(modelSel,modelInp);
-  row.append(nameEl,typeSel,modelCol);
-  list.append(row);
- }
+  populateProjectModelSelect(modelSel,typeSel.value,st.model);
+  modelInp.value=st.model||modelSel.value||'';
+  st.model=modelInp.value;
+  typeSel.onchange=()=>{st.adapter_type=typeSel.value;populateProjectModelSelect(modelSel,typeSel.value,'');modelInp.value=modelSel.value;st.model=modelInp.value;};
+  modelSel.onchange=()=>{if(modelSel.value){modelInp.value=modelSel.value;st.model=modelSel.value;}};
+  modelInp.oninput=()=>{const v=modelInp.value.trim();st.model=v;const ids=catalogModelsFor(typeSel.value).map(m=>m.id);modelSel.value=ids.includes(v)?v:'';};
+  body.append(typeSel,modelSel,modelInp);
+
+  const foot=el('div','pm-node-foot');
+  const apprLabel=el('label','pm-inline-check');
+  const apprChk=el('input');apprChk.type='checkbox';apprChk.checked=!!st.approval;
+  apprChk.onchange=()=>{st.approval=apprChk.checked;};
+  apprLabel.append(apprChk,el('span','','完成后需人工审批'));
+  foot.append(apprLabel);
+  if(st.kind==='review'&&idx>0){
+   const fbWrap=el('label','pm-inline-fb','不通过时打回：');
+   const fbSel=el('select');
+   fbSel.append(Object.assign(el('option','','不自动打回'),{value:''}));
+   for(const prev of pmDraftStages.slice(0,idx)){
+    if(prev.name)fbSel.append(Object.assign(el('option','',prev.name),{value:prev.name}));
+   }
+   fbSel.value=st.feedback_to||'';
+   fbSel.onchange=()=>{st.feedback_to=fbSel.value;};
+   fbWrap.append(fbSel);foot.append(fbWrap);
+  }
+  const promptDetails=el('details','pm-node-prompt');
+  promptDetails.append(el('summary','','自定义本节点提示词（留空使用角色默认）'));
+  const promptTa=el('textarea');promptTa.rows=2;promptTa.maxLength=4000;promptTa.value=st.prompt||'';promptTa.placeholder='支持 {task}、{upstream}、{feedback} 占位符';
+  promptTa.oninput=()=>{st.prompt=promptTa.value;};
+  promptDetails.append(promptTa);
+
+  card.append(head,body,foot,promptDetails);
+  list.append(card);
+ });
 }
-if($('pm-preset'))$('pm-preset').onchange=renderProjectStageEditor;
+if($('pm-preset'))$('pm-preset').onchange=resetProjectDraftFromPreset;
+if($('pm-add-stage'))$('pm-add-stage').onclick=()=>{
+ if(pmDraftStages.length>=12){toast('最多支持 12 个动态节点');return;}
+ const n=pmDraftStages.length+1;
+ pmDraftStages.push({name:`stage_${n}`,kind:'report',adapter_type:'cli_agy',model:catalogModelsFor('cli_agy')[0]?.id||'gemini-3.8-flash-high',approval:false,feedback_to:'',prompt:''});
+ renderProjectStageEditor();
+};
 if($('refresh-catalog-task'))$('refresh-catalog-task').onclick=async()=>{
  $('refresh-catalog-task').disabled=true;
  try{await loadModelCatalog(true);renderModelSettings();toast('已刷新本机可用模型目录');}finally{$('refresh-catalog-task').disabled=false;}
@@ -336,27 +399,26 @@ if($('refresh-catalog-pm'))$('refresh-catalog-pm').onclick=async()=>{
  try{await loadModelCatalog(true);renderProjectStageEditor();toast('已刷新本机可用模型目录');}finally{$('refresh-catalog-pm').disabled=false;}
 };
 if($('project-manage-open'))$('project-manage-open').onclick=()=>{
- renderProjectStageEditor();$('project-dialog')?.showModal();
+ resetProjectDraftFromPreset();$('project-dialog')?.showModal();
  if(!liveModelCatalog&&typeof api==='function')loadModelCatalog(false).then(()=>{if($('project-dialog')?.open)renderProjectStageEditor();});
 };
 if($('project-form'))$('project-form').onsubmit=async event=>{
  event.preventDefault();
  const btn=$('pm-submit');btn.disabled=true;
  try{
-  const stage_adapters={};
-  const rows=$('pm-stage-list')?.children||[];
-  for(const row of rows){
-   if(!row.dataset?.stage)continue;
-   const typeVal=row.children[1]?.value||'cli_agy';
-   const combo=row.children[2];
-   const modelVal=(combo?.children?.[1]?.value||combo?.children?.[0]?.value||'').trim();
-   stage_adapters[row.dataset.stage]={type:typeVal,model:modelVal};
-  }
+  const stagesPayload=pmDraftStages.map(st=>({
+   name:(st.name||'').trim(),
+   kind:st.kind||'report',
+   adapter_type:st.adapter_type||'cli_agy',
+   model:(st.model||'').trim(),
+   approval:!!st.approval,
+   feedback_to:st.kind==='review'?(st.feedback_to||''):'',
+   prompt:(st.prompt||'').trim(),
+  }));
   const created=await api('/projects/register',{method:'POST',body:{
    name:$('pm-name').value.trim(),
    workdir:$('pm-workdir').value.trim(),
-   preset:$('pm-preset').value,
-   stage_adapters,
+   stages:stagesPayload,
    proxy_url:$('pm-proxy').value.trim(),
    max_duration_s:Number($('pm-max-duration')?.value||900),
    max_model_calls:Number($('pm-max-calls')?.value||15),
@@ -366,6 +428,6 @@ if($('project-form'))$('project-form').onsubmit=async event=>{
   projects=(await api('/projects')).projects;
   if(typeof applyProjects==='function')applyProjects();
   if(typeof restoreListFilters==='function')restoreListFilters();
-  toast(`项目 ${created.name} 已按节点独立配置并热加载，可直接新建任务。`);
+  toast(`项目 ${created.name}（${stagesPayload.length} 个动态节点）已热加载，可直接新建任务。`);
  }catch(error){toast(error.message);}finally{btn.disabled=false;}
 };
