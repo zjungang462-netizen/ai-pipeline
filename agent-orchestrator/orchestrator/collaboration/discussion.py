@@ -148,10 +148,51 @@ def settle_parent(run, topic, usage):
         state.save()
 
 
-def _wrap_streaming_adapter(adapter, store, run_id: str, topic_id: str, role: str):
+def _collect_human_interjections(
+    store,
+    run_id: str,
+    since_ts: float,
+    *,
+    max_items: int = 5,
+    max_chars: int = 1200,
+) -> str:
+    """读取圆桌会诊启动后，人工主持人在该任务房间新发的留言（仅 source == 'human'）。"""
+    try:
+        events = store.events(run_id, 0, 500)
+    except Exception:
+        return ''
+    notes: list[str] = []
+    for ev in events:
+        if ev.get('kind') != 'message':
+            continue
+        if float(ev.get('created', 0)) <= since_ts:
+            continue
+        payload = ev.get('payload') or {}
+        if payload.get('source') != 'human':
+            continue
+        body = str(payload.get('body') or '').strip()
+        if body:
+            notes.append(body)
+    if not notes:
+        return ''
+    recent = notes[-max_items:]
+    joined = '\n'.join(f'- {item[:400]}' for item in recent)
+    return joined[:max_chars]
+
+
+def _wrap_roundtable_adapter(
+    adapter,
+    store,
+    run_id: str,
+    topic_id: str,
+    role: str,
+    *,
+    stream: bool,
+    since_ts: float,
+):
     from .discussion_stream import DiscussionEventSink, run_streaming_turn
 
-    class _StreamingProxy:
+    class _RoundtableProxy:
         def __init__(self, inner):
             self._inner = inner
 
@@ -159,10 +200,73 @@ def _wrap_streaming_adapter(adapter, store, run_id: str, topic_id: str, role: st
             return getattr(self._inner, item)
 
         def run(self, prompt, workdir, ctx):
-            sink = DiscussionEventSink(store, run_id, topic_id, role, turn_id=ctx.stage)
-            return run_streaming_turn(self._inner, prompt, workdir, ctx, sink)
+            # 第 2 轮及之后（含最终共识）自动注入会诊期间人工主持人的新留言引导
+            stage_name = getattr(ctx, 'stage', '') or ''
+            if stage_name.startswith(('r2_', 'r3_')) or stage_name == 'turn_consensus':
+                interjections = _collect_human_interjections(store, run_id, since_ts)
+                if interjections:
+                    prompt = (
+                        prompt
+                        + '\n### 人工主持人最新插话引导（本轮请优先按此方向收敛，不可忽略）\n'
+                        + interjections
+                        + '\n'
+                    )
+            if stream:
+                sink = DiscussionEventSink(store, run_id, topic_id, role, turn_id=stage_name)
+                if hasattr(self._inner, 'stream_tokens'):
+                    return run_streaming_turn(self._inner, prompt, workdir, ctx, sink)
+                # 只读 CLI 席位无逐 token HTTP 流：推送起止事件以便前端展示实时思考状态
+                sink.start()
+                result = self._inner.run(prompt, workdir, ctx)
+                if result.ok and result.text:
+                    sink.on_token(result.text[:1600])
+                sink.finish(status='done' if result.ok else 'failed')
+                return result
+            return self._inner.run(prompt, workdir, ctx)
 
-    return _StreamingProxy(adapter)
+    return _RoundtableProxy(adapter)
+
+
+def _build_seat_adapter(
+    role: str,
+    adapter_type: str,
+    custom_model: str,
+    original: Config,
+    apis: list[AdapterConfig],
+    agys: list[AdapterConfig],
+) -> AdapterConfig:
+    if adapter_type == 'cli_agy':
+        agy_base = agys[0] if agys else None
+        opts: dict = {}
+        if agy_base:
+            for k in ('executable', 'proxy_url', 'model', 'allow_patch_probe'):
+                if k in agy_base.options:
+                    opts[k] = agy_base.options[k]
+        # 严格强制只读 plan + sandbox，绝不允许圆桌讨论改写代码
+        opts['mode'] = 'plan'
+        opts['sandbox'] = True
+        opts.setdefault('allow_patch_probe', True)
+        opts['timeout_s'] = 90
+        if custom_model:
+            opts['model'] = custom_model
+        return AdapterConfig(role, 'cli_agy', opts)
+    if not apis:
+        raise ValueError(f'席位 {role} 选择了 openai_compat，但项目配置中没有可用的 openai_compat API 适配器')
+    kind = 'review' if role in ('reviewer', 'skeptic') else 'code'
+    selected = next(
+        (
+            original.adapters[s.adapter]
+            for s in original.stages
+            if s.kind == kind
+            and s.adapter in original.adapters
+            and original.adapters[s.adapter].type == 'openai_compat'
+        ),
+        apis[0],
+    )
+    opts = {**selected.options, 'max_tokens': 1000, 'timeout_s': 45, 'temperature': .15}
+    if custom_model:
+        opts['model'] = custom_model
+    return AdapterConfig(role, 'openai_compat', opts)
 
 
 def execute(store, topic_id, *, stream_tokens: bool = False):
@@ -173,8 +277,11 @@ def execute(store, topic_id, *, stream_tokens: bool = False):
     if original.source_hash != topic['snapshot'].get('config_hash'):
         raise ValueError('会诊绑定的配置已变化，拒绝使用另一份配置')
     apis = [a for a in original.adapters.values() if a.type == 'openai_compat']
-    if not apis:
-        raise ValueError('会诊目前需要已配置的 API 适配器，不能把实验 CLI 当作只读讨论后端')
+    agys = [a for a in original.adapters.values() if a.type == 'cli_agy']
+    rt = topic['snapshot'].get('roundtable') if isinstance(topic['snapshot'].get('roundtable'), dict) else {}
+    role_adapters = rt.get('role_adapters') if isinstance(rt.get('role_adapters'), dict) else {}
+    if not apis and not agys and 'cli_agy' not in role_adapters.values():
+        raise ValueError('会诊需要已配置的 openai_compat API 或 cli_agy 只读适配器')
     # 独立分析空间：对运行中/历史任务提问不会改变其不可变 metrics。
     base = Path(run['state_dir']) / 'discussions' / topic_id
     base.mkdir(parents=True, exist_ok=True)
@@ -184,27 +291,25 @@ def execute(store, topic_id, *, stream_tokens: bool = False):
     try:
         if store.thread(topic_id)['status'] not in ('queued', 'running'):
             return
+        topic_started_at = float(topic.get('created') or time.time())
         store.update_thread(topic_id, 'running', analysis_run=topic_id)
         budget = reserve_parent(run, topic, original)
-        rt = topic['snapshot'].get('roundtable') if isinstance(topic['snapshot'].get('roundtable'), dict) else {}
         rounds = rt.get('rounds', 1)
         if type(rounds) is not int or not 1 <= rounds <= 3:
             rounds = 1
         role_models = rt.get('role_models') if isinstance(rt.get('role_models'), dict) else {}
         want_consensus = bool(rt.get('consensus', False))
+        default_backend = 'openai_compat' if apis else 'cli_agy'
 
-        # 构造每个席位的只读 API 适配器（支持不同席位指定不同模型）
-        adapters = {}
+        # 构造每个席位的只读适配器（支持 openai_compat 与 cli_agy 只读 plan+sandbox 混编）
+        adapters: dict[str, AdapterConfig] = {}
         for role in list(topic['roles']) + (['consensus'] if want_consensus else []):
-            kind = 'review' if role in ('reviewer', 'skeptic') else 'code'
-            selected = next((original.adapters[s.adapter] for s in original.stages
-                             if s.kind == kind and s.adapter in original.adapters
-                             and original.adapters[s.adapter].type == 'openai_compat'), apis[0])
-            opts = {**selected.options, 'max_tokens': 1000, 'timeout_s': 45, 'temperature': .15}
+            chosen_backend = str(role_adapters.get(role) or default_backend).strip()
+            if chosen_backend not in ('openai_compat', 'cli_agy'):
+                chosen_backend = default_backend
             custom_model = role_models.get(role)
-            if isinstance(custom_model, str) and custom_model.strip():
-                opts['model'] = custom_model.strip()
-            adapters[role] = AdapterConfig(role, 'openai_compat', opts)
+            custom_model_str = custom_model.strip() if isinstance(custom_model, str) else ''
+            adapters[role] = _build_seat_adapter(role, chosen_backend, custom_model_str, original, apis, agys)
 
         snapshot = json.dumps(topic['snapshot'], ensure_ascii=False)
         question = json.dumps(topic['question'], ensure_ascii=False)
@@ -235,7 +340,8 @@ def execute(store, topic_id, *, stream_tokens: bool = False):
                     + '此前角色发言记录：\n{upstream}\n',
                     encoding='utf8',
                 )
-                spec = StageSpec(name, role, str(prompt), kind='report', max_attempts=1, timeout_s=45)
+                turn_timeout = 90 if adapters[role].type == 'cli_agy' else 45
+                spec = StageSpec(name, role, str(prompt), kind='report', max_attempts=1, timeout_s=turn_timeout)
                 stages.append(spec)
                 turn_meta.append((spec, role, r_idx))
 
@@ -250,12 +356,13 @@ def execute(store, topic_id, *, stream_tokens: bool = False):
                 '完整讨论记录：\n{upstream}\n',
                 encoding='utf8',
             )
-            cspec = StageSpec(cname, 'consensus', str(cprompt), kind='report', max_attempts=1, timeout_s=45)
+            c_timeout = 90 if adapters['consensus'].type == 'cli_agy' else 45
+            cspec = StageSpec(cname, 'consensus', str(cprompt), kind='report', max_attempts=1, timeout_s=c_timeout)
             stages.append(cspec)
             turn_meta.append((cspec, 'consensus', rounds + 1))
 
         from .config_copy import dump_config
-        maximum_duration = min(240, max(90, len(stages) * 45))
+        maximum_duration = min(360, max(90, sum(s.timeout_s for s in stages)))
         parent_job = read_json(directory(run) / 'job.json')
         if parent_job.get('status') in ('paused', 'waiting_approval'):
             maximum_duration = max(1, min(maximum_duration, parent_job['started_at'] + parent_job['max_duration_s'] - time.time()))
@@ -265,14 +372,19 @@ def execute(store, topic_id, *, stream_tokens: bool = False):
             'run_budget': {'max_tokens': budget, 'max_duration_s': maximum_duration},
             'autonomy': {'enabled': True, 'output_tokens': 1000},
             'stages': [{'name': s.name, 'adapter': s.adapter, 'prompt': s.prompt, 'kind': 'report',
-                        'timeout_s': min(45, maximum_duration), 'max_attempts': 1} for s in stages],
+                        'timeout_s': min(s.timeout_s, maximum_duration), 'max_attempts': 1} for s in stages],
             'adapters': {k: {'type': v.type, **v.options} for k, v in adapters.items()}}), encoding='utf8')
-        if stream_tokens:
+        use_inline_engine = stream_tokens or rounds > 1 or want_consensus or any(v.type == 'cli_agy' for v in adapters.values())
+        if use_inline_engine:
             config = load_config(config_path)
             built = build_all(config.adapters, {s.adapter: 'report' for s in stages})
-            streamed = {role: _wrap_streaming_adapter(ad, store, run['id'], topic_id, role)
-                        for role, ad in built.items()}
-            engine = Engine(config, streamed, topic_id, topic['question'])
+            wrapped = {
+                role: _wrap_roundtable_adapter(
+                    ad, store, run['id'], topic_id, role, stream=stream_tokens, since_ts=topic_started_at
+                )
+                for role, ad in built.items()
+            }
+            engine = Engine(config, wrapped, topic_id, topic['question'])
             engine.run()
         else:
             from ..supervisor import supervise
@@ -298,7 +410,8 @@ def execute(store, topic_id, *, stream_tokens: bool = False):
                     refs=[{
                         'snapshot_revision': topic['snapshot']['revision'],
                         'call_id': response.get('id'),
-                        'returned_model': response.get('model'),
+                        'returned_model': response.get('model') or adapters[role].options.get('model'),
+                        'adapter_type': adapters[role].type,
                         'turn': spec.name,
                         **({'round': r_idx, 'total_rounds': rounds} if rounds > 1 and role != 'consensus' else {}),
                         **({'consensus': True} if role == 'consensus' else {}),

@@ -388,7 +388,7 @@ class Service:
                     self._command_waiters.discard(key)
         threading.Thread(target=wait,daemon=True).start()
 
-    def discuss(self, key, question, roles, budget, idem, *, rounds=1, role_models=None, context_files=None, consensus=False):
+    def discuss(self, key, question, roles, budget, idem, *, rounds=1, role_models=None, role_adapters=None, context_files=None, consensus=False):
         run = self.store.run(key)
         if not isinstance(question, str) or not 1 <= len(question) <= 4000:
             raise ValueError('问题必须为 1 到 4000 字符')
@@ -415,6 +415,19 @@ class Service:
                 if len(mv) > 160 or not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9._:/-]{0,159}(?:\[(?:1M|200K)\])?', mv):
                     raise ValueError(f'角色 {r} 的模型标识格式非法')
                 clean_models[r] = mv
+        clean_adapters = {}
+        if role_adapters is not None:
+            if not isinstance(role_adapters, dict):
+                raise ValueError('role_adapters 必须为对象')
+            for r, a in role_adapters.items():
+                if r not in allowed_roles and r != 'consensus':
+                    raise ValueError(f'未知会诊角色：{r}')
+                if not isinstance(a, str) or not a.strip():
+                    continue
+                av = a.strip()
+                if av not in ('openai_compat', 'cli_agy'):
+                    raise ValueError(f'角色 {r} 的讨论后端仅支持 openai_compat 或 cli_agy（只读）')
+                clean_adapters[r] = av
         clean_files = []
         if context_files is not None:
             if not isinstance(context_files, list) or len(context_files) > 4:
@@ -427,8 +440,13 @@ class Service:
             raise Conflict('该任务已有会诊，不能并行叠加模型调用')
         from .discussion import capture
         snap = capture(run, extra_files=clean_files, question=question)
-        if rounds > 1 or clean_models or consensus:
-            snap['roundtable'] = {'rounds': rounds, 'role_models': clean_models, 'consensus': consensus}
+        if rounds > 1 or clean_models or clean_adapters or consensus:
+            snap['roundtable'] = {
+                'rounds': rounds,
+                'role_models': clean_models,
+                'role_adapters': clean_adapters,
+                'consensus': consensus,
+            }
         topic = self.store.create_thread(key, question, roles, budget, snap, idem)
         if topic['status'] == 'queued':
             self.launch_discussion(topic['id'])

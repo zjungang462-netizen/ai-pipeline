@@ -61,6 +61,8 @@ class Store:
                 CREATE TABLE IF NOT EXISTS task_templates (
                     id TEXT PRIMARY KEY, project_id TEXT NOT NULL, name TEXT NOT NULL,
                     task TEXT NOT NULL, config_hash TEXT NOT NULL, UNIQUE(project_id,name));
+                CREATE TABLE IF NOT EXISTS archived_runs (
+                    run_id TEXT PRIMARY KEY, archived_at REAL NOT NULL);
             ''')
 
     @contextmanager
@@ -111,6 +113,13 @@ class Store:
             raise KeyError('项目未登记')
         return dict(value)
 
+    def remove_project(self, key):
+        with self.connect() as db:
+            cur = db.execute('DELETE FROM projects WHERE id=?', (key,))
+        if cur.rowcount == 0:
+            raise KeyError('项目未登记')
+        return True
+
     def register_run(self, project, run_id, config, state_dir, *, managed=False, parent=None, kind='pipeline'):
         key = project + ':' + run_id
         with self.connect() as db:
@@ -125,6 +134,21 @@ class Store:
         if row is None:
             raise KeyError('运行不存在')
         return dict(row)
+
+    def set_run_archived(self, key, archived: bool):
+        self.run(key)
+        with self.connect() as db:
+            if archived:
+                db.execute('INSERT OR REPLACE INTO archived_runs(run_id,archived_at) VALUES(?,?)',
+                           (key, time.time()))
+            else:
+                db.execute('DELETE FROM archived_runs WHERE run_id=?', (key,))
+        return {'run_id': key, 'archived': bool(archived)}
+
+    def is_run_archived(self, key) -> bool:
+        with self.connect() as db:
+            row = db.execute('SELECT 1 FROM archived_runs WHERE run_id=?', (key,)).fetchone()
+        return row is not None
 
     def pin_import_config(self, key, config):
         with self.connect() as db:

@@ -144,7 +144,19 @@ main{flex:1;min-width:0;display:flex;flex-direction:column}.topbar{height:52px;f
 .message.role-skeptic .message-body{border-left:3px solid #be3a34;background:#fffcfc}
 .message.role-consensus .message-body{border-left:3px solid #b47d17;background:#fffdf6;border-color:#ead9a7}
 .roundtable-seats{margin:0 0 14px;padding:12px 14px;background:#f7faf8;border:1px solid var(--line);border-radius:10px;display:flex;flex-direction:column;gap:8px}
-.seat-row{display:grid;grid-template-columns:210px 1fr;gap:10px;align-items:center}
+.seat-row{display:grid;grid-template-columns:185px 145px 1fr;gap:8px;align-items:center}
+.pm-registered-wrap{margin:0 0 12px;padding:8px 12px;background:#f7faf8;border:1px solid var(--line);border-radius:10px}
+.pm-registered-wrap summary{cursor:pointer;font-size:12px;font-weight:600;color:#2c5240}
+.pm-registered-list{display:flex;flex-direction:column;gap:6px;margin-top:8px}
+.pm-reg-row{display:flex;align-items:center;justify-content:space-between;gap:10px;padding:6px 10px;background:#fff;border:1px solid #dde6e0;border-radius:8px}
+.pm-reg-info{display:flex;flex-direction:column;min-width:0;font-size:12px}
+.pm-reg-info span{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:420px}
+.arena-pair{display:grid;grid-template-columns:130px 1fr;gap:6px;margin-top:4px}
+.arena-grid{display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-top:12px}
+.arena-card{border:1px solid var(--line);border-radius:10px;padding:10px 12px;background:#fff;display:flex;flex-direction:column;gap:8px;min-width:0}
+.arena-card-head{display:flex;flex-direction:column;gap:4px;font-size:12px}
+.arena-diff{max-height:280px;overflow:auto;font-size:11px;border:1px solid #e2e8e4;border-radius:8px;padding:6px}
+@media(max-width:900px){.arena-grid{grid-template-columns:1fr}}
 .adopt-btn{background:#fdf3d8!important;border-color:#e5ce91!important;color:#8a5e0d!important;font-weight:600}
 .adopt-btn:hover{background:#fae9be!important}
 .message.role-tool .message-body{background:#f7fafc;border-color:#d4e3ee;border-left:3px solid #2d6f9e;padding:12px 14px}

@@ -90,3 +90,113 @@ def templates(service):
         project = projects.get(row['project_id'])
         row['usable'] = bool(project and not project.get('unavailable') and row['config_hash'] == project['config_hash'])
     return service.redact(rows)
+
+
+def export_run_report(service, key) -> dict:
+    """将单次运行的状态、阶段结论、累计代码差异与多维用量汇总为可归档的 Markdown 交付报告。"""
+    import re
+    import time
+    from .projection import code_diff, read_artifact
+
+    run = service.store.run(key)
+    snap = service.snapshot(key)
+    usage = run_summary(service, key)
+    safe_id = re.sub(r'[^A-Za-z0-9._-]+', '_', str(run['run_id']))[:80] or 'run'
+    created_str = time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(run.get('created') or 0))
+    lines = [
+        f'# 任务交付报告 · {run["run_id"]}',
+        '',
+        f'- **运行标识**：`{run["run_id"]}`',
+        f'- **生命周期状态**：`{snap.get("lifecycle")}`',
+        f'- **创建时间**：{created_str}',
+        f'- **累计耗时**：{round(float(usage.get("duration_s") or 0), 2)}s',
+        f'- **已报告 Tokens**：{usage.get("reported_tokens", 0)}（预留：{usage.get("reserved_tokens", 0)}，未知用量调用：{usage.get("unknown_calls", 0)}）',
+        '',
+        '## 任务说明',
+        '',
+        (snap.get('task') or '（无任务说明）').strip(),
+        '',
+        '## 阶段执行汇总',
+        '',
+        '| 阶段 | 状态 | 尝试次数 | 代码提交 | 说明 |',
+        '| --- | --- | --- | --- | --- |',
+    ]
+    stages_map = snap.get('stages') or {}
+    last_commit_stage = None
+    for sname, sdata in stages_map.items():
+        commit = (sdata.get('commit_sha') or '')[:12]
+        if sdata.get('commit_sha'):
+            last_commit_stage = sname
+        err = str(sdata.get('last_error') or '').replace('\n', ' ')[:120]
+        lines.append(
+            f'| `{sname}` | `{sdata.get("status")}` | {sdata.get("current_attempt") or 0} | '
+            f'{("`" + commit + "`") if commit else "—"} | {err or "—"} |'
+        )
+    lines.append('')
+
+    # 附带每个阶段的最终归档正文（经 manifest 哈希校验）
+    lines.append('## 阶段产物摘要')
+    lines.append('')
+    artifact_count = 0
+    for sname, sdata in stages_map.items():
+        att = sdata.get('current_attempt')
+        if not att:
+            continue
+        for fname in ('final_text.txt', 'review_verdict.json', 'test_record.json'):
+            try:
+                art = read_artifact(run, f'{sname}/{att}/{fname}')
+            except Exception:
+                continue
+            body = (art.get('body') or '').strip()
+            if not body:
+                continue
+            artifact_count += 1
+            lines.append(f'### `{sname}` · Attempt {att} · `{fname}` ({art.get("integrity")})')
+            lines.append('')
+            lines.append(body[:3000])
+            if len(body) > 3000:
+                lines.append('\n…（已截断，完整内容请见本地产物目录）')
+            lines.append('')
+            break
+    if artifact_count == 0:
+        lines.append('（当前尚无归档文本产物）')
+        lines.append('')
+
+    # 累计代码差异（如有代码提交）
+    if last_commit_stage:
+        try:
+            diff = code_diff(run, last_commit_stage, 'start')
+            diff_body = (diff.get('body') or '').strip()
+            if diff_body:
+                lines.append(f'## 累计代码差异（基线 → `{last_commit_stage}`）')
+                lines.append('')
+                lines.append('```diff')
+                lines.append(diff_body[:12000])
+                if len(diff_body) > 12000:
+                    lines.append('# …（差异过长已截断）')
+                lines.append('```')
+                lines.append('')
+        except Exception:
+            pass
+
+    # 圆桌会诊共识摘要（如有）
+    threads = [t for t in service.store.threads(key) if t.get('status') == 'completed']
+    if threads:
+        lines.append('## 关联圆桌会诊记录')
+        lines.append('')
+        for t in threads:
+            res = t.get('result') or {}
+            lines.append(f'### 议题：{t.get("question", "")[:120]}')
+            lines.append('')
+            consensus = res.get('consensus')
+            if consensus:
+                lines.append(consensus[:2000])
+            else:
+                lines.append(f'- 参与角色：{", ".join(t.get("roles") or [])}（状态：{t.get("status")}）')
+            lines.append('')
+
+    markdown = '\n'.join(lines).rstrip() + '\n'
+    return {
+        'filename': f'{safe_id}-report.md',
+        'markdown': service.redact(markdown),
+    }

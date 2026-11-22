@@ -16,7 +16,13 @@ from .model_settings import describe_models
 _PROJECT_NAME_RE = re.compile(r'^[A-Za-z0-9][A-Za-z0-9._-]{0,47}$')
 _STAGE_NAME_RE = re.compile(r'^[A-Za-z0-9][A-Za-z0-9_-]{0,31}$')
 _PROMPTS_ROOT = Path(__file__).resolve().parents[2] / 'prompts'
-_ALLOWED_STAGE_KINDS = frozenset(('report', 'code', 'review'))
+_ALLOWED_STAGE_KINDS = frozenset(('report', 'code', 'review', 'test'))
+TEST_PRESETS: dict[str, tuple[str, ...]] = {
+    'pytest': ('python', '-m', 'pytest', '-q'),
+    'python_unittest': ('python', '-m', 'unittest', 'discover', '-s', 'tests'),
+    'npm_test': ('npm', 'test'),
+    'npm_run_build': ('npm', 'run', 'build'),
+}
 _DEFAULT_PROMPTS_BY_KIND = {
     'report': '你是资深技术专家。请仅使用只读方式分析需求与上游产物，输出结构化、可执行的分析或方案文档。\n\n任务：{task}\n\n上游产物：{upstream}',
     'code': '你是实现工程师。请严格按照上游方案与人工审批附注修改当前工作目录中的相关文件。直接用文件读写/编辑工具修改（不要调用 shell/终端命令），仅改动方案涉及的文件；完成后简述实际修改清单。\n\n任务：{task}\n\n上游方案：{upstream}\n\n审查返工反馈：{feedback}',
@@ -110,6 +116,16 @@ def project_stage_definition(service, project_id: str) -> dict[str, Any]:
     allow_patch_probe = True
     stages_out = []
     for st in cfg.stages:
+        if st.kind == 'test':
+            cmd_tuple = tuple(st.test_cmd or ())
+            matched_preset = next((k for k, v in TEST_PRESETS.items() if v == cmd_tuple), 'pytest')
+            stages_out.append({
+                'name': st.name,
+                'kind': 'test',
+                'test_preset': matched_preset,
+                'feedback_to': str(st.feedback_to or ''),
+            })
+            continue
         if st.kind not in _ALLOWED_STAGE_KINDS or not st.adapter or st.adapter not in cfg.adapters:
             continue
         ad = cfg.adapters[st.adapter]
@@ -141,6 +157,29 @@ def project_stage_definition(service, project_id: str) -> dict[str, Any]:
         'max_model_calls': int(cfg.run_budget.max_model_calls or 15),
         'allow_patch_probe': allow_patch_probe,
         'stages': stages_out,
+    }
+
+
+def remove_managed_project(service, project_id: str, *, delete_config_file: bool = False) -> dict[str, Any]:
+    """从工作台安全注销项目；可选仅删除 managed_projects/ 下托管的 .toml，绝不碰用户工作目录或历史运行。"""
+    entry = service.store.project(project_id)
+    service.store.remove_project(project_id)
+    service._configs.pop(entry['config'], None)
+    config_deleted = False
+    if delete_config_file:
+        managed_dir = Path(service.store.path).resolve().parent / 'managed_projects'
+        cfg_path = Path(entry['config']).resolve()
+        try:
+            if cfg_path.is_relative_to(managed_dir) and cfg_path.is_file() and not cfg_path.is_symlink():
+                cfg_path.unlink()
+                config_deleted = True
+        except OSError:
+            config_deleted = False
+    return {
+        'removed': True,
+        'project_id': project_id,
+        'name': entry['name'],
+        'config_deleted': config_deleted,
     }
 
 
@@ -212,17 +251,11 @@ def register_managed_project(service, payload: dict[str, Any]) -> dict[str, Any]
                 raise ValueError(f'节点名重复：{sname}')
             kind = str(item.get('kind') or 'report').strip()
             if kind not in _ALLOWED_STAGE_KINDS:
-                raise ValueError(f'节点 {sname} 类型必须为 report / code / review 之一')
-            atype = str(item.get('adapter_type') or item.get('type') or 'cli_agy').strip()
-            if atype not in _ALLOWED_STAGE_ADAPTER_TYPES:
-                raise ValueError(f'节点 {sname} 的适配器类型不受支持：{atype}')
-            default_model = api_model if atype == 'openai_compat' else (agy_model if atype == 'cli_agy' else '')
-            model = str(item.get('model') if item.get('model') is not None else default_model).strip()
-            approval = bool(item.get('approval', False))
+                raise ValueError(f'节点 {sname} 类型必须为 report / code / review / test 之一')
             feedback_to = str(item.get('feedback_to') or '').strip()
             if feedback_to:
-                if kind != 'review':
-                    raise ValueError(f'仅 review 节点可配置 feedback_to（节点 {sname}）')
+                if kind not in ('review', 'test'):
+                    raise ValueError(f'仅 review 或 test 节点可配置 feedback_to（节点 {sname}）')
                 if feedback_to not in seen_names:
                     raise ValueError(f'节点 {sname} 的 feedback_to ({feedback_to}) 必须指向之前的节点')
             max_rounds = _strict_int(
@@ -230,6 +263,27 @@ def register_managed_project(service, payload: dict[str, Any]) -> dict[str, Any]
                 2 if feedback_to else 1,
                 minimum=1, maximum=5, label=f'节点 {sname} 的 max_rounds',
             )
+            if kind == 'test':
+                if 'test_cmd' in item:
+                    raise ValueError(f'节点 {sname} 不允许直接传入原始 test_cmd，请从白名单 test_preset 中选择')
+                test_preset = str(item.get('test_preset') or 'pytest').strip()
+                if test_preset not in TEST_PRESETS:
+                    raise ValueError(f'节点 {sname} 的测试预设不受支持：{test_preset}（仅允许 {", ".join(TEST_PRESETS)}）')
+                seen_names.append(sname)
+                dynamic_stages.append({
+                    'name': sname,
+                    'kind': 'test',
+                    'test_cmd': list(TEST_PRESETS[test_preset]),
+                    'feedback_to': feedback_to,
+                    'max_rounds': max_rounds,
+                })
+                continue
+            atype = str(item.get('adapter_type') or item.get('type') or 'cli_agy').strip()
+            if atype not in _ALLOWED_STAGE_ADAPTER_TYPES:
+                raise ValueError(f'节点 {sname} 的适配器类型不受支持：{atype}')
+            default_model = api_model if atype == 'openai_compat' else (agy_model if atype == 'cli_agy' else '')
+            model = str(item.get('model') if item.get('model') is not None else default_model).strip()
+            approval = bool(item.get('approval', False))
             prompt = str(item.get('prompt') or '').strip() or _DEFAULT_PROMPTS_BY_KIND[kind]
             seen_names.append(sname)
             dynamic_stages.append({
@@ -257,6 +311,8 @@ def register_managed_project(service, payload: dict[str, Any]) -> dict[str, Any]
             '',
         ]
         for st in dynamic_stages:
+            if st['kind'] == 'test':
+                continue
             atype = st['adapter_type']
             lines.append(f'[adapters.{st["adapter_name"]}]')
             lines.append(f'type = {_toml_str(atype)}')
@@ -284,6 +340,16 @@ def register_managed_project(service, payload: dict[str, Any]) -> dict[str, Any]
             lines.append('[[stages]]')
             lines.append(f'name = {_toml_str(st["name"])}')
             lines.append(f'kind = {_toml_str(st["kind"])}')
+            if st['kind'] == 'test':
+                cmd_toml = ', '.join(_toml_str(part) for part in st['test_cmd'])
+                lines.append(f'test_cmd = [{cmd_toml}]')
+                if st['feedback_to']:
+                    lines.append(f'feedback_to = {_toml_str(st["feedback_to"])}')
+                    lines.append(f'max_rounds = {st["max_rounds"]}')
+                lines.append('timeout_s = 180')
+                lines.append('max_attempts = 1')
+                lines.append('')
+                continue
             lines.append(f'adapter = {_toml_str(st["adapter_name"])}')
             if st['approval']:
                 lines.append('approval = true')

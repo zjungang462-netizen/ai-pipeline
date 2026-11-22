@@ -268,3 +268,99 @@ class StreamingDiscussionTests(unittest.TestCase):
         self.assertIn('consensus', msg_roles)
         turn_starts = [e['payload'].get('turn') for e in evs if e['kind'] == 'discussion_turn_start']
         self.assertEqual(turn_starts, ['r1_developer', 'r1_skeptic', 'r2_developer', 'r2_skeptic', 'turn_consensus'])
+
+    def test_roundtable_cli_agy_seat_readonly_and_mid_round_human_interjection(self):
+        from orchestrator.collaboration.discussion import _build_seat_adapter, capture, execute
+        from orchestrator.config import AdapterConfig, load_config
+
+        captured_prompts: list[str] = []
+
+        class RecordingHandler(BaseHTTPRequestHandler):
+            def log_message(self, *args):
+                return
+
+            def do_POST(self):
+                length = int(self.headers.get('Content-Length', '0'))
+                raw = self.rfile.read(length).decode('utf-8', errors='replace') if length else '{}'
+                body = json.loads(raw)
+                msgs = body.get('messages') or []
+                captured_prompts.append(msgs[-1].get('content', '') if msgs else '')
+                self.send_response(200)
+                self.send_header('Content-Type', 'text/event-stream; charset=utf-8')
+                self.end_headers()
+                for line in [
+                    'data: {"id":"rt-hi","model":"m-dev","choices":[{"delta":{"content":"收到引导，收敛方案。"},"finish_reason":"stop"}]}',
+                    'data: {"id":"rt-hi","model":"m-dev","choices":[],"usage":{"prompt_tokens":8,"completion_tokens":6,"total_tokens":14}}',
+                    'data: [DONE]',
+                ]:
+                    self.wfile.write((line + '\n').encode('utf-8'))
+                    self.wfile.flush()
+
+        mock_api = ThreadingHTTPServer(('127.0.0.1', 0), RecordingHandler)
+        api_thread = threading.Thread(target=mock_api.serve_forever, daemon=True)
+        api_thread.start()
+        self.addCleanup(lambda: (mock_api.shutdown(), mock_api.server_close(), api_thread.join(3)))
+        os.environ['TEST_RT_HI_KEY'] = 'dummy-rt-hi-key-12345678'
+        self.addCleanup(lambda: os.environ.pop('TEST_RT_HI_KEY', None))
+
+        scratch = tempfile.TemporaryDirectory()
+        self.addCleanup(scratch.cleanup)
+        root = Path(scratch.name)
+        ws = root / 'ws'
+        ws.mkdir()
+        cfg_path = root / 'project.toml'
+        cfg_path.write_text(
+            f'task_workdir = "{ws.as_posix()}"\n'
+            f'state_dir = "{(root / "state").as_posix()}"\n'
+            '[run_budget]\nmax_tokens = 20000\nmax_duration_s = 120\n'
+            '[adapters.api]\ntype = "openai_compat"\n'
+            f'base_url = "http://127.0.0.1:{mock_api.server_port}/v1"\n'
+            'api_key_env = "TEST_RT_HI_KEY"\nmodel = "m-default"\n'
+            '[adapters.agy]\ntype = "cli_agy"\nmodel = "gemini-4-neon-high"\n'
+            'proxy_url = "http://127.0.0.1:7897"\nmode = "accept-edits"\nsandbox = false\n'
+            '[[stages]]\nname = "design"\nkind = "report"\nadapter = "api"\nprompt = "设计"\n',
+            encoding='utf8',
+        )
+        cfg = load_config(cfg_path)
+        apis = [a for a in cfg.adapters.values() if a.type == 'openai_compat']
+        agys = [a for a in cfg.adapters.values() if a.type == 'cli_agy']
+
+        # 1) 验证 cli_agy 席位强制降权为只读 plan + sandbox=True，且继承 proxy_url
+        seat = _build_seat_adapter('skeptic', 'cli_agy', 'claude-opus-5-5-high', cfg, apis, agys)
+        self.assertEqual(seat.type, 'cli_agy')
+        self.assertEqual(seat.options['mode'], 'plan')
+        self.assertTrue(seat.options['sandbox'])
+        self.assertEqual(seat.options['proxy_url'], 'http://127.0.0.1:7897')
+        self.assertEqual(seat.options['model'], 'claude-opus-5-5-high')
+
+        # 2) 验证 service.discuss 拒绝非白名单后端（如 cli_codex）
+        server = create_server(root / 'db.sqlite3', [cfg_path], 0, recover=False)
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        self.addCleanup(lambda: (server.application.closed.set(), server.shutdown(),
+                                 server.server_close(), thread.join(3)))
+        service = server.application.service
+        project_id = service.store.projects()[0]['id']
+        run_key = service.store.register_run(project_id, 'run-hi', cfg_path, root / 'state')
+        with self.assertRaises(ValueError):
+            service.discuss(
+                run_key, '测试后端白名单', ['developer'], 4000, 'idem-bad-backend-1234',
+                role_adapters={'developer': 'cli_codex'},
+            )
+
+        # 3) 验证人工主持人插话仅注入第 2 轮及共识阶段，不污染第 1 轮
+        run = service.store.run(run_key)
+        snap = capture(run, question='讨论架构取舍')
+        snap['roundtable'] = {'rounds': 2, 'role_models': {}, 'role_adapters': {}, 'consensus': True}
+        topic = service.store.create_thread(
+            run_key, '讨论架构取舍', ['developer'], 8000, snap, 'idem-hi-12345678'
+        )
+        # 在会诊启动时间戳之后插入一条人工主持人插话
+        service.store.message(run_key, '请优先保证兼容旧接口，不要改数据库表结构', 'idem-human-note-1234')
+        execute(service.store, topic['id'], stream_tokens=True)
+
+        self.assertEqual(len(captured_prompts), 3)  # r1_developer, r2_developer, turn_consensus
+        self.assertNotIn('人工主持人最新插话引导', captured_prompts[0])
+        self.assertIn('人工主持人最新插话引导', captured_prompts[1])
+        self.assertIn('不要改数据库表结构', captured_prompts[1])
+        self.assertIn('人工主持人最新插话引导', captured_prompts[2])

@@ -18,6 +18,7 @@ STATUS_GROUPS: dict[str, set[str] | None] = {
     'waiting_owner': {'waiting_owner'},
     'done': {'done'},
     'failed': {'failed', 'timeout', 'cancelled'},
+    'archived': None,
 }
 
 
@@ -112,7 +113,7 @@ def decode_cursor(cursor: str) -> tuple[float, str, float | None, str, str, str,
     raise ValueError('游标版本不支持')
 
 
-def _summary_row(full_run: dict, task_text: str, lifecycle: str) -> dict:
+def _summary_row(full_run: dict, task_text: str, lifecycle: str, *, archived: bool = False) -> dict:
     return {
         'id': full_run['id'],
         'run_id': full_run['run_id'],
@@ -121,14 +122,19 @@ def _summary_row(full_run: dict, task_text: str, lifecycle: str) -> dict:
         'task': task_text,
         'lifecycle': lifecycle,
         'managed': bool(full_run['managed']),
+        'archived': archived,
     }
 
 
 def _build_where(before: float | None, project_id: str,
                  scan_created: float | None, scan_id: str | None,
-                 comparison: str) -> tuple[str, list]:
+                 comparison: str, *, archived_only: bool = False) -> tuple[str, list]:
     parts: list[str] = []
     params: list = []
+    if archived_only:
+        parts.append('id IN (SELECT run_id FROM archived_runs)')
+    else:
+        parts.append('id NOT IN (SELECT run_id FROM archived_runs)')
     if before is not None:
         parts.append('created < ?')
         params.append(before)
@@ -210,13 +216,14 @@ def list_runs_page(
 
     # 排序方向仅来自已验证枚举，禁止把请求值直接拼进 SQL。
     direction, comparison = ('ASC', '>') if sort == 'oldest' else ('DESC', '<')
+    archived_only = (status == 'archived')
     status_set = STATUS_GROUPS.get(status)
     need_filter = bool(q_norm) or status_set is not None
     result: list[dict] = []
 
     with store.session():
         if not need_filter:
-            where_sql, params = _build_where(before, project_id, cur_created, cur_id, comparison)
+            where_sql, params = _build_where(before, project_id, cur_created, cur_id, comparison, archived_only=archived_only)
             fetch_sql = f"""
                 SELECT *
                 FROM runs
@@ -230,7 +237,7 @@ def list_runs_page(
             for row in rows[:limit]:
                 full_run = dict(row)
                 task_text, lc = summary_cache.read(full_run)
-                result.append(_summary_row(full_run, task_text, lc))
+                result.append(_summary_row(full_run, task_text, lc, archived=archived_only))
         else:
             batch_size = 200
             scan_created = cur_created
@@ -239,7 +246,7 @@ def list_runs_page(
             found_count = 0
             has_more = False
             while not exhausted and found_count <= limit:
-                where_sql, params = _build_where(before, project_id, scan_created, scan_id, comparison)
+                where_sql, params = _build_where(before, project_id, scan_created, scan_id, comparison, archived_only=archived_only)
                 fetch_sql = f"""
                     SELECT *
                     FROM runs
@@ -260,7 +267,7 @@ def list_runs_page(
                         if q_norm not in task_text.casefold() and q_norm not in full_run['run_id'].casefold():
                             continue
                     if found_count < limit:
-                        result.append(_summary_row(full_run, task_text, lc))
+                        result.append(_summary_row(full_run, task_text, lc, archived=archived_only))
                     found_count += 1
                     if found_count > limit:
                         has_more = True

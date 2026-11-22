@@ -318,6 +318,80 @@ prompt = "设计：{{task}}"
         }, {**auth_headers, 'Idempotency-Key': 'idem-dup-12345678'})
         self.assertEqual(status, 400)
 
+        # 白名单确定性 test 节点（允许 pytest 预设 + feedback_to，拒绝任意原始 test_cmd）
+        status, _, _ = req('POST', '/api/projects/register', {
+            'name': 'bad-test-cmd',
+            'workdir': str(target_repo),
+            'stages': [
+                {'name': 'coding', 'kind': 'code', 'adapter_type': 'cli_agy'},
+                {'name': 't1', 'kind': 'test', 'test_cmd': ['rm', '-rf', '/']},
+            ],
+        }, {**auth_headers, 'Idempotency-Key': 'idem-bad-tcmd-1234'})
+        self.assertEqual(status, 400)
+
+        status, with_test, _ = req('POST', '/api/projects/register', {
+            'name': 'with-test-preset',
+            'workdir': str(target_repo),
+            'stages': [
+                {'name': 'coding', 'kind': 'code', 'adapter_type': 'cli_agy', 'model': 'gemini-3.8-flash-high'},
+                {'name': 'unit_test', 'kind': 'test', 'test_preset': 'pytest', 'feedback_to': 'coding'},
+                {'name': 'review', 'kind': 'review', 'adapter_type': 'openai_compat', 'model': 'deepseek-chat', 'feedback_to': 'coding'},
+            ],
+        }, {**auth_headers, 'Idempotency-Key': 'idem-tpreset-12345'})
+        self.assertEqual(status, 201)
+        status, td_def, _ = req('GET', f"/api/projects/{with_test['id']}/stages", headers={'Cookie': cookie})
+        self.assertEqual(status, 200)
+        self.assertEqual(td_def['stages'][1]['kind'], 'test')
+        self.assertEqual(td_def['stages'][1]['test_preset'], 'pytest')
+        self.assertEqual(td_def['stages'][1]['feedback_to'], 'coding')
+
+        # 安全移除项目登记（删除托管 toml，绝不碰用户工作目录）
+        managed_toml = Path(with_test['config'])
+        self.assertTrue(managed_toml.is_file())
+        status, removed, _ = req(
+            'POST', f"/api/projects/{with_test['id']}/remove",
+            {'delete_config_file': True},
+            {**auth_headers, 'Idempotency-Key': 'idem-rm-proj-12345'},
+        )
+        self.assertEqual(status, 200)
+        self.assertTrue(removed['removed'])
+        self.assertTrue(removed['config_deleted'])
+        self.assertFalse(managed_toml.exists())
+        self.assertTrue(target_repo.is_dir())
+
+        # 任务交付报告导出 (.md) + 无损归档/隐藏与已归档筛选
+        _write_json(
+            seed_state / 'runs' / 'r1' / 'state.json',
+            {'run_id': 'r1', 'task': '修复导出报告校验', 'stages': {'coding': {'status': 'done', 'current_attempt': 1}}, 'events': []},
+        )
+        run_key = server.application.service.store.register_run(seed_id, 'r1', seed_cfg, seed_state)
+        status, exp, _ = req('GET', f'/api/runs/{run_key}/export-report', headers={'Cookie': cookie})
+        self.assertEqual(status, 200)
+        self.assertEqual(exp['filename'], 'r1-report.md')
+        self.assertIn('# 任务交付报告 · r1', exp['markdown'])
+        self.assertIn('阶段执行汇总', exp['markdown'])
+
+        status, arch, _ = req(
+            'POST', f'/api/runs/{run_key}/archive', {'archived': True},
+            {**auth_headers, 'Idempotency-Key': 'idem-arch-run-1234'},
+        )
+        self.assertEqual(status, 200)
+        self.assertTrue(arch['archived'])
+        # 默认列表隐藏已归档，status=archived 可查回，且磁盘 metrics/state 完整保留
+        status, active_list, _ = req('GET', '/api/runs?status=all', headers={'Cookie': cookie})
+        self.assertEqual(status, 200)
+        self.assertNotIn(run_key, [r['id'] for r in active_list['runs']])
+        status, archived_list, _ = req('GET', '/api/runs?status=archived', headers={'Cookie': cookie})
+        self.assertEqual(status, 200)
+        self.assertIn(run_key, [r['id'] for r in archived_list['runs']])
+        self.assertTrue((seed_state / 'runs' / 'r1' / 'metrics.json').is_file())
+        status, unarch, _ = req(
+            'POST', f'/api/runs/{run_key}/archive', {'archived': False},
+            {**auth_headers, 'Idempotency-Key': 'idem-unarch-123456'},
+        )
+        self.assertEqual(status, 200)
+        self.assertFalse(unarch['archived'])
+
 
 if __name__ == '__main__':
     unittest.main()

@@ -223,6 +223,36 @@ class Handler(BaseHTTPRequestHandler):
                     return self.respond(project_manager.project_lessons(service, project_id, min_occurrences=min_occ))
                 if action == 'stages' and method == 'GET':
                     return self.respond(project_manager.project_stage_definition(service, project_id))
+                if action == 'remove' and method == 'POST':
+                    self.idem()
+                    return self.respond(project_manager.remove_managed_project(
+                        service, project_id, delete_config_file=bool(body.get('delete_config_file', False))
+                    ))
+                if action == 'arena' and method == 'POST':
+                    self.idem()
+                    from ..arena import run_arena
+                    entry = store.project(project_id)
+                    cfg = service.config(entry['config'])
+                    return self.respond(service.redact(run_arena(
+                        cfg,
+                        body.get('task', ''),
+                        body.get('candidates', []),
+                        test_preset=str(body.get('test_preset') or ''),
+                    )))
+            if len(parts) == 5 and parts[:2] == ['api', 'projects'] and parts[3:] == ['arena', 'apply'] and method == 'POST':
+                self.idem()
+                from ..arena import apply_arena_winner
+                entry = store.project(parts[2])
+                cfg = service.config(entry['config'])
+                try:
+                    return self.respond(apply_arena_winner(
+                        cfg,
+                        str(body.get('arena_id') or ''),
+                        str(body.get('label') or ''),
+                        str(body.get('expected_base_sha') or ''),
+                    ))
+                except RuntimeError as error:
+                    raise Conflict(str(error)) from error
             if len(parts) == 5 and parts[:2] == ['api', 'projects'] and parts[3:] == ['lessons', 'approve'] and method == 'POST':
                 self.idem()
                 from ..collaboration import project_manager
@@ -256,9 +286,19 @@ class Handler(BaseHTTPRequestHandler):
                 key, action = parts[2:4]
                 run = store.run(key)
                 if action == 'snapshot' and method == 'GET':
-                    return self.respond(service.snapshot(key))
+                    snap = service.snapshot(key)
+                    snap['archived'] = store.is_run_archived(key)
+                    return self.respond(snap)
                 if action == 'usage' and method == 'GET':
                     return self.respond(insights.run_summary(service, key))
+                if action == 'export-report' and method == 'GET':
+                    return self.respond(insights.export_run_report(service, key))
+                if action == 'archive' and method == 'POST':
+                    self.idem()
+                    want_archived = bool(body.get('archived', True))
+                    if want_archived and service.snapshot(key)['lifecycle'] in ('pending', 'running', 'recovering'):
+                        raise Conflict('运行中的任务请先暂停或停止后再归档')
+                    return self.respond(store.set_run_archived(key, want_archived))
                 if action == 'events' and method == 'GET':
                     service.sync_run_events(run)
                     if 'before' in query:
@@ -281,6 +321,7 @@ class Handler(BaseHTTPRequestHandler):
                             body.get('budget', 6000), self.idem(),
                             rounds=body.get('rounds', 1),
                             role_models=body.get('role_models'),
+                            role_adapters=body.get('role_adapters'),
                             context_files=body.get('context_files'),
                             consensus=body.get('consensus', False),
                         ), 202)
