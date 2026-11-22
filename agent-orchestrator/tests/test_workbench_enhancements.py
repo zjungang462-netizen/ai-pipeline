@@ -205,18 +205,29 @@ prompt = "设计：{{task}}"
         self.assertEqual(route_data['recommendations']['code']['recommended'],
                          {'tool': 'cli_agy', 'model': 'gemini-3.8-flash-high'})
 
-        # 4. 可视化热登记新项目
+        # 4. 可视化热登记新项目（按节点独立配置适配器与模型）
         status, created, _ = req('POST', '/api/projects/register', {
             'name': 'demo-app',
             'workdir': str(target_repo),
             'preset': 'review_plan_fix',
-            'agy_model': 'gemini-3.8-flash-high',
-            'api_model': 'deepseek-chat',
+            'stage_adapters': {
+                'code_review': {'type': 'cli_agy', 'model': 'gemini-3.8-pro-high'},
+                'repair_plan': {'type': 'openai_compat', 'model': 'deepseek-reasoner'},
+                'coding': {'type': 'cli_agy', 'model': 'gemini-3.8-flash-high'},
+                'final_review': {'type': 'openai_compat', 'model': 'deepseek-chat'},
+            },
             'proxy_url': 'http://127.0.0.1:7897',
+            'max_duration_s': 600,
+            'max_model_calls': 10,
             'allow_patch_probe': True,
         }, {**auth_headers, 'Idempotency-Key': 'idem-reg-12345678'})
         self.assertEqual(status, 201)
         self.assertEqual(created['name'], 'demo-app')
+        models_by_name = {m['name']: m for m in created['models']}
+        self.assertEqual(models_by_name['code_review_agent']['stages'], ['code_review'])
+        self.assertEqual(models_by_name['repair_plan_agent']['model'], 'deepseek-reasoner')
+        self.assertEqual(models_by_name['coding_agent']['model'], 'gemini-3.8-flash-high')
+        self.assertEqual(models_by_name['final_review_agent']['stages'], ['final_review'])
 
         # 拒绝不存在的目录
         status, _, _ = req('POST', '/api/projects/register', {

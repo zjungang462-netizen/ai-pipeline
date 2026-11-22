@@ -28,6 +28,7 @@ def describe_models(cfg):
             effective_model=profile['model'] or '';effective_effort=profile['reasoning_effort'] or ''
             endpoint=profile['backend_endpoint']
         result.append(dict(name=name, type=adapter.type, model=options.get('model') or '',
+                           stages=[s.name for s in cfg.stages if s.adapter == name],
                            reasoning_effort=effective_effort, effective_model=effective_model,
                            backend_endpoint=endpoint,
                            thinking=options.get('thinking') or '',

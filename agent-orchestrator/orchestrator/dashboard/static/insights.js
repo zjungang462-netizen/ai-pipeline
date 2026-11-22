@@ -34,7 +34,11 @@ function renderModelSettings(){
  for(const model of project?.models||[]){
   const card=el('div','adapter-card');
   const head=el('div','adapter-card-head');
-  head.append(el('span','adapter-card-name',model.name),el('span','adapter-type-pill',ADAPTER_TYPE_LABELS[model.type]||model.type));
+  const left=el('div','adapter-card-title-group');
+  left.append(el('span','adapter-card-name',model.name));
+  const stageNames=(model.stages||[]).map(s=>(typeof stages!=='undefined'&&stages[s])||s);
+  if(stageNames.length)left.append(el('span','adapter-stage-pill','负责：'+stageNames.join(' / ')));
+  head.append(left,el('span','adapter-type-pill',ADAPTER_TYPE_LABELS[model.type]||model.type));
   card.append(head);
 
   const currentVal=model.model||model.effective_model||'';
@@ -210,34 +214,88 @@ if($('route-scan'))$('route-scan').onclick=async()=>{
   const kindLabels={code:'代码阶段 (code)',report:'报告/方案阶段 (report)',review:'审查阶段 (review)'};
   for(const [kind,rec] of entries){
    const card=el('div','opt-card');
-   const recText=rec.recommended?`推荐：${rec.recommended.tool} / ${rec.recommended.model}`:'暂不自动推荐（样本不足）';
+   const recText=rec.recommended?`推荐：${ADAPTER_TYPE_LABELS[rec.recommended.tool]||rec.recommended.tool} / ${rec.recommended.model}`:'暂不自动推荐（样本不足）';
    card.append(el('div','opt-card-title',`${kindLabels[kind]||kind} · ${recText}`),el('div','opt-card-sub',rec.reason||''));
+   const wrap=el('div','md-table-wrap'),tbl=el('table','md-table'),thead=el('thead'),hr=el('tr');
+   for(const h of ['状态','工具','模型','样本','整条通过率','阶段通过率','中位耗时','中位 Tokens','未知调用']){hr.append(el('th','',h));}
+   thead.append(hr);tbl.append(thead);
+   const tbody=el('tbody');
    for(const c of rec.candidates||[]){
-    const line=`${c.tool} / ${c.model} · 样本 ${c.runs} · 整条 ${(c.run_pass_rate*100).toFixed(0)}% · 阶段 ${(c.stage_pass_rate*100).toFixed(0)}% · 耗时 ${c.median_duration_s??'—'}s · tokens ${c.median_reported_tokens??'—'}${c.unknown_calls?` · 未知用量 ${c.unknown_calls} 次`:''}${c.eligible?'':'（样本不足）'}`;
-    card.append(el('div','opt-card-row',line));
+    const isTop=rec.recommended&&rec.recommended.tool===c.tool&&rec.recommended.model===c.model;
+    const tr=el('tr');
+    const st=isTop?'推荐':c.eligible?'候选':'样本不足';
+    for(const cell of [st,ADAPTER_TYPE_LABELS[c.tool]||c.tool,c.model,String(c.runs),(c.run_pass_rate*100).toFixed(0)+'%',(c.stage_pass_rate*100).toFixed(0)+'%',c.median_duration_s!=null?c.median_duration_s+'s':'—',c.median_reported_tokens!=null?num(c.median_reported_tokens):'—',String(c.unknown_calls||0)]){
+     tr.append(el('td','',cell));
+    }
+    tbody.append(tr);
    }
+   tbl.append(tbody);wrap.append(tbl);card.append(wrap);
    box.append(card);
   }
  }catch(error){toast(error.message);}finally{$('route-scan').disabled=false;}
 };
-if($('project-manage-open'))$('project-manage-open').onclick=()=>$('project-dialog')?.showModal();
+const PM_PRESET_STAGES={
+ review_plan_fix:[
+  {name:'code_review',label:'01 代码审查',type:'cli_agy',model:'gemini-3.8-pro-high'},
+  {name:'repair_plan',label:'02 修复方案（审批）',type:'cli_agy',model:'gemini-3.8-flash-high'},
+  {name:'coding',label:'03 代码实现',type:'cli_agy',model:'gemini-3.8-flash-high'},
+  {name:'final_review',label:'04 终审复核',type:'openai_compat',model:'deepseek-chat'},
+ ],
+ review_only:[
+  {name:'code_review',label:'01 只读代码审查',type:'cli_agy',model:'gemini-3.8-pro-high'},
+ ],
+ standard_dev:[
+  {name:'design',label:'01 方案设计（审批）',type:'openai_compat',model:'deepseek-reasoner'},
+  {name:'coding',label:'02 代码实现',type:'cli_agy',model:'gemini-3.8-flash-high'},
+  {name:'review',label:'03 独立审查',type:'openai_compat',model:'deepseek-chat'},
+ ],
+};
+function renderProjectStageEditor(){
+ const list=$('pm-stage-list'),preset=$('pm-preset')?.value||'review_plan_fix';
+ if(!list)return;
+ list.replaceChildren();
+ for(const st of PM_PRESET_STAGES[preset]||[]){
+  const row=el('div','pm-stage-row');
+  row.dataset.stage=st.name;
+  const nameEl=el('div','pm-stage-label',st.label);
+  const typeSel=el('select','pm-stage-type');
+  for(const [k,v] of Object.entries(ADAPTER_TYPE_LABELS)){if(k==='fake'||k==='cli_dsh')continue;typeSel.append(Object.assign(el('option','',v),{value:k}));}
+  typeSel.value=st.type;
+  const modelInp=el('input','pm-stage-model');
+  modelInp.value=st.model;modelInp.maxLength=160;modelInp.placeholder='留空使用工具默认模型';
+  typeSel.onchange=()=>{const presets=MODEL_PRESETS[typeSel.value]||[];if(presets.length)modelInp.value=presets[0];};
+  row.append(nameEl,typeSel,modelInp);
+  list.append(row);
+ }
+}
+if($('pm-preset'))$('pm-preset').onchange=renderProjectStageEditor;
+if($('project-manage-open'))$('project-manage-open').onclick=()=>{renderProjectStageEditor();$('project-dialog')?.showModal();};
 if($('project-form'))$('project-form').onsubmit=async event=>{
  event.preventDefault();
  const btn=$('pm-submit');btn.disabled=true;
  try{
+  const stage_adapters={};
+  const rows=$('pm-stage-list')?.children||[];
+  for(const row of rows){
+   if(!row.dataset?.stage)continue;
+   const typeVal=row.children[1]?.value||'cli_agy';
+   const modelVal=(row.children[2]?.value||'').trim();
+   stage_adapters[row.dataset.stage]={type:typeVal,model:modelVal};
+  }
   const created=await api('/projects/register',{method:'POST',body:{
    name:$('pm-name').value.trim(),
    workdir:$('pm-workdir').value.trim(),
    preset:$('pm-preset').value,
-   agy_model:$('pm-agy-model').value.trim(),
-   api_model:$('pm-api-model').value.trim(),
+   stage_adapters,
    proxy_url:$('pm-proxy').value.trim(),
+   max_duration_s:Number($('pm-max-duration')?.value||900),
+   max_model_calls:Number($('pm-max-calls')?.value||15),
    allow_patch_probe:!!$('pm-patch-probe').checked,
   }});
   $('project-dialog').close();
   projects=(await api('/projects')).projects;
   if(typeof applyProjects==='function')applyProjects();
   if(typeof restoreListFilters==='function')restoreListFilters();
-  toast(`项目 ${created.name} 已热加载，可直接新建任务。`);
+  toast(`项目 ${created.name} 已按节点独立配置并热加载，可直接新建任务。`);
  }catch(error){toast(error.message);}finally{btn.disabled=false;}
 };

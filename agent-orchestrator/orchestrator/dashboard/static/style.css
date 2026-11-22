@@ -212,6 +212,16 @@ h4.md-h{font-size:13.5px;color:#2c4a3e}
 .diff-line.diff-add{color:#b7f0c8;background:rgba(46,160,96,.2)}
 .diff-line.diff-del{color:#ffbcb0;background:rgba(220,76,62,.2)}
 .diff-line.diff-ctx{color:#c9d6cf}
+/* 按节点独立配置模型与阶段归属徽章 */
+.adapter-card-title-group{display:flex;align-items:center;gap:8px;flex-wrap:wrap;min-width:0}
+.adapter-stage-pill{font-size:11px;font-weight:500;padding:2px 8px;border-radius:6px;background:#eef3fb;color:#35528a;border:1px solid #d7e2f5}
+.pm-stages-box{margin:0 0 14px;padding:12px 14px;background:#f7faf8;border:1px solid var(--line);border-radius:10px}
+.pm-stages-head{display:flex;align-items:center;justify-content:space-between;gap:8px;margin-bottom:10px;font-size:12px;font-weight:600;color:var(--ink)}
+.pm-stage-list{display:flex;flex-direction:column;gap:8px}
+.pm-stage-row{display:grid;grid-template-columns:150px 140px 1fr;gap:8px;align-items:center}
+.pm-stage-label{font-size:12px;font-weight:600;color:#2c4a3e}
+.pm-budget-pair{display:grid;grid-template-columns:1fr 1fr;gap:8px}
+@media(max-width:680px){.pm-stage-row{grid-template-columns:1fr}}
 @media(max-width:1250px){.room-header{display:flex;flex-wrap:wrap;padding:12px 20px 8px}.actions{margin-top:0}}
 @media(max-width:680px){.welcome-cards{grid-template-columns:1fr}.usage-stats{grid-template-columns:repeat(3,1fr)}.task-top-grid,.model-picker-row,.adapter-extra-grid,.template-save-row{grid-template-columns:1fr}.task-dialog-head,.task-dialog-body,.task-dialog-foot{padding-left:16px;padding-right:16px}.stage-stepper{padding:7px 14px 8px}.room-header{padding:12px 14px 8px}.room-indicators{padding:0 14px 6px}}
 @media(prefers-reduced-motion:reduce){.run-status.running:before,.run-status.recovering:before,.stream-cursor{animation:none!important}}
