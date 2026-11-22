@@ -176,5 +176,19 @@ h4.md-h{font-size:13.5px;color:#2c4a3e}
 .event-fail .event-title{color:#a8442e;font-weight:600}
 .event-ok .event-title{color:#2c6b4a;font-weight:550}
 .artifact-head-actions{display:flex;align-items:center;gap:8px}
-@media(max-width:680px){.welcome-cards{grid-template-columns:1fr}.usage-stats{grid-template-columns:repeat(3,1fr)}.task-top-grid,.model-picker-row,.adapter-extra-grid,.template-save-row{grid-template-columns:1fr}.task-dialog-head,.task-dialog-body,.task-dialog-foot{padding-left:16px;padding-right:16px}.stage-stepper{padding:8px 14px 10px}}
+/* 紧凑顶部空间：把更多纵向视口留给动态流与报告正文 */
+.room-header{padding:14px 26px 10px;gap:14px;align-items:center}
+.room-title h1{font-size:18px;line-height:1.45;margin:3px 0 6px}
+.actions{max-width:none;padding-top:0;flex-shrink:0}
+.stage-stepper{padding:7px 26px 8px;gap:8px}
+.stepper-item{padding:5px 10px}
+.room-context{padding:4px 26px 6px;gap:6px 18px}
+.room-indicators{padding:0 26px 6px;display:flex;flex-wrap:wrap;gap:6px;align-items:center}
+.room-indicators .notice{margin:0;padding:4px 10px;font-size:11px;line-height:1.5;border-radius:6px;flex:1 1 280px}
+.composer{padding:9px 22px 12px}
+.composer textarea{min-height:44px}
+.md-link{color:#21644b;text-decoration:underline;text-underline-offset:2px}
+.md-link:hover{color:#154735}
+@media(max-width:1250px){.room-header{display:flex;flex-wrap:wrap;padding:12px 20px 8px}.actions{margin-top:0}}
+@media(max-width:680px){.welcome-cards{grid-template-columns:1fr}.usage-stats{grid-template-columns:repeat(3,1fr)}.task-top-grid,.model-picker-row,.adapter-extra-grid,.template-save-row{grid-template-columns:1fr}.task-dialog-head,.task-dialog-body,.task-dialog-foot{padding-left:16px;padding-right:16px}.stage-stepper{padding:7px 14px 8px}.room-header{padding:12px 14px 8px}.room-indicators{padding:0 14px 6px}}
 @media(prefers-reduced-motion:reduce){.run-status.running:before,.run-status.recovering:before,.stream-cursor{animation:none!important}}

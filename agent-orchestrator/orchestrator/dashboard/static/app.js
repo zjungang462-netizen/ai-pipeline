@@ -148,12 +148,23 @@ function renderSnapshot(){const r=current;if(!r)return;if(typeof renderBudgetAle
  $('thread-list').replaceChildren(...r.threads.map(t=>{const item=el('div','thread-item');item.append(el('strong','',t.question),el('p','muted',`${labels[t.status]||t.status} · 上限 ${num(t.budget)} tokens`));if(t.result?.usage)item.append(el('p','muted',`已计入分析 ${num(t.result.usage.tokens)} tokens`));if(t.result?.reason)item.append(el('p','muted',t.result.reason));return item;}));if(!r.threads.length)$('thread-list').append(el('p','empty','未发起角色会诊'));}
 function copyText(text,label='已复制到剪贴板'){if(navigator.clipboard?.writeText){navigator.clipboard.writeText(text).then(()=>toast(label)).catch(()=>toast('复制失败，请手动选择复制'));}else toast('当前环境不支持自动复制');}
 function appendInlineMd(parent,text){
- const re=/(`[^`\n]+`|\*\*[^*\n]+\*\*)/g;let last=0,m;
+ const re=/(`[^`\n]+`|\*\*[^*\n]+\*\*|\[[^\]\n]+\]\([^)\n]+\))/g;let last=0,m;
  while((m=re.exec(text))!==null){
   if(m.index>last)parent.append(document.createTextNode(text.slice(last,m.index)));
   const tok=m[0];
   if(tok.startsWith('`'))parent.append(el('code','md-inline-code',tok.slice(1,-1)));
-  else parent.append(el('strong','',tok.slice(2,-2)));
+  else if(tok.startsWith('**'))parent.append(el('strong','',tok.slice(2,-2)));
+  else{
+   const lm=tok.match(/^\[([^\]]+)\]\(([^)]+)\)$/);
+   if(lm){
+    const label=lm[1],href=lm[2].trim();
+    if(/^https?:\/\//i.test(href)){
+     const a=el('a','md-link',label);a.href=href;a.target='_blank';a.rel='noopener noreferrer';parent.append(a);
+    }else{
+     const code=el('code','md-inline-code',label);code.title=href;parent.append(code);
+    }
+   }else parent.append(document.createTextNode(tok));
+  }
   last=m.index+tok.length;
  }
  if(last<text.length)parent.append(document.createTextNode(text.slice(last)));
