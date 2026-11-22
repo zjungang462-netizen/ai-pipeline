@@ -242,7 +242,8 @@ h4.md-h{font-size:13.5px;color:#2c4a3e}
 .adapter-stage-pill{font-size:11px;font-weight:500;padding:2px 8px;border-radius:6px;background:#eef3fb;color:#35528a;border:1px solid #d7e2f5}
 .pm-stages-box{margin:0 0 14px;padding:12px 14px;background:#f7faf8;border:1px solid var(--line);border-radius:10px}
 .pm-stages-head{display:flex;align-items:center;justify-content:space-between;gap:8px;margin-bottom:10px;font-size:12px;font-weight:600;color:var(--ink)}
-.pm-stages-actions{display:flex;align-items:center;gap:6px}
+.pm-stages-actions{display:flex;align-items:center;gap:6px;flex-wrap:wrap;flex-shrink:0}
+.pm-stages-actions button{white-space:nowrap;flex-shrink:0}
 .pm-stage-list{display:flex;flex-direction:column;gap:10px}
 .project-dialog{width:min(820px,calc(100vw - 32px))}
 .pm-node-card{background:#fff;border:1px solid #d7e4dc;border-radius:10px;padding:11px 13px;box-shadow:var(--shadow-sm)}
@@ -257,9 +258,9 @@ h4.md-h{font-size:13.5px;color:#2c4a3e}
 .pm-inline-fb select{width:auto;padding:4px 8px;font-size:12px}
 .pm-node-prompt{margin-top:6px;font-size:11px;color:#5c7267}
 .pm-node-prompt textarea{margin-top:6px;font-size:12px;padding:7px 10px}
-.model-options-bar{display:flex;align-items:center;justify-content:space-between;gap:10px;margin:8px 0 12px}
-.model-options-bar .form-note{margin:0}
-.model-options-bar .secondary{white-space:nowrap;flex-shrink:0}
+.model-options-bar{display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:10px;margin:8px 0 12px}
+.model-options-bar .form-note{margin:0;flex:1 1 240px}
+.model-options-bar button{white-space:nowrap;flex-shrink:0}
 .pm-budget-pair{display:grid;grid-template-columns:1fr 1fr;gap:8px}
 @media(max-width:680px){.pm-node-head,.pm-node-grid{grid-template-columns:1fr}}
 @media(max-width:1250px){.room-header{display:flex;flex-wrap:wrap;padding:12px 20px 8px}.actions{margin-top:0}}

@@ -1,5 +1,15 @@
 # 剩余工作推进记录
 
+## 0.5.9 多模型圆桌升级、白名单测试编排、报告导出与双模型竞技场
+
+- **多模型圆桌升级**：支持 1~3 轮交叉辩论、4 角色独立选模与 `openai_compat` + `cli_agy`（强制 `mode="plan"` + `sandbox=True` 只读）混合席位、`@相对路径` 只读源码引用、结构化共识总结、一键采纳为审批附注或新建任务，以及基于 `messages_run` 索引的轮间人工主持人插话自动注入。
+- **项目管理与确定性测试节点**：新增 `POST /api/projects/<id>/remove`（活跃进程拦截 + 安全注销，不删工作区与历史运行）与弹窗已登记项目列表；动态节点编排器支持白名单确定性 `test` 节点（`pytest` / `python_unittest` / `npm_test` / `npm_run_build`）及 `feedback_to` 打回，拒绝原始 shell 命令。
+- **交付报告导出、无损归档与历史推荐一键套用**：新增 `GET /api/runs/<key>/export-report` 导出 `.md` 交付报告；新增独立 `archived_runs` 表与 `POST /api/runs/<key>/archive`（严格布尔校验、默认列表隐藏、支持「已归档」筛选恢复，磁盘 `state.json`/`metrics.json` 零修改）；新建任务弹窗新增 `✨ 按历史推荐` 一键自动填充。
+- **双模型并行 Best-of-N 竞技场**：新增 `orchestrator/arena.py` 与 `/api/projects/<id>/arena`、`/api/projects/<id>/arena/apply`，隔离 `git worktree` 并行运行 CLI 编码候选 + 白名单测试，并排对比红绿 Unified Diff，经人工确认后仅允许 `git merge --ff-only` 合入；严格正则校验模型名防 CLI 参数注入。
+- **验收与实测**：
+  - 全量 `scripts/precommit.py` 通过（18 项配置/密钥扫描 `ok: true`，离线冒烟通过，**242 / 242** 快速测试全绿，`source_unchanged: true`）；
+  - 真浏览器端到端实测 `http://127.0.0.1:8766` 全部 5 项新功能（0 控制台报错、0 失败请求，圆桌 `cli_agy` 下拉补全实测载入 23 个本机真实模型），并同步修复新建任务弹窗按钮组折行样式。
+
 ## 0.5.8 受控自优化、动态多节点与工作台全面升级
 
 - 落地两项受控自优化模块并完成两轮代码审查加固：`orchestrator/lessons.py`（高频失败经验提取、环境密钥与通用凭据正则脱敏、哈希绑定审批、按阶段注入提示词并同步无人值守 `logical_hash`）与 `orchestrator/model_router.py`（跳过未执行下游阶段、严格有限浮点校验、独立计量 `unknown_calls`），接入 CLI（`lessons-propose` / `lessons-approve` / `route-recommend`）及工作台「看板与优化」3 标签页。

@@ -1,3 +1,10 @@
+# 0.5.9：多模型圆桌升级、白名单测试编排、报告导出与双模型并行竞技场
+
+- **多模型圆桌直接对话升级**：支持 1~3 轮 4 角色（`architect`/`developer`/`skeptic`/`reviewer`）交叉质询、`@相对路径` 工作区源码只读引用、`turn_consensus` 结构化共识总结与一键「采纳为审批附注 / 基于结论新建任务」；新增 `cli_agy` 严格只读席位（`mode="plan"` + `sandbox=True`）与兼容 API 混编，并在第 2~3 轮及共识阶段通过 `messages` 索引自动注入人工主持人最新插话引导。
+- **项目管理与白名单确定性测试节点**：新增 `POST /api/projects/<id>/remove`（校验无活跃运行后安全注销 SQLite 登记及可选清理托管 `.toml`，绝不碰用户代码目录与历史运行）及「已登记项目列表」UI；动态节点编排器新增 `确定性测试 (test)` 节点与 `feedback_to` 自动打回，仅允许白名单预设 `pytest` / `python_unittest` / `npm_test` / `npm_run_build`。
+- **交付报告导出、无损归档与一键路由推荐**：新增 `GET /api/runs/<key>/export-report` 一键导出 Markdown 交付报告（含阶段汇总、SHA 校验产物摘要、4 反引号累计 Diff、圆桌共识与用量）；新增独立 `archived_runs` 表与 `POST /api/runs/<key>/archive` 实现无损归档/隐藏与「已归档」筛选；新建任务弹窗新增 `✨ 按历史推荐` 按钮一键填充历史推荐模型。
+- **双模型并行 Best-of-N 竞技场**：新增 `orchestrator/arena.py`、`POST /api/projects/<id>/arena`、`POST /api/projects/<id>/arena/apply` 与看板「双模型竞技场」页签：在两个隔离 `git worktree` 中并行运行 CLI 编码候选并可选执行白名单确定性测试，并排展示红绿高亮 Unified Diff；仅在工作区干净、HEAD 未漂移且经人工明确拍板后才以 `git merge --ff-only` 安全合入。
+
 # 0.5.8：受控自优化、动态多节点编排与工作台全面升级
 
 - **受控失败经验沉淀与多模型自适应路由推荐**：新增 `lessons.py`（只读扫描历史 `review_verdict.json` / `test_record.json` 高频缺陷，脱敏并绑定内容哈希，经审批写入 `approved_lessons.json` 后注入后续 `report`/`code` 提示词并同步无人值守指纹）与 `model_router.py`（聚合终态 `metrics.json` 按 `(stage_kind, tool, model)` 输出可解释排序，跳过未执行阶段、单独记账 `unknown_calls`）；接入 `lessons-propose` / `lessons-approve` / `route-recommend` CLI 及工作台「看板与优化」3 标签页。
