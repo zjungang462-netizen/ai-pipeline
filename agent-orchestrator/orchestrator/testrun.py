@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 import signal
 import subprocess
 import threading
@@ -36,10 +37,16 @@ def run_test_cmd(cmd: list[str], workdir: Path, timeout_s: int = 600,
         return {"ok": False, "exit_code": -1, "cmd": list(cmd), "duration_s": 0.0,
                 "output": "", "error": f"工作目录不可用: {e}"}
     t0 = time.monotonic()
+    env = build_subprocess_env(extra_allow=extra_env)
+    argv = list(cmd)
+    if argv and not Path(argv[0]).is_file():
+        resolved = shutil.which(argv[0], path=env.get("PATH"))
+        if resolved:
+            argv[0] = resolved
     try:
         proc = subprocess.Popen(
-            list(cmd), cwd=str(workdir),
-            env=build_subprocess_env(extra_allow=extra_env),
+            argv, cwd=str(workdir),
+            env=env,
             stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
             start_new_session=os.name != "nt",
             creationflags=subprocess.CREATE_NEW_PROCESS_GROUP if os.name == "nt" else 0,

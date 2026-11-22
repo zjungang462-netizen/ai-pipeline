@@ -248,12 +248,13 @@ class Handler(BaseHTTPRequestHandler):
                 entry = store.project(parts[2])
                 cfg = service.config(entry['config'])
                 try:
-                    return self.respond(apply_arena_winner(
-                        cfg,
-                        str(body.get('arena_id') or ''),
-                        str(body.get('label') or ''),
-                        str(body.get('expected_base_sha') or ''),
-                    ))
+                    with service.operations:
+                        return self.respond(apply_arena_winner(
+                            cfg,
+                            str(body.get('arena_id') or ''),
+                            str(body.get('label') or ''),
+                            str(body.get('expected_base_sha') or ''),
+                        ))
                 except RuntimeError as error:
                     raise Conflict(str(error)) from error
             if len(parts) == 5 and parts[:2] == ['api', 'projects'] and parts[3:] == ['lessons', 'approve'] and method == 'POST':

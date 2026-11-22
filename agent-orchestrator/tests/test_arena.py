@@ -113,11 +113,53 @@ class TestArena(unittest.TestCase):
             apply_arena_winner(cfg, res['arena_id'], 'A', base_sha)
         (repo / 'dirty.tmp').unlink()
 
-        # 人工明确选择方案 A 后，安全 ff-only 合并生效
+        # 人工明确选择方案 A 后，安全 ff-only 合并生效，并落盘审计状态禁止重复合并
         applied = apply_arena_winner(cfg, res['arena_id'], 'A', base_sha)
         self.assertTrue(applied['applied'])
         self.assertEqual(applied['head_sha'], by_label['A']['commit_sha'])
         self.assertIn('return a + b', (repo / 'calc.py').read_text(encoding='utf-8'))
+
+        import json as _json
+        saved_rec = _json.loads((root / 'state' / 'arenas' / res['arena_id'] / 'result.json').read_text(encoding='utf-8'))
+        self.assertEqual(saved_rec['applied_label'], 'A')
+        self.assertEqual(saved_rec['applied_commit_sha'], by_label['A']['commit_sha'])
+        self.assertTrue(saved_rec.get('applied_at'))
+        with self.assertRaises(RuntimeError):
+            apply_arena_winner(cfg, res['arena_id'], 'B', base_sha)
+
+    def test_run_test_cmd_resolves_cmd_wrapper_via_which_without_shell(self):
+        from unittest import mock
+        from orchestrator.testrun import run_test_cmd
+
+        td = tempfile.TemporaryDirectory()
+        self.addCleanup(td.cleanup)
+        root = Path(td.name)
+        seen_argv: list[str] = []
+
+        class _FakeProc:
+            pid = 99999
+            returncode = 0
+
+            def __init__(self, argv, **kwargs):
+                seen_argv.extend(argv)
+                self._kwargs = kwargs
+                import io
+                self.stdout = io.BytesIO(b'ok\n')
+                self.stderr = io.BytesIO(b'')
+
+            def wait(self, timeout=None):
+                return 0
+
+            def poll(self):
+                return 0
+
+        with mock.patch('orchestrator.testrun.shutil.which', return_value='C:\\nodejs\\npm.cmd') as mock_which, \
+                mock.patch('orchestrator.testrun.subprocess.Popen', side_effect=_FakeProc):
+            rec = run_test_cmd(['npm', 'test'], root, timeout_s=30)
+            self.assertTrue(rec['ok'])
+            self.assertEqual(rec['cmd'], ['npm', 'test'])
+            self.assertEqual(seen_argv, ['C:\\nodejs\\npm.cmd', 'test'])
+            mock_which.assert_called_once()
 
 
 if __name__ == '__main__':

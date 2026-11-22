@@ -16,8 +16,8 @@ from .adapters.factory import build_adapter
 from .collaboration.project_manager import TEST_PRESETS
 from .config import AdapterConfig, Config
 from .contracts import RunContext
-from .safety import build_subprocess_env
 from .state import atomic_write_json
+from .testrun import run_test_cmd
 
 _ALLOWED_ARENA_ADAPTERS = frozenset((
     'cli_agy', 'cli_codex', 'cli_claude', 'cli_qwen', 'cli_qoder',
@@ -52,11 +52,7 @@ def _build_candidate_adapter_cfg(
 ) -> AdapterConfig:
     base = next((a for a in cfg.adapters.values() if a.type == adapter_type), None)
     opts: dict[str, Any] = dict(base.options) if base else {}
-    if adapter_type == 'openai_compat':
-        if not base:
-            raise ValueError(f'候选 {label} 选择了 openai_compat，但项目配置中未配置兼容 API 适配器')
-        opts.setdefault('timeout_s', 120)
-    elif adapter_type == 'cli_agy':
+    if adapter_type == 'cli_agy':
         opts['mode'] = 'accept-edits'
         opts['sandbox'] = True
         opts.setdefault('allow_patch_probe', True)
@@ -141,24 +137,12 @@ def _run_single_candidate(
         test_exit_code: int | None = None
         test_output = ''
         if test_preset:
-            cmd = list(TEST_PRESETS[test_preset])
-            try:
-                proc = subprocess.run(
-                    cmd,
-                    cwd=str(wt_dir),
-                    env=build_subprocess_env(),
-                    capture_output=True,
-                    text=True,
-                    encoding='utf-8',
-                    errors='replace',
-                    timeout=120,
-                )
-                test_exit_code = proc.returncode
-                combined = (proc.stdout or '') + ('\n' + proc.stderr if proc.stderr else '')
-                test_output = combined.strip()[:4000]
-            except (OSError, subprocess.TimeoutExpired) as exc:
-                test_exit_code = -1
-                test_output = f'测试执行异常：{exc}'[:400]
+            trec = run_test_cmd(list(TEST_PRESETS[test_preset]), wt_dir, timeout_s=120)
+            test_exit_code = int(trec.get('exit_code', -1))
+            raw_out = str(trec.get('output') or '')
+            if trec.get('error'):
+                raw_out = (f"{trec['error']}\n{raw_out}").strip()
+            test_output = raw_out[:4000]
 
         usage = result.usage if isinstance(result.usage, dict) else {}
         return {
@@ -290,6 +274,8 @@ def apply_arena_winner(
     if not result_path.is_file():
         raise KeyError(f'未找到竞技场记录：{arena_id}')
     record = json.loads(result_path.read_text(encoding='utf-8'))
+    if record.get('applied_label'):
+        raise RuntimeError(f'竞技场 {arena_id} 已采纳过方案 {record["applied_label"]}，禁止重复合并')
     if record.get('base_sha') != expected_base_sha:
         raise ValueError('expected_base_sha 与竞技场基线提交不一致')
 
@@ -314,6 +300,10 @@ def apply_arena_winner(
 
     _git(['merge', '--ff-only', commit_sha], cfg.task_workdir, cfg.git_exe)
     new_head = _git(['rev-parse', 'HEAD'], cfg.task_workdir, cfg.git_exe).stdout.strip()
+    record['applied_label'] = label
+    record['applied_commit_sha'] = commit_sha
+    record['applied_at'] = time.time()
+    atomic_write_json(result_path, record)
     return {
         'applied': True,
         'arena_id': arena_id,

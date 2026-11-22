@@ -471,7 +471,7 @@ if($('apply-route-recommend'))$('apply-route-recommend').onclick=async()=>{
  try{
   const data=await api(`/projects/${encodeURIComponent(pid)}/route-recommend?min_runs=1`);
   const recs=data.recommendations||{};
-  let applied=0;
+  const applied=[];
   for(const model of project.models){
    const kinds=(model.stages||[]).map(s=>s.kind).filter(Boolean);
    const matchKind=kinds.find(k=>recs[k]?.recommended&&recs[k].recommended.tool===model.type);
@@ -482,10 +482,11 @@ if($('apply-route-recommend'))$('apply-route-recommend').onclick=async()=>{
    if(inp){
     inp.value=rec.model;
     inp.dispatchEvent(new Event('input'));
-    applied++;
+    const stageNames=(model.stages||[]).map(s=>s.name).join('/')||model.name;
+    applied.push(`${stageNames} → ${rec.model}`);
    }
   }
-  toast(applied?`已按历史真实运行数据自动填充 ${applied} 个节点的推荐模型`:'历史终态样本不足或与当前节点工具不匹配，暂无可自动填充项。');
+  toast(applied.length?`已按历史数据填充 ${applied.length} 个节点：${applied.join('，')}`:'历史终态样本不足或与当前节点工具不匹配，暂无可自动填充项。');
  }catch(error){toast('获取历史推荐失败：'+error.message);}finally{$('apply-route-recommend').disabled=false;}
 };
 if($('refresh-catalog-pm'))$('refresh-catalog-pm').onclick=async()=>{
@@ -586,15 +587,17 @@ if($('arena-run'))$('arena-run').onclick=async()=>{
    else diffBox.append(el('div','diff-line diff-ctx','（无代码改动）'));
    card.append(diffBox);
    if(c.commit_sha){
-    const applyBtn=el('button','primary small',`采纳方案 ${c.label}（ff-only 合并）`);applyBtn.type='button';
+    const applyBtn=el('button','primary small arena-apply-btn',`采纳方案 ${c.label}（ff-only 合并）`);applyBtn.type='button';
     applyBtn.onclick=async()=>{
      applyBtn.disabled=true;
      try{
       const r=await api(`/projects/${encodeURIComponent(pid)}/arena/apply`,{method:'POST',body:{
        arena_id:res.arena_id,label:c.label,expected_base_sha:res.base_sha,
       }});
+      if(typeof box.querySelectorAll==='function')box.querySelectorAll('.arena-apply-btn').forEach(b=>{b.disabled=true;});
+      applyBtn.textContent=`已采纳方案 ${c.label} ✓`;
       toast(`已采纳方案 ${c.label}，工作区已安全快进至 ${(r.head_sha||'').slice(0,12)}。`);
-     }catch(err){toast(err.message);}finally{applyBtn.disabled=false;}
+     }catch(err){applyBtn.disabled=false;toast(err.message);}
     };
     card.append(applyBtn);
    }
