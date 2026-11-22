@@ -221,6 +221,8 @@ class Handler(BaseHTTPRequestHandler):
                 if action == 'lessons' and method == 'GET':
                     min_occ = int(query.get('min_occurrences', ['2'])[0])
                     return self.respond(project_manager.project_lessons(service, project_id, min_occurrences=min_occ))
+                if action == 'stages' and method == 'GET':
+                    return self.respond(project_manager.project_stage_definition(service, project_id))
             if len(parts) == 5 and parts[:2] == ['api', 'projects'] and parts[3:] == ['lessons', 'approve'] and method == 'POST':
                 self.idem()
                 from ..collaboration import project_manager

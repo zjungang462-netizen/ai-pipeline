@@ -398,7 +398,28 @@ if($('refresh-catalog-pm'))$('refresh-catalog-pm').onclick=async()=>{
  $('refresh-catalog-pm').disabled=true;
  try{await loadModelCatalog(true);renderProjectStageEditor();toast('已刷新本机可用模型目录');}finally{$('refresh-catalog-pm').disabled=false;}
 };
+let pmReturnToTask=false;
+if($('edit-project-nodes'))$('edit-project-nodes').onclick=async()=>{
+ const pid=$('project-select')?.value;
+ if(!pid){toast('请先在上方选择一个项目配置');return;}
+ $('edit-project-nodes').disabled=true;
+ try{
+  const def=await api(`/projects/${encodeURIComponent(pid)}/stages`);
+  if($('pm-name'))$('pm-name').value=def.name||'custom-flow';
+  if($('pm-workdir'))$('pm-workdir').value=def.workdir||'';
+  if($('pm-proxy'))$('pm-proxy').value=def.proxy_url||'';
+  if($('pm-max-duration'))$('pm-max-duration').value=String(def.max_duration_s||900);
+  if($('pm-max-calls'))$('pm-max-calls').value=String(def.max_model_calls||15);
+  if($('pm-patch-probe'))$('pm-patch-probe').checked=def.allow_patch_probe!==false;
+  pmDraftStages=(def.stages||[]).map(s=>({...s}));
+  pmReturnToTask=true;
+  renderProjectStageEditor();
+  $('project-dialog')?.showModal();
+  if(!liveModelCatalog&&typeof api==='function')loadModelCatalog(false).then(()=>{if($('project-dialog')?.open)renderProjectStageEditor();});
+ }catch(error){toast('读取项目节点失败：'+error.message);}finally{$('edit-project-nodes').disabled=false;}
+};
 if($('project-manage-open'))$('project-manage-open').onclick=()=>{
+ pmReturnToTask=false;
  resetProjectDraftFromPreset();$('project-dialog')?.showModal();
  if(!liveModelCatalog&&typeof api==='function')loadModelCatalog(false).then(()=>{if($('project-dialog')?.open)renderProjectStageEditor();});
 };
@@ -428,6 +449,12 @@ if($('project-form'))$('project-form').onsubmit=async event=>{
   projects=(await api('/projects')).projects;
   if(typeof applyProjects==='function')applyProjects();
   if(typeof restoreListFilters==='function')restoreListFilters();
-  toast(`项目 ${created.name}（${stagesPayload.length} 个动态节点）已热加载，可直接新建任务。`);
+  if(pmReturnToTask&&$('project-select')){
+   $('project-select').value=created.id;
+   if(typeof renderTaskScope==='function')renderTaskScope();
+   renderModelSettings();
+  }
+  pmReturnToTask=false;
+  toast(`项目 ${created.name}（${stagesPayload.length} 个动态节点）已热加载，可直接启动任务。`);
  }catch(error){toast(error.message);}finally{btn.disabled=false;}
 };

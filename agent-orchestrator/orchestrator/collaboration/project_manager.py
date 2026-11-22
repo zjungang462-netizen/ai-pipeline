@@ -95,6 +95,41 @@ def project_route_recommend(service, project_id: str, *, min_runs: int = 2) -> d
     }
 
 
+def project_stage_definition(service, project_id: str) -> dict[str, Any]:
+    """导出已登记项目的当前节点定义，供工作台动态增删/调整节点后热保存。"""
+    entry, cfg = _find_project_config(service, project_id)
+    proxy_url = ''
+    allow_patch_probe = True
+    stages_out = []
+    for st in cfg.stages:
+        if st.kind not in _ALLOWED_STAGE_KINDS or not st.adapter or st.adapter not in cfg.adapters:
+            continue
+        ad = cfg.adapters[st.adapter]
+        if ad.type == 'cli_agy':
+            if not proxy_url and ad.options.get('proxy_url'):
+                proxy_url = str(ad.options['proxy_url'])
+            allow_patch_probe = bool(ad.options.get('allow_patch_probe', True))
+        stages_out.append({
+            'name': st.name,
+            'kind': st.kind,
+            'adapter_type': ad.type if ad.type in _ALLOWED_STAGE_ADAPTER_TYPES else 'cli_agy',
+            'model': str(ad.options.get('model') or ''),
+            'approval': bool(st.approval),
+            'feedback_to': str(st.feedback_to or ''),
+            'prompt': str(st.prompt or ''),
+        })
+    return {
+        'id': entry['id'],
+        'name': entry['name'],
+        'workdir': str(cfg.task_workdir),
+        'proxy_url': proxy_url,
+        'max_duration_s': int(cfg.run_budget.max_duration_s or 900),
+        'max_model_calls': int(cfg.run_budget.max_model_calls or 15),
+        'allow_patch_probe': allow_patch_probe,
+        'stages': stages_out,
+    }
+
+
 def register_managed_project(service, payload: dict[str, Any]) -> dict[str, Any]:
     """根据白名单预设生成并校验本地项目 TOML，热登记到当前工作台。"""
     name = str(payload.get('name') or '').strip()

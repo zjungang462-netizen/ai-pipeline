@@ -267,6 +267,13 @@ prompt = "设计：{{task}}"
         self.assertEqual([m['name'] for m in dyn['models']],
                          ['lead_agent', 'design_agent', 'coding_agent', 'cross_review_agent', 'final_review_agent'])
 
+        # 读取已登记项目的当前节点定义（供「新建任务 → 增删/编排节点」回填）
+        status, stage_def, _ = req('GET', f"/api/projects/{dyn['id']}/stages", headers={'Cookie': cookie})
+        self.assertEqual(status, 200)
+        self.assertEqual([s['name'] for s in stage_def['stages']],
+                         ['lead', 'design', 'coding', 'cross_review', 'final_review'])
+        self.assertEqual(stage_def['stages'][2]['adapter_type'], 'cli_codex')
+
         # 拒绝重复节点名
         status, _, _ = req('POST', '/api/projects/register', {
             'name': 'dup-stage',
