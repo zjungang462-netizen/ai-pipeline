@@ -237,6 +237,18 @@ prompt = "设计：{{task}}"
         }, {**auth_headers, 'Idempotency-Key': 'idem-bad-12345678'})
         self.assertEqual(status, 400)
 
+        # 5. 本机模型目录探测端点（mock agy/api 探测，离线确定性验证）
+        from orchestrator.collaboration.model_catalog import _parse_agy_models
+        parsed = _parse_agy_models('Fetching available models...\ngemini-4-neon-high\tGemini 4 Neon (High)\nclaude-opus-5-5-high\tClaude Opus 5.5 (High)\n')
+        self.assertEqual([m['id'] for m in parsed], ['gemini-4-neon-high', 'claude-opus-5-5-high'])
+        with mock.patch('orchestrator.collaboration.model_catalog._probe_agy_models', return_value=parsed), \
+                mock.patch('orchestrator.collaboration.model_catalog._probe_openai_compat_models', return_value=(True, [{'id': 'deepseek-chat', 'label': 'deepseek-chat'}])):
+            status, catalog, _ = req('GET', '/api/models/catalog?refresh=1', headers={'Cookie': cookie})
+            self.assertEqual(status, 200)
+            self.assertEqual([m['id'] for m in catalog['adapters']['cli_agy']['models']],
+                             ['gemini-4-neon-high', 'claude-opus-5-5-high'])
+            self.assertTrue(catalog['adapters']['openai_compat']['installed'])
+
 
 if __name__ == '__main__':
     unittest.main()

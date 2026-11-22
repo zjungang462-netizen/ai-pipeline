@@ -28,9 +28,34 @@ const MODEL_PRESETS={
  cli_qwen:['qwen3-coder-plus','qwen-plus'],
  cli_qoder:['Ultimate','Performance','Efficient']
 };
+let liveModelCatalog=null,catalogLoading=null;
+function catalogEntryFor(type){return liveModelCatalog?.adapters?.[type]||null;}
+function catalogModelsFor(type){
+ const live=catalogEntryFor(type)?.models;
+ if(Array.isArray(live)&&live.length)return live;
+ return (MODEL_PRESETS[type]||[]).map(id=>({id,label:id}));
+}
+async function loadModelCatalog(force=false){
+ if(!force&&liveModelCatalog)return liveModelCatalog;
+ if(catalogLoading&&!force)return catalogLoading;
+ catalogLoading=(async()=>{
+  try{
+   const data=await api('/models/catalog'+(force?'?refresh=1':''));
+   liveModelCatalog=data;
+   return data;
+  }catch(error){
+   if(force)toast('刷新本机可用模型失败：'+error.message);
+   return liveModelCatalog;
+  }finally{catalogLoading=null;}
+ })();
+ return catalogLoading;
+}
 
 function renderModelSettings(){
  const project=projects.find(p=>p.id===$('project-select').value),box=$('model-settings');box.replaceChildren();
+ if(project&&!liveModelCatalog&&!catalogLoading&&typeof api==='function'){
+  loadModelCatalog(false).then(cat=>{if(cat&&$('project-select').value===project.id)renderModelSettings();});
+ }
  for(const model of project?.models||[]){
   const card=el('div','adapter-card');
   const head=el('div','adapter-card-head');
@@ -38,19 +63,28 @@ function renderModelSettings(){
   left.append(el('span','adapter-card-name',model.name));
   const stageNames=(model.stages||[]).map(s=>(typeof stages!=='undefined'&&stages[s])||s);
   if(stageNames.length)left.append(el('span','adapter-stage-pill','负责：'+stageNames.join(' / ')));
-  head.append(left,el('span','adapter-type-pill',ADAPTER_TYPE_LABELS[model.type]||model.type));
+  const entry=catalogEntryFor(model.type);
+  const typeText=(ADAPTER_TYPE_LABELS[model.type]||model.type)+(entry?.source==='live_cli'||entry?.source==='live_api'?` · 实探 ${entry.models.length} 模型`:'');
+  head.append(left,el('span','adapter-type-pill',typeText));
   card.append(head);
 
   const currentVal=model.model||model.effective_model||'';
-  const basePresets=MODEL_PRESETS[model.type]||[];
-  const presets=[...new Set([...(currentVal?[currentVal]:[]),...basePresets])];
+  const discovered=catalogModelsFor(model.type);
+  const seen=new Set();
+  const optionsList=[];
+  if(currentVal){seen.add(currentVal);const found=discovered.find(m=>m.id===currentVal);optionsList.push({id:currentVal,label:found?found.label:currentVal});}
+  for(const item of discovered){if(!seen.has(item.id)){seen.add(item.id);optionsList.push(item);}}
+  const presetIds=optionsList.map(m=>m.id);
 
   const pickerRow=el('div','model-picker-row');
-  const presetLabel=el('label','','常用模型选择');
+  const presetLabel=el('label','',`选择系统可用模型（共 ${optionsList.length} 个）`);
   const presetSelect=el('select','model-preset-select');
   presetSelect.append(Object.assign(el('option','','自定义 / 工具默认'),{value:''}));
-  for(const item of presets){presetSelect.append(Object.assign(el('option','',item),{value:item}));}
-  presetSelect.value=presets.includes(currentVal)?currentVal:'';
+  for(const item of optionsList){
+   const text=item.label&&item.label!==item.id?`${item.label} · ${item.id}`:item.id;
+   presetSelect.append(Object.assign(el('option','',text),{value:item.id}));
+  }
+  presetSelect.value=presetIds.includes(currentVal)?currentVal:'';
   presetLabel.append(presetSelect);
 
   const inputLabel=el('label','','模型标识（可手动输入）');
@@ -60,18 +94,18 @@ function renderModelSettings(){
   card.append(pickerRow);
 
   const chips=[];
-  if(presets.length){
+  if(optionsList.length){
    const chipWrap=el('div','model-chips');
-   for(const item of presets.slice(0,5)){
-    const chip=el('button','model-chip'+(item===currentVal?' active':''),item);
-    chip.type='button';
-    chip.onclick=()=>{input.value=item;presetSelect.value=item;chips.forEach(c=>c.classList.toggle('active',c.textContent===item));};
+   for(const item of optionsList.slice(0,6)){
+    const chip=el('button','model-chip'+(item.id===currentVal?' active':''),item.id);
+    chip.type='button';chip.title=item.label||item.id;
+    chip.onclick=()=>{input.value=item.id;presetSelect.value=item.id;chips.forEach(c=>c.classList.toggle('active',c.textContent===item.id));};
     chips.push(chip);chipWrap.append(chip);
    }
    card.append(chipWrap);
   }
   presetSelect.onchange=()=>{if(presetSelect.value){input.value=presetSelect.value;}chips.forEach(c=>c.classList.toggle('active',c.textContent===input.value.trim()));};
-  input.oninput=()=>{const v=input.value.trim();presetSelect.value=presets.includes(v)?v:'';chips.forEach(c=>c.classList.toggle('active',c.textContent===v));};
+  input.oninput=()=>{const v=input.value.trim();presetSelect.value=presetIds.includes(v)?v:'';chips.forEach(c=>c.classList.toggle('active',c.textContent===v));};
 
   const extraGrid=el('div','adapter-extra-grid');
   for(const [field,enabled,values,title] of [['reasoning_effort',model.supports_effort,['cli_qoder','cli_claude'].includes(model.type)?['low','medium','high','xhigh','max']:['none','low','medium','high','xhigh'],'思考强度'],['thinking',model.supports_thinking,model.type==='cli_qoder'?['auto','adaptive','disabled']:['enabled','disabled'],'深度思考']]){
@@ -250,6 +284,18 @@ const PM_PRESET_STAGES={
   {name:'review',label:'03 独立审查',type:'openai_compat',model:'deepseek-chat'},
  ],
 };
+function populateProjectModelSelect(sel,type,preferred){
+ const models=catalogModelsFor(type);
+ sel.replaceChildren(Object.assign(el('option','','自定义 / 工具默认'),{value:''}));
+ for(const m of models){
+  const text=m.label&&m.label!==m.id?`${m.label} · ${m.id}`:m.id;
+  sel.append(Object.assign(el('option','',text),{value:m.id}));
+ }
+ const ids=models.map(m=>m.id);
+ if(preferred&&ids.includes(preferred))sel.value=preferred;
+ else if(models.length)sel.value=models[0].id;
+ else sel.value='';
+}
 function renderProjectStageEditor(){
  const list=$('pm-stage-list'),preset=$('pm-preset')?.value||'review_plan_fix';
  if(!list)return;
@@ -259,17 +305,40 @@ function renderProjectStageEditor(){
   row.dataset.stage=st.name;
   const nameEl=el('div','pm-stage-label',st.label);
   const typeSel=el('select','pm-stage-type');
-  for(const [k,v] of Object.entries(ADAPTER_TYPE_LABELS)){if(k==='fake'||k==='cli_dsh')continue;typeSel.append(Object.assign(el('option','',v),{value:k}));}
+  for(const [k,v] of Object.entries(ADAPTER_TYPE_LABELS)){
+   if(k==='fake'||k==='cli_dsh')continue;
+   const entry=catalogEntryFor(k);
+   const badge=entry?(entry.installed?`（可用${entry.source==='live_cli'||entry.source==='live_api'?'·'+entry.models.length:''}）`:'（未检测到）'):'';
+   typeSel.append(Object.assign(el('option','',v+badge),{value:k}));
+  }
   typeSel.value=st.type;
+  const modelSel=el('select','pm-stage-model-select');
   const modelInp=el('input','pm-stage-model');
-  modelInp.value=st.model;modelInp.maxLength=160;modelInp.placeholder='留空使用工具默认模型';
-  typeSel.onchange=()=>{const presets=MODEL_PRESETS[typeSel.value]||[];if(presets.length)modelInp.value=presets[0];};
-  row.append(nameEl,typeSel,modelInp);
+  modelInp.maxLength=160;modelInp.placeholder='手动输入模型 ID（可选）';
+  populateProjectModelSelect(modelSel,st.type,st.model);
+  modelInp.value=modelSel.value||st.model;
+  typeSel.onchange=()=>{populateProjectModelSelect(modelSel,typeSel.value,'');modelInp.value=modelSel.value;};
+  modelSel.onchange=()=>{if(modelSel.value)modelInp.value=modelSel.value;};
+  modelInp.oninput=()=>{const v=modelInp.value.trim();const ids=catalogModelsFor(typeSel.value).map(m=>m.id);modelSel.value=ids.includes(v)?v:'';};
+  const modelCol=el('div','pm-model-combo');
+  modelCol.append(modelSel,modelInp);
+  row.append(nameEl,typeSel,modelCol);
   list.append(row);
  }
 }
 if($('pm-preset'))$('pm-preset').onchange=renderProjectStageEditor;
-if($('project-manage-open'))$('project-manage-open').onclick=()=>{renderProjectStageEditor();$('project-dialog')?.showModal();};
+if($('refresh-catalog-task'))$('refresh-catalog-task').onclick=async()=>{
+ $('refresh-catalog-task').disabled=true;
+ try{await loadModelCatalog(true);renderModelSettings();toast('已刷新本机可用模型目录');}finally{$('refresh-catalog-task').disabled=false;}
+};
+if($('refresh-catalog-pm'))$('refresh-catalog-pm').onclick=async()=>{
+ $('refresh-catalog-pm').disabled=true;
+ try{await loadModelCatalog(true);renderProjectStageEditor();toast('已刷新本机可用模型目录');}finally{$('refresh-catalog-pm').disabled=false;}
+};
+if($('project-manage-open'))$('project-manage-open').onclick=()=>{
+ renderProjectStageEditor();$('project-dialog')?.showModal();
+ if(!liveModelCatalog&&typeof api==='function')loadModelCatalog(false).then(()=>{if($('project-dialog')?.open)renderProjectStageEditor();});
+};
 if($('project-form'))$('project-form').onsubmit=async event=>{
  event.preventDefault();
  const btn=$('pm-submit');btn.disabled=true;
@@ -279,7 +348,8 @@ if($('project-form'))$('project-form').onsubmit=async event=>{
   for(const row of rows){
    if(!row.dataset?.stage)continue;
    const typeVal=row.children[1]?.value||'cli_agy';
-   const modelVal=(row.children[2]?.value||'').trim();
+   const combo=row.children[2];
+   const modelVal=(combo?.children?.[1]?.value||combo?.children?.[0]?.value||'').trim();
    stage_adapters[row.dataset.stage]={type:typeVal,model:modelVal};
   }
   const created=await api('/projects/register',{method:'POST',body:{

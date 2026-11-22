@@ -190,6 +190,22 @@ class Handler(BaseHTTPRequestHandler):
                 if any(len(v) != 1 for v in query.values()): raise ValueError('查询参数不可重复')
                 return self.respond(insights.failure_page(service, query.get('after', [None])[0],
                                                          int(query.get('limit', ['50'])[0])))
+            if path == '/api/models/catalog' and method == 'GET':
+                from ..collaboration.model_catalog import discover_local_catalog
+                force = query.get('refresh', ['0'])[0] in ('1', 'true', 'yes')
+                proxy_url = ''
+                for proj in service.list_projects():
+                    try:
+                        cfg = service.config(proj['config'])
+                        for ad in cfg.adapters.values():
+                            if ad.type == 'cli_agy' and ad.options.get('proxy_url'):
+                                proxy_url = ad.options['proxy_url']
+                                break
+                    except Exception:
+                        pass
+                    if proxy_url:
+                        break
+                return self.respond(discover_local_catalog(proxy_url=proxy_url, force=force))
             if path == '/api/projects' and method == 'GET':
                 return self.respond({'projects': service.list_projects()})
             if path == '/api/projects/register' and method == 'POST':
