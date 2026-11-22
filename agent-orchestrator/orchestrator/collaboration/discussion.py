@@ -62,7 +62,7 @@ def capture(run, *, extra_files: list[str] | None = None, question: str = ''):
     cfg = load_config(run['config'])
     record = {'run_id': run['run_id'], 'revision': state.get('revision', 0),
               'config_hash': cfg.source_hash, 'stages': {}, 'evidence': [], 'sources': []}
-    remaining = 1200
+    remaining = 4000
     for name, stage in state.get('stages', {}).items():
         record['stages'][name] = {'attempt': stage.get('current_attempt'), 'commit': stage.get('commit_sha'),
                                  'inputs_hash': stage.get('inputs_hash'), 'outputs_hash': stage.get('outputs_hash')}
@@ -78,7 +78,7 @@ def capture(run, *, extra_files: list[str] | None = None, question: str = ''):
                 path = attempt / filename
                 if path.is_file() and sha256_file(path) == files[filename]:
                     with path.open(encoding='utf8', errors='replace') as stream:
-                        body = stream.read(min(1000, remaining))
+                        body = stream.read(min(1800, remaining))
                     remaining -= len(body)
                     record['evidence'].append({'stage': name, 'file': filename, 'hash': files[filename], 'body': body})
     commit = next((s['commit'] for s in reversed(list(record['stages'].values())) if s['commit']), None)
@@ -159,7 +159,7 @@ def _wrap_streaming_adapter(adapter, store, run_id: str, topic_id: str, role: st
             return getattr(self._inner, item)
 
         def run(self, prompt, workdir, ctx):
-            sink = DiscussionEventSink(store, run_id, topic_id, role)
+            sink = DiscussionEventSink(store, run_id, topic_id, role, turn_id=ctx.stage)
             return run_streaming_turn(self._inner, prompt, workdir, ctx, sink)
 
     return _StreamingProxy(adapter)
@@ -200,7 +200,7 @@ def execute(store, topic_id, *, stream_tokens: bool = False):
             selected = next((original.adapters[s.adapter] for s in original.stages
                              if s.kind == kind and s.adapter in original.adapters
                              and original.adapters[s.adapter].type == 'openai_compat'), apis[0])
-            opts = {**selected.options, 'max_tokens': 650, 'timeout_s': 45, 'temperature': .15}
+            opts = {**selected.options, 'max_tokens': 1000, 'timeout_s': 45, 'temperature': .15}
             custom_model = role_models.get(role)
             if isinstance(custom_model, str) and custom_model.strip():
                 opts['model'] = custom_model.strip()
@@ -263,7 +263,7 @@ def execute(store, topic_id, *, stream_tokens: bool = False):
         config_path.write_text(dump_config({
             'task_workdir': str(base / 'readonly'), 'state_dir': str(base / 'state'),
             'run_budget': {'max_tokens': budget, 'max_duration_s': maximum_duration},
-            'autonomy': {'enabled': True, 'output_tokens': 650},
+            'autonomy': {'enabled': True, 'output_tokens': 1000},
             'stages': [{'name': s.name, 'adapter': s.adapter, 'prompt': s.prompt, 'kind': 'report',
                         'timeout_s': min(45, maximum_duration), 'max_attempts': 1} for s in stages],
             'adapters': {k: {'type': v.type, **v.options} for k, v in adapters.items()}}), encoding='utf8')
@@ -299,6 +299,7 @@ def execute(store, topic_id, *, stream_tokens: bool = False):
                         'snapshot_revision': topic['snapshot']['revision'],
                         'call_id': response.get('id'),
                         'returned_model': response.get('model'),
+                        'turn': spec.name,
                         **({'round': r_idx, 'total_rounds': rounds} if rounds > 1 and role != 'consensus' else {}),
                         **({'consensus': True} if role == 'consensus' else {}),
                     }],

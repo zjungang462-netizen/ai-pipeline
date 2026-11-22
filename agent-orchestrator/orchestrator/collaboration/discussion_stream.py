@@ -70,6 +70,7 @@ class DiscussionEventSink:
         topic_id: str,
         role: str,
         *,
+        turn_id: str = '',
         max_chars: int = 24,
         max_interval_s: float = 0.08,
     ):
@@ -77,14 +78,22 @@ class DiscussionEventSink:
         self.run_id = run_id
         self.topic_id = topic_id
         self.role = role
+        self.turn_id = turn_id or ''
+        self._key_scope = self.turn_id or self.role
         self._batcher = TokenBatcher(self._write_chunk, max_chars=max_chars, max_interval_s=max_interval_s)
+
+    def _base_payload(self) -> dict:
+        payload = {'thread_id': self.topic_id, 'role': self.role}
+        if self.turn_id:
+            payload['turn'] = self.turn_id
+        return payload
 
     def start(self) -> None:
         self.store.event(
-            f'disc:{self.topic_id}:{self.role}:start',
+            f'disc:{self.topic_id}:{self._key_scope}:start',
             self.run_id,
             'discussion_turn_start',
-            {'thread_id': self.topic_id, 'role': self.role},
+            self._base_payload(),
         )
 
     def on_token(self, delta: str) -> None:
@@ -92,19 +101,19 @@ class DiscussionEventSink:
 
     def _write_chunk(self, seq: int, delta: str) -> None:
         self.store.event(
-            f'disc:{self.topic_id}:{self.role}:tok:{seq}',
+            f'disc:{self.topic_id}:{self._key_scope}:tok:{seq}',
             self.run_id,
             'discussion_token',
-            {'thread_id': self.topic_id, 'role': self.role, 'seq': seq, 'delta': delta},
+            {**self._base_payload(), 'seq': seq, 'delta': delta},
         )
 
     def finish(self, *, status: str = 'done') -> None:
         self._batcher.flush()
         self.store.event(
-            f'disc:{self.topic_id}:{self.role}:end',
+            f'disc:{self.topic_id}:{self._key_scope}:end',
             self.run_id,
             'discussion_turn_end',
-            {'thread_id': self.topic_id, 'role': self.role, 'status': status},
+            {**self._base_payload(), 'status': status},
         )
 
 

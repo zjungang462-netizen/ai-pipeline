@@ -260,9 +260,11 @@ class StreamingDiscussionTests(unittest.TestCase):
         # 2 轮 × 2 角色 + 1 共识 = 5 个分析阶段全部 done
         self.assertEqual(len(done_topic['result']['results']), 5)
         self.assertTrue(all(v == 'done' for v in done_topic['result']['results'].values()))
-        # 校验事件流里落地了 consensus 消息
-        evs = service.store.events(run_key, 0, 100)
+        # 校验事件流里落地了 consensus 消息，且两轮流式 turn_start 互不冲突（共 5 个独立 turn_start）
+        evs = service.store.events(run_key, 0, 200)
         msg_roles = [e['payload']['role'] for e in evs if e['kind'] == 'message']
         self.assertIn('developer', msg_roles)
         self.assertIn('skeptic', msg_roles)
         self.assertIn('consensus', msg_roles)
+        turn_starts = [e['payload'].get('turn') for e in evs if e['kind'] == 'discussion_turn_start']
+        self.assertEqual(turn_starts, ['r1_developer', 'r1_skeptic', 'r2_developer', 'r2_skeptic', 'turn_consensus'])

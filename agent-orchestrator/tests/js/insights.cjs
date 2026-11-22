@@ -95,5 +95,16 @@ class Element{
  assert.equal(cliCollapsed.length,2);
  assert.equal(cliCollapsed[0].payload._repeat,2);
  assert.equal(cliCollapsed[0].payload.known_tokens,16000);
+ // Multi-round streaming turns for the same role stay distinct by turn id.
+ const multiRound=vm.runInContext(`collapseStreamingDiscussion([
+  {cursor:20,created:200,kind:'discussion_turn_start',payload:{thread_id:'t2',role:'developer',turn:'r1_developer'}},
+  {cursor:21,created:201,kind:'discussion_token',payload:{thread_id:'t2',role:'developer',turn:'r1_developer',delta:'一轮'}},
+  {cursor:22,created:202,kind:'discussion_turn_end',payload:{thread_id:'t2',role:'developer',turn:'r1_developer',status:'done'}},
+  {cursor:23,created:203,kind:'discussion_turn_start',payload:{thread_id:'t2',role:'developer',turn:'r2_developer'}},
+  {cursor:24,created:204,kind:'discussion_token',payload:{thread_id:'t2',role:'developer',turn:'r2_developer',delta:'二轮'}}
+ ])`,streamCtx);
+ assert.equal(multiRound.length,2);
+ assert.equal(multiRound[0].payload.text,'一轮');
+ assert.equal(multiRound[1].payload.text,'二轮');
  console.log('INSIGHTS_UI_OK');
 })().catch(error=>{console.error(error);process.exitCode=1;});
