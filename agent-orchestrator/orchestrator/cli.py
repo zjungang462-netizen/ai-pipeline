@@ -204,7 +204,7 @@ def cmd_dashboard(args) -> int:
     configs = [Path(p).resolve() for p in args.config]
     for path in configs:
         load_config(path)
-    serve(Path(args.database).resolve(), configs, args.port)
+    serve(Path(args.database).resolve(), configs, args.port, open_browser=bool(args.open))
     return 0
 
 
@@ -532,6 +532,7 @@ def main(argv=None) -> int:
     sp.add_argument('--config', action='append', required=True, help='登记配置文件；可重复指定')
     sp.add_argument('--database', default='.workbench/collaboration.sqlite3')
     sp.add_argument('--port', type=int, default=8765)
+    sp.add_argument('--open', action='store_true', help='启动后自动在默认浏览器打开本机工作台链接')
     sp.set_defaults(func=cmd_dashboard)
 
     raw_argv = list(sys.argv[1:] if argv is None else argv)

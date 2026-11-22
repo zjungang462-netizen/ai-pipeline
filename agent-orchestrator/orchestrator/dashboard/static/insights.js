@@ -121,7 +121,12 @@ function compareText(data){
 }
 $('insights-open').onclick=()=>{
  for(const id of ['compare-left','compare-right'])$(id).replaceChildren(...runs.map(r=>{const option=el('option','',r.run_id+' · '+(r.task||'').slice(0,60));option.value=r.id;return option;}));
- if(runs.length>1)$('compare-right').value=runs[1].id;$('insights-dialog').showModal();
+ if(runs.length>1)$('compare-right').value=runs[1].id;
+ for(const id of ['lessons-project','route-project']){
+  const sel=$(id);if(!sel)continue;
+  sel.replaceChildren(...projects.filter(p=>!p.unavailable).map(p=>{const o=el('option','',p.name);o.value=p.id;return o;}));
+ }
+ $('insights-dialog').showModal();
 };
 $('compare-run').onclick=async()=>{
  const params=new URLSearchParams({left:$('compare-left').value,right:$('compare-right').value});
@@ -143,4 +148,96 @@ $('failures-next').onclick=async()=>{
   $('failure-summary').textContent=`已累计 ${failureSeen.size} 条失败记录（类别可重叠）：`+[...failureCounts].map(([k,v])=>k+' '+v).join('；')+(page.errors.length?`；本页 ${page.errors.length} 条元数据不可读`:'')+(failureDone?'；已扫描至当前末尾':'；还有历史页');
   $('failures-next').textContent=failureDone?'重新扫描失败记录':'扫描下一页失败记录';
  }catch(error){toast(error.message);}finally{failureBusy=false;$('failures-next').disabled=false;}
+};
+
+// 自优化看板标签页 + 经验沉淀 + 模型路由推荐 + 可视化新增项目
+let latestLessonsProposal=null;
+if(typeof document.querySelectorAll==='function'){
+ document.querySelectorAll('[data-insights-tab]').forEach(btn=>{
+  btn.onclick=()=>{
+   const target=btn.dataset.insightsTab;
+   document.querySelectorAll('[data-insights-tab]').forEach(b=>b.classList.toggle('active',b===btn));
+   for(const name of ['usage','lessons','routing']){
+    const pane=$('insights-pane-'+name);if(pane)show(pane,name===target);
+   }
+  };
+ });
+}
+if($('lessons-scan'))$('lessons-scan').onclick=async()=>{
+ const pid=$('lessons-project')?.value;if(!pid){toast('请先选择可用项目');return;}
+ const minOcc=Math.max(1,Number($('lessons-min-occ')?.value||2));
+ $('lessons-scan').disabled=true;
+ try{
+  const data=await api(`/projects/${encodeURIComponent(pid)}/lessons?min_occurrences=${minOcc}`);
+  latestLessonsProposal=data.proposal;
+  const list=$('lessons-list'),status=$('lessons-status');list.replaceChildren();
+  const items=data.proposal?.items||[];
+  const approvedItems=data.approved?.items||[];
+  status.textContent=`已扫描 ${data.proposal?.scanned_runs||0} 次历史运行：发现 ${items.length} 条高频待审批经验；当前已生效 ${approvedItems.length} 条。`;
+  show(status,true);
+  if($('lessons-approve'))$('lessons-approve').disabled=!items.length;
+  for(const item of items){
+   const card=el('div','opt-card');
+   card.append(el('div','opt-card-title',`[待审批 · 出现 ${item.occurrences} 次] ${item.source}`),el('div','opt-card-body',item.checklist));
+   list.append(card);
+  }
+  for(const item of approvedItems){
+   const card=el('div','opt-card approved');
+   card.append(el('div','opt-card-title',`[已生效 · 出现 ${item.occurrences} 次] ${item.source}`),el('div','opt-card-body',item.checklist));
+   list.append(card);
+  }
+  if(!items.length&&!approvedItems.length)list.append(el('p','empty','暂无达到阈值的高频失败经验。'));
+ }catch(error){toast(error.message);}finally{$('lessons-scan').disabled=false;}
+};
+if($('lessons-approve'))$('lessons-approve').onclick=async()=>{
+ const pid=$('lessons-project')?.value;if(!pid||!latestLessonsProposal)return;
+ $('lessons-approve').disabled=true;
+ try{
+  const res=await api(`/projects/${encodeURIComponent(pid)}/lessons/approve`,{method:'POST',body:{proposal:latestLessonsProposal}});
+  toast(`已批准 ${res.items} 条失败经验，将自动注入后续任务提示词。`);
+  $('lessons-scan').onclick();
+ }catch(error){toast(error.message);}finally{$('lessons-approve').disabled=false;}
+};
+if($('route-scan'))$('route-scan').onclick=async()=>{
+ const pid=$('route-project')?.value;if(!pid){toast('请先选择可用项目');return;}
+ const minRuns=Math.max(1,Number($('route-min-runs')?.value||1));
+ $('route-scan').disabled=true;
+ try{
+  const data=await api(`/projects/${encodeURIComponent(pid)}/route-recommend?min_runs=${minRuns}`);
+  const box=$('route-results');box.replaceChildren();
+  const entries=Object.entries(data.recommendations||{});
+  if(!entries.length){box.append(el('p','empty',`已扫描 ${data.scanned_metrics||0} 条终态 metrics，暂无可用模型样本。`));return;}
+  const kindLabels={code:'代码阶段 (code)',report:'报告/方案阶段 (report)',review:'审查阶段 (review)'};
+  for(const [kind,rec] of entries){
+   const card=el('div','opt-card');
+   const recText=rec.recommended?`推荐：${rec.recommended.tool} / ${rec.recommended.model}`:'暂不自动推荐（样本不足）';
+   card.append(el('div','opt-card-title',`${kindLabels[kind]||kind} · ${recText}`),el('div','opt-card-sub',rec.reason||''));
+   for(const c of rec.candidates||[]){
+    const line=`${c.tool} / ${c.model} · 样本 ${c.runs} · 整条 ${(c.run_pass_rate*100).toFixed(0)}% · 阶段 ${(c.stage_pass_rate*100).toFixed(0)}% · 耗时 ${c.median_duration_s??'—'}s · tokens ${c.median_reported_tokens??'—'}${c.unknown_calls?` · 未知用量 ${c.unknown_calls} 次`:''}${c.eligible?'':'（样本不足）'}`;
+    card.append(el('div','opt-card-row',line));
+   }
+   box.append(card);
+  }
+ }catch(error){toast(error.message);}finally{$('route-scan').disabled=false;}
+};
+if($('project-manage-open'))$('project-manage-open').onclick=()=>$('project-dialog')?.showModal();
+if($('project-form'))$('project-form').onsubmit=async event=>{
+ event.preventDefault();
+ const btn=$('pm-submit');btn.disabled=true;
+ try{
+  const created=await api('/projects/register',{method:'POST',body:{
+   name:$('pm-name').value.trim(),
+   workdir:$('pm-workdir').value.trim(),
+   preset:$('pm-preset').value,
+   agy_model:$('pm-agy-model').value.trim(),
+   api_model:$('pm-api-model').value.trim(),
+   proxy_url:$('pm-proxy').value.trim(),
+   allow_patch_probe:!!$('pm-patch-probe').checked,
+  }});
+  $('project-dialog').close();
+  projects=(await api('/projects')).projects;
+  if(typeof applyProjects==='function')applyProjects();
+  if(typeof restoreListFilters==='function')restoreListFilters();
+  toast(`项目 ${created.name} 已热加载，可直接新建任务。`);
+ }catch(error){toast(error.message);}finally{btn.disabled=false;}
 };

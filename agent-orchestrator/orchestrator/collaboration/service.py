@@ -319,9 +319,14 @@ class Service:
         if intent not in ('pause', 'resume', 'cancel', 'approve', 'rerun'):
             raise ValueError('不支持的界面操作；改变需求请创建后续任务')
         allowed = {'approve': {'stage', 'target'}, 'rerun': {'stage', 'revision'}}.get(intent, set())
-        if not isinstance(payload, dict) or (set(payload) != allowed and
-                not (intent == 'resume' and set(payload) == {'wait_target'})):
+        if not isinstance(payload, dict) or (
+                set(payload) != allowed
+                and not (intent == 'resume' and set(payload) == {'wait_target'})
+                and not (intent == 'approve' and set(payload) == {'stage', 'target', 'note'})):
             raise ValueError('指令参数与当前操作不匹配')
+        if intent == 'approve' and 'note' in payload:
+            if not isinstance(payload['note'], str) or len(payload['note']) > 4000:
+                raise ValueError('审批附注须为不超过 4000 字的文本')
         with self.operations:
             run = self.store.run(key)
             from .control import command_gate

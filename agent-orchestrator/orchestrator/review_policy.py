@@ -98,9 +98,13 @@ class ReviewPolicy(PromptContextMixin):
                 load_approved_lessons_text(self.config.state_dir)
                 if spec.kind in ('code', 'report') else ''
             )
+            approval_notes = (
+                self._upstream_approval_notes(index)
+                if spec.kind in ('code', 'report') else ''
+            )
             logical = compute_inputs_hash(self._read_prompt(spec) + self.task + self._feedback(spec.name)
                                           + self.state.autonomy.get('recovery_hints', {}).get(spec.name, '')
-                                          + approved_lessons,
+                                          + approval_notes + approved_lessons,
                                           self._upstream_hashes(index), config_keys)
             saved = self.state.autonomy.setdefault('execution_inputs', {}).get(spec.name)
             if prompt_override is None and saved and saved['logical_hash'] == logical:

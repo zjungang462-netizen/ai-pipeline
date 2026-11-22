@@ -100,7 +100,10 @@ class Control:
                             raise ValueError('不存在有效的待审批产物')
                     elif not engine._approve_owned(spec.name):
                         raise ValueError('产物完整性或输入校验未通过')
-                    result = {'stage': spec.name, 'target': actual}
+                    note = str(payload.get('note') or '').strip()
+                    if note:
+                        state.control.setdefault('approval_notes', {})[spec.name] = note[:4000]
+                    result = {'stage': spec.name, 'target': actual, **({'note': note[:4000]} if note else {})}
                 elif kind == 'rerun':
                     if payload.get('revision') != state.revision:
                         raise ValueError('重跑请求的状态版本已变化')

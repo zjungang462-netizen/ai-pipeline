@@ -192,6 +192,24 @@ class Handler(BaseHTTPRequestHandler):
                                                          int(query.get('limit', ['50'])[0])))
             if path == '/api/projects' and method == 'GET':
                 return self.respond({'projects': service.list_projects()})
+            if path == '/api/projects/register' and method == 'POST':
+                self.idem()
+                from ..collaboration import project_manager
+                return self.respond(project_manager.register_managed_project(service, body), 201)
+            if len(parts) == 4 and parts[:2] == ['api', 'projects']:
+                project_id, action = parts[2:4]
+                from ..collaboration import project_manager
+                if action == 'route-recommend' and method == 'GET':
+                    min_runs = int(query.get('min_runs', ['2'])[0])
+                    return self.respond(project_manager.project_route_recommend(service, project_id, min_runs=min_runs))
+                if action == 'lessons' and method == 'GET':
+                    min_occ = int(query.get('min_occurrences', ['2'])[0])
+                    return self.respond(project_manager.project_lessons(service, project_id, min_occurrences=min_occ))
+            if len(parts) == 5 and parts[:2] == ['api', 'projects'] and parts[3:] == ['lessons', 'approve'] and method == 'POST':
+                self.idem()
+                from ..collaboration import project_manager
+                max_items = int(body.get('max_items', 12))
+                return self.respond(project_manager.approve_project_lessons(service, parts[2], body.get('proposal'), max_items=max_items))
             if path == '/api/runs':
                 if method == 'GET':
                     for name in ('limit', 'before', 'cursor', 'q', 'project_id', 'status', 'sort'):
@@ -310,11 +328,15 @@ def create_server(database, configs, port=8765, *, recover=True):
     return server
 
 
-def serve(database, configs, port=8765):
+def serve(database, configs, port=8765, *, open_browser=False):
     server = create_server(database, configs, port)
     app = server.application
-    print(f'工作台：{app.origin}/#token={app.bootstrap}', flush=True)
+    url = f'{app.origin}/#token={app.bootstrap}'
+    print(f'工作台：{url}', flush=True)
     print('仅本机单用户。关闭页面不停止已启动的独立任务进程。', flush=True)
+    if open_browser:
+        import webbrowser
+        threading.Thread(target=webbrowser.open, args=(url,), daemon=True).start()
     try:
         server.serve_forever()
     finally:

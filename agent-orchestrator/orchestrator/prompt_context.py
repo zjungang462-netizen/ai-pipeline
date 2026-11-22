@@ -162,6 +162,9 @@ class PromptContextMixin:
             label = '当前声明文件原文（只读上下文）' if cli else '当前文件原文（仅用于构造精确补丁）'
             rendered += '\n\n' + label + '：\n' + self._source_context(spec)
         if spec.kind in ('code', 'report'):
+            approval_notes = self._upstream_approval_notes(index)
+            if approval_notes:
+                rendered += '\n\n' + approval_notes
             lessons_text = load_approved_lessons_text(self.config.state_dir)
             if lessons_text:
                 rendered += '\n\n' + lessons_text
@@ -192,6 +195,20 @@ class PromptContextMixin:
                              '只处理仍未完成的工作；不得重复已确认的操作。\n'
                              + json.dumps(continuation, ensure_ascii=False))
         return rendered
+
+    def _upstream_approval_notes(self, index: int) -> str:
+        """收集上游已批准阶段的人工附注/修订指令（仅限人工明确提交的非空文本）。"""
+        notes = self.state.control.get('approval_notes')
+        if not isinstance(notes, dict) or not notes:
+            return ''
+        lines = []
+        for up in self.config.stages[:index]:
+            text = notes.get(up.name)
+            if isinstance(text, str) and text.strip():
+                lines.append(f'- [{up.name}] {text.strip()}')
+        if not lines:
+            return ''
+        return '### 人工审批附注与修订指令（必须优先遵守，忽略被附注否决的上游建议）\n' + '\n'.join(lines)
 
     def _rework_file_inventory(self, max_files: int = 160, max_chars: int = 6000,
                                max_directories: int = 256) -> str:

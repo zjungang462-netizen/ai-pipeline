@@ -45,7 +45,8 @@ def build(cfg: AdapterConfig, kind: str = "report") -> Adapter:
         kwargs.update(model=o.get('model'), isolate_config=o.get('isolate_config', False),
                       reasoning_effort=o.get('reasoning_effort'))
     if cls is AgyAdapter:
-        kwargs.update(model=o.get('model'), proxy_url=o.get('proxy_url'))
+        kwargs.update(model=o.get('model'), proxy_url=o.get('proxy_url'),
+                      allow_patch_probe=bool(o.get('allow_patch_probe', False)))
     if cls is DshAdapter:
         kwargs.update(permission_mode=o.get('permission_mode','read-only'),proxy_url=o.get('proxy_url'))
     if cls is GrokAdapter:

@@ -189,6 +189,29 @@ h4.md-h{font-size:13.5px;color:#2c4a3e}
 .composer textarea{min-height:44px}
 .md-link{color:#21644b;text-decoration:underline;text-underline-offset:2px}
 .md-link:hover{color:#154735}
+/* 侧栏快捷操作、看板标签页、自优化卡片与红绿高亮 Unified Diff */
+.sidebar-quick-actions{display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-top:8px;flex-shrink:0}
+.sidebar-quick-actions .secondary{margin-top:0!important;background:transparent;border-color:#4a7358;color:#d0dfd3;padding:7px 8px;font-size:12px}
+.sidebar-quick-actions .secondary:hover{background:#254235;color:#fff}
+.insights-tabs{display:flex;gap:8px;margin:12px 0 14px;padding-bottom:10px;border-bottom:1px solid var(--line)}
+.insights-tab{padding:6px 13px;border-radius:8px;background:#f2f6f3;color:#556b60;font-size:12px;font-weight:500}
+.insights-tab:hover{background:#e4eee8;color:var(--ink)}
+.insights-tab.active{background:var(--accent);color:#fff;font-weight:600}
+.inline-actions{display:flex;gap:10px;flex-wrap:wrap;margin:10px 0}
+.opt-list{display:flex;flex-direction:column;gap:10px;margin-top:12px;max-height:42vh;overflow:auto}
+.opt-card{background:#f8fbf9;border:1px solid #dce7df;border-radius:10px;padding:12px 14px}
+.opt-card.approved{background:#f1f9f4;border-color:#bfe0cb}
+.opt-card-title{font-size:12.5px;font-weight:650;color:var(--ink);margin-bottom:4px}
+.opt-card-sub{font-size:11px;color:#5c7267;margin-bottom:6px}
+.opt-card-body{font-size:12px;color:#2f453c;line-height:1.65;white-space:pre-wrap}
+.opt-card-row{font-size:11px;color:#41584e;padding:4px 8px;margin-top:4px;border-radius:6px;background:#fff;border:1px solid #e4ede7;font-family:Consolas,"Microsoft YaHei",monospace}
+.diff-view{background:#16201c;border:1px solid #283832;border-radius:8px;padding:10px 0;max-height:64dvh;overflow:auto;font:12px/1.65 Consolas,"Microsoft YaHei",monospace}
+.diff-line{padding:0 14px;white-space:pre;min-width:max-content}
+.diff-line.diff-file{color:#9fd4b9;font-weight:700;background:#1f2e28;padding-top:3px;padding-bottom:3px}
+.diff-line.diff-hunk{color:#8ebbf0;background:#1b2836}
+.diff-line.diff-add{color:#b7f0c8;background:rgba(46,160,96,.2)}
+.diff-line.diff-del{color:#ffbcb0;background:rgba(220,76,62,.2)}
+.diff-line.diff-ctx{color:#c9d6cf}
 @media(max-width:1250px){.room-header{display:flex;flex-wrap:wrap;padding:12px 20px 8px}.actions{margin-top:0}}
 @media(max-width:680px){.welcome-cards{grid-template-columns:1fr}.usage-stats{grid-template-columns:repeat(3,1fr)}.task-top-grid,.model-picker-row,.adapter-extra-grid,.template-save-row{grid-template-columns:1fr}.task-dialog-head,.task-dialog-body,.task-dialog-foot{padding-left:16px;padding-right:16px}.stage-stepper{padding:7px 14px 8px}.room-header{padding:12px 14px 8px}.room-indicators{padding:0 14px 6px}}
 @media(prefers-reduced-motion:reduce){.run-status.running:before,.run-status.recovering:before,.stream-cursor{animation:none!important}}

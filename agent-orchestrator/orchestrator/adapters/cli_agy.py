@@ -8,14 +8,18 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+import re
 from urllib.parse import urlsplit
 
 from ..contracts import ErrorKind, Result, RunContext
-from .cli_base import CLIAdapter
+from ..safety import build_subprocess_env
+from .cli_base import CLIAdapter, run_cli_process
 from .cli_codex import strip_ansi
 from .cli_result_stream import jsonl_objects
 
 SUPPORTED_VERSIONS = frozenset(('1.5.9', '1.5.12', '1.5.13', '1.5.14'))
+_PATCH_SERIES_RE = re.compile(r'^1\.5\.(\d+)$')
+_REQUIRED_HELP_FLAGS = ('--print', '--input-format', '--output-format', '--mode', '--sandbox', '--add-dir')
 
 
 class AgyAdapter(CLIAdapter):
@@ -26,10 +30,13 @@ class AgyAdapter(CLIAdapter):
     credential_env = []
 
     def __init__(self, name, exe=None, extra_env=None, timeout_s=300, model=None,
-                 proxy_url=None):
+                 proxy_url=None, allow_patch_probe=False):
         super().__init__(name, exe, extra_env, timeout_s)
         self.model = model
         self.proxy_url = proxy_url
+        self.allow_patch_probe = bool(allow_patch_probe)
+        self._probed_versions: set[str] = set()
+        self._detected_version: str = ''
         if proxy_url:
             parsed = urlsplit(proxy_url)
             if parsed.scheme not in ('http', 'https') or not parsed.hostname or parsed.username or parsed.password:
@@ -38,18 +45,40 @@ class AgyAdapter(CLIAdapter):
     def input_fingerprint(self):
         return {'protocol': 5, 'model': self.model, 'proxy_url': self.proxy_url, 'sandbox': True}
 
+    def _probe_patch_protocol(self, version: str) -> bool:
+        if version in self._probed_versions:
+            return True
+        if not self.allow_patch_probe or not self._resolved or not _PATCH_SERIES_RE.fullmatch(version):
+            return False
+        try:
+            proc = run_cli_process([self._resolved, '--help'], cwd=None,
+                                   env=build_subprocess_env(), input=None, timeout=15)
+        except Exception:
+            return False
+        text = (proc.stdout or '') + '\n' + (proc.stderr or '')
+        if proc.returncode == 0 and all(flag in text for flag in _REQUIRED_HELP_FLAGS):
+            self._probed_versions.add(version)
+            return True
+        return False
+
     def _version_known(self) -> bool:
         v = (self._version or "").lower().strip()
-        return v in SUPPORTED_VERSIONS
+        if v:
+            self._detected_version = v
+        if v in SUPPORTED_VERSIONS:
+            return True
+        return self._probe_patch_protocol(v)
 
     def preflight(self):
         return self.verified_preflight()
 
     def run(self, prompt: str, workdir: Path, ctx: RunContext) -> Result:
         if not self._ensure_resolved() or not self._version_known():
+            ver = self._version or self._detected_version
+            detected = f'（检测到 {ver}）' if ver else ''
             return Result(ok=False, exit_code=-1, parse_unknown=True, error_kind=ErrorKind.PARSE_FAILED,
                           channel=self.channel, tool_version=self._version,
-                          stderr='未确认已验证反重力版本，没有发起模型请求')
+                          stderr=f'未确认已验证反重力版本{detected}，没有发起模型请求')
         modern = self._version_known()
         if modern:
             # 1.5.9 的 --print 需要附着值；NDJSON 把完整提示词留在 stdin。
