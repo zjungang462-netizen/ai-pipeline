@@ -77,10 +77,16 @@ Claude Code 2.1.325 / 2.1.328 可作为文件工具代理接入你现有的 Deep
 | `state-check --state-dir 目录` | 只读检查现存状态与当前 schema 的兼容性 |
 | `state-backup --state-dir 目录 --output 新目录` | 停写后备份完整状态并逐文件校验 SHA-256 |
 | `state-restore --backup 备份目录 --output 新目录` | 校验并恢复原始字节，不覆盖现有目录或自动续跑 |
-| `dashboard --config 配置 --port 端口` | 启动本机工作台，配置参数可重复 |
+| `dashboard --config 配置 --port 端口 [--open]` | 启动本机工作台（可重复 `--config`，`--open` 自动打开浏览器） |
 | `tune --state-dir 目录 --config 配置` | 生成待审批的历史策略提案 |
 | `approve-tune --state-dir 目录 --output 新配置` | 批准并写入配置副本 |
 | `autotune 配置` | 在显式预授权范围内选择后续策略 |
+| `lessons-propose --state-dir 目录 [--output 文件]` | 扫描历史审查/测试失败，生成带哈希的高频经验提案 |
+| `lessons-approve --state-dir 目录 --proposal 文件` | 校验提案哈希并批准写入 `approved_lessons.json` |
+| `route-recommend --state-dir 目录 [--stage-kind 类型]` | 基于不可变 `metrics.json` 按阶段类型推荐模型与工具 |
+| `state-migrate --state-file 文件 [--apply]` | 契约化 schema 迁移（默认干跑，仅 `--apply` 备份后原子写入） |
+| `deploy 配置 --run-id ID --require-stage 阶段 -- 命令` | 受控部署执行器（默认干跑，`--apply` 校验审批哈希绑定） |
+| `worker-serve --worker-id ID --secret-env 变量` | 启动受控远程 Worker HMAC 服务端 |
 
 `doctor` 的退出码 0 表示无错误、1 表示发现问题。不存在但可创建的目录等情况只警告。`clean` 会报告候选路径、字节数及保留理由；先核对 dry-run，再决定是否 apply。详细参数、证据保护和保留期见 [DELIVERY.md](DELIVERY.md)。
 

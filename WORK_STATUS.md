@@ -1,5 +1,15 @@
 # 剩余工作推进记录
 
+## 0.5.8 受控自优化、动态多节点与工作台全面升级
+
+- 落地两项受控自优化模块并完成两轮代码审查加固：`orchestrator/lessons.py`（高频失败经验提取、环境密钥与通用凭据正则脱敏、哈希绑定审批、按阶段注入提示词并同步无人值守 `logical_hash`）与 `orchestrator/model_router.py`（跳过未执行下游阶段、严格有限浮点校验、独立计量 `unknown_calls`），接入 CLI（`lessons-propose` / `lessons-approve` / `route-recommend`）及工作台「看板与优化」3 标签页。
+- 落地本机可用模型与工具动态探测（`model_catalog.py`，使用 `build_subprocess_env()` 隔离宿主机无关密钥，`256 KiB` 响应上限，实机探测到本机 `agy 1.5.14` 全部 23 个真实模型及全部已装 CLI）与动态多节点项目编排（`project_manager.py`，支持 1..12 个节点增删、排序、独立工具/模型/审批/打回目标，非托管外部项目编辑默认 `-custom` 避免同名重复，`cli_codex` 默认 `isolate_config = true`）。
+- 工作台控制页全面升级：横向阶段进度条 + 快捷审批附注（修订指令注入下游提示词）、红绿高亮 Unified Diff、原生安全 Markdown 富文本排版（含缩进代码块、表格、安全链接）、角色配色与模型内联徽章、连续 CLI 心跳折叠、`dashboard --open` 自动拉起浏览器，以及 `cli_agy` `1.5.14` + 可选同系列 `allow_patch_probe` 协议探针与内置防幻觉审查模板（`prompts/evidence_review.md`、`prompts/verified_repair_plan.md`）。
+- 真机验证：
+  - `cli_agy 1.5.13`（`gemini-3.8-flash-high` + 本地代理 `127.0.0.1:7897`）完成 `invoice` 四阶段全链路闭环（`design/coding/testing/review` 全 `done`，`acceptance_exit: 0`，`protected_unchanged: true`，3 次调用、93,065 tokens、耗时 `64.438s`，证据：`D:/work/ai-pipeline-live-agy-20261121-r6/results.json`）；
+  - `cli_agy 1.5.14` 经本机工作台（`http://127.0.0.1:8766`）在真实业务仓库 `D:\work\jsy_work_new\jsy-app-test-plus` 完成 `code_review` → `repair_plan`（停在人工审批卡点，0 控制台报错、0 失败请求），并据此沉淀防幻觉证据核验与交叉反查提示词模板。
+- 全套回归：`scripts/precommit.py --base-ref 2b0d71d` 通过（18 项配置检查、0 凭据/漂移问题），离线冒烟与快速回归 **239 / 239** 全绿通过，源码指纹一致。
+
 ## 0.5.7 本地收口与新能力接入
 
 - 已完成 `cli_grok` 与 `cli_doubao` 容器适配器接入及代码审查修复，抽离 `docker_base.py`、`workspace_sync.py`、`verified_runtimes.py`（支持每通道多已验证版本与 `runtime_version` 绑定），豆包编码阶段补齐隔离临时工作区与宿主机基线核验原子回写，`doctor` 补齐只读 SHA-256 与预算告警检查。

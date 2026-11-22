@@ -1,3 +1,10 @@
+# 0.5.8：受控自优化、动态多节点编排与工作台全面升级
+
+- **受控失败经验沉淀与多模型自适应路由推荐**：新增 `lessons.py`（只读扫描历史 `review_verdict.json` / `test_record.json` 高频缺陷，脱敏并绑定内容哈希，经审批写入 `approved_lessons.json` 后注入后续 `report`/`code` 提示词并同步无人值守指纹）与 `model_router.py`（聚合终态 `metrics.json` 按 `(stage_kind, tool, model)` 输出可解释排序，跳过未执行阶段、单独记账 `unknown_calls`）；接入 `lessons-propose` / `lessons-approve` / `route-recommend` CLI 及工作台「看板与优化」3 标签页。
+- **动态多节点项目编排与本机实时模型目录**：新增 `model_catalog.py`（隔离环境只读探测本机已装 CLI 与 `agy models` / 兼容 API `/models` 真实可用模型）与 `project_manager.py`（支持 1..12 个自定义模型节点增删、排序、独立工具/模型、人工审批与打回目标，热加载生效无需重启）；「新建任务」弹窗支持直达「＋ 增删 / 编排节点」并展示阶段归属徽章。
+- **控制页体验与审批闭环升级**：新增审批附注（局部采纳修订指令自动注入下游提示词）、深色红/绿高亮 Unified Diff、原生安全 DOM Markdown 富文本排版（标题、列表、缩进代码块一键复制、表格与安全链接）、角色配色卡片、横向阶段进度条与连续 `cli_progress` 心跳折叠。
+- **反重力 CLI 适配与防幻觉模板**：`cli_agy` 适配 `1.5.14` 并新增可选同系列 `allow_patch_probe` 协议探针；CLI 编码提示词明确使用文件编辑工具不调用终端；沉淀仓库内置防幻觉审查模板 `prompts/evidence_review.md` 与交叉反查方案模板 `prompts/verified_repair_plan.md`；`dashboard` 新增 `--open` 自动打开浏览器。
+
 # 0.5.7：容器隔离底座、调用次数预算、核心模块解耦与扩展主入口
 
 - **容器适配器体系化与安全加固**：新增 `cli_grok` 与 `cli_doubao` 2.37.2 容器适配器，抽离 `docker_base.py`、`workspace_sync.py` 与多版本 `verified_runtimes.py` 三层公共底座；豆包编码阶段声明可编辑文件时使用隔离临时工作区副本并经宿主机基线核验后原子回写；`doctor` 补充容器二进制 SHA-256 与豆包低预算告警静态核验。
