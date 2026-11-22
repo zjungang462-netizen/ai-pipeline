@@ -276,8 +276,14 @@ class Handler(BaseHTTPRequestHandler):
                     if method == 'GET':
                         return self.respond({'threads': store.threads(key)})
                     if method == 'POST':
-                        return self.respond(service.discuss(key, body['question'], body.get('roles', ['developer', 'reviewer']),
-                                                            body.get('budget', 6000), self.idem()), 202)
+                        return self.respond(service.discuss(
+                            key, body['question'], body.get('roles', ['developer', 'reviewer']),
+                            body.get('budget', 6000), self.idem(),
+                            rounds=body.get('rounds', 1),
+                            role_models=body.get('role_models'),
+                            context_files=body.get('context_files'),
+                            consensus=body.get('consensus', False),
+                        ), 202)
                 if action == 'artifacts' and method == 'GET' and len(parts) == 7:
                     return self.respond(read_artifact(run, '/'.join(parts[4:])))
                 if action == 'diff' and method == 'GET' and len(parts) == 5:

@@ -2,7 +2,7 @@
 const $=id=>document.getElementById(id);
 const labels={pending:'等待执行',running:'正在运行',recovering:'恢复中',paused:'已暂停',waiting_approval:'等待审批',waiting_external:'等待外部条件',waiting_owner:'等待本人处理',done:'流程完成',failed:'执行失败',timeout:'已超时',cancelled:'已取消',awaiting_approval:'等待审批',stale:'需重新执行',interrupted:'已中断',queued:'排队中',completed:'讨论结束',applied:'已生效',rejected:'已拒绝'};
 const stageLabels={...labels,done:'已完成'};
-const stages={requirements:'需求分析',design:'方案设计',code_review:'代码审查',repair_plan:'修复方案',coding:'代码实现',testing:'测试验证',review:'独立审查',final_review:'终审复核',self_tests:'回归验证',environment:'环境检查',acceptance:'人工验收',developer:'开发者',reviewer:'审查者'};
+const stages={requirements:'需求分析',design:'方案设计',code_review:'代码审查',repair_plan:'修复方案',coding:'代码实现',testing:'测试验证',review:'独立审查',final_review:'终审复核',self_tests:'回归验证',environment:'环境检查',acceptance:'人工验收',architect:'架构师',developer:'开发者',skeptic:'红队质疑者',reviewer:'审查者',consensus:'圆桌共识总结'};
 const adapterLabels={openai_compat:'兼容 API',cli_codex:'Codex CLI',cli_qwen:'Qwen CLI',cli_claude:'Claude Code',cli_qoder:'Qoder CLI',cli_agy:'反重力 CLI',cli_dsh:'DSH CLI',cli_grok:'Grok 容器',cli_doubao:'豆包 容器',fake:'离线模拟'};
 const kinds={recovery_captured:'候选恢复点已保存',recovery_applied:'验证后恢复候选文件',recovery_rejected:'恢复点校验拒绝',cli_retry_exhausted:'CLI 重试次数已耗尽',attempt_start:'开始尝试',attempt_done:'产物已归档',attempt_fail:'本次尝试失败',stage_deferred:'阶段进入等待',deferred_resumed:'按校验后的回执恢复',deferred_recovered:'从封存记录恢复等待状态',deferred_rejected:'等待回执校验拒绝',model_call_started:'等待模型响应',precheck:'执行前检查',worktree_error:'隔离测试工作区创建失败',test_start:'开始执行测试',test_pass:'真实测试通过',test_fail:'真实测试失败',test_feedback:'测试反馈至编码',review_feedback:'审查反馈至编码',repair_cycle:'进入修复循环',review_pass:'审查 JSON 通过',review_exhausted:'审查未通过',policy_approved:'预授权审批已生效',approved:'人工审批已生效',recovery_hint:'准备有界重试',rejected:'约束校验未通过',interrupted:'发现未完成尝试',control_receipt:'执行指令收据',cancelled:'运行已取消',discussion_reserved:'已预留会诊预算',discussion_settled:'会诊用量已结算',inflight_reserved:'已结算中断调用预留'};
 const pendingRequests=new Map();
@@ -232,6 +232,9 @@ function renderMarkdown(raw){
 function roleTheme(role,source){
  if(source==='human')return {cls:'role-human',avatar:'你',tag:'人工留言'};
  if(source==='tool_result')return {cls:'role-tool',avatar:'测',tag:'执行记录'};
+ if(role==='consensus')return {cls:'role-consensus',avatar:'共',tag:'共识结论'};
+ if(role==='skeptic')return {cls:'role-skeptic',avatar:'质',tag:'红队质疑'};
+ if(role==='architect')return {cls:'role-architect',avatar:'架',tag:'架构师'};
  if(['review','code_review','final_review','reviewer'].includes(role))return {cls:'role-review',avatar:'审',tag:'审查角色'};
  if(['design','repair_plan','requirements'].includes(role))return {cls:'role-plan',avatar:'案',tag:'方案角色'};
  if(['coding','developer'].includes(role))return {cls:'role-code',avatar:'码',tag:'实现角色'};
@@ -352,6 +355,8 @@ function renderEvent(e){
   head.append(el('span','message-role',stages[data.role]||data.role),el('span','source-label '+theme.cls,sourceText));
   const modelRef=(data.refs||[]).find(r=>r.returned_model);
   const cliRef=(data.refs||[]).find(r=>r.adapter_channel?.startsWith('cli_'));
+  const roundRef=(data.refs||[]).find(r=>r.round);
+  if(roundRef)head.append(el('span','meta-chip',`第 ${roundRef.round}/${roundRef.total_rounds} 轮`));
   if(cliRef){
    head.append(el('span','meta-chip',`${adapterLabels[cliRef.adapter_channel]||cliRef.adapter_channel}${cliRef.tool_version?' '+cliRef.tool_version:''}`));
    if(cliRef.cli_model||cliRef.requested_model)head.append(el('span','meta-chip model-chip-tag',cliRef.cli_model||cliRef.requested_model));
@@ -388,7 +393,27 @@ function renderEvent(e){
   content.append(bodyWrap);
 
   const footer=el('div','message-footer');
-  if(data.thread_id)footer.append(el('span','meta-chip','会诊建议 · 未改变任务结论'));
+  if(data.thread_id)footer.append(el('span','meta-chip',data.role==='consensus'?'圆桌共识 · 可一键采纳执行':'会诊建议 · 未改变任务结论'));
+  if(data.thread_id&&rawBody.trim()){
+   const pendingStage=Object.keys(current?.pending_approvals||{})[0];
+   if(pendingStage&&current?.capabilities?.approve){
+    const s=current.stages?.[pendingStage];
+    const adoptAppr=el('button','evidence-ref adopt-btn','采纳为审批附注 ↗');adoptAppr.type='button';
+    adoptAppr.onclick=()=>{
+     confirmAction('批准当前产物（已带入讨论结论）',`批准 ${stages[pendingStage]||pendingStage} 的第 ${s?.current_attempt} 次尝试，并把下方修订指令注入下游阶段。`,note=>sendCommand('approve',{stage:pendingStage,target:{attempt:s.current_attempt,inputs_hash:s.inputs_hash,outputs_hash:s.outputs_hash},...(note?{note}:{})}),{withNote:true});
+     if($('confirm-note'))$('confirm-note').value=rawBody.slice(0,3800);
+    };
+    footer.append(adoptAppr);
+   }
+   const adoptTask=el('button','evidence-ref','基于结论新建任务 ↗');adoptTask.type='button';
+   adoptTask.onclick=()=>{
+    newTask(false);
+    if(current?.project_id&&$('project-select'))$('project-select').value=current.project_id;
+    if($('task-input'))$('task-input').value=`基于多模型圆桌共识执行：\n${rawBody.slice(0,6000)}`;
+    renderTaskScope();
+   };
+   footer.append(adoptTask);
+  }
   for(const ref of data.refs||[]){
    if(ref.artifact_id){const b=el('button','evidence-ref','查看执行证据 ↗');b.type='button';b.onclick=()=>openArtifact(ref.artifact_id);footer.append(b);}
   }
@@ -432,7 +457,7 @@ $('pause').onclick=()=>sendCommand('pause');$('resume').onclick=()=>{const entry
 $('confirm-form').onsubmit=event=>{event.preventDefault();const note=$('confirm-note')&&!$('confirm-note-wrap')?.classList.contains('hidden')?$('confirm-note').value.trim():'';$('confirm-dialog').close();if(confirmation)confirmation(note);};document.querySelectorAll('.close-dialog').forEach(button=>button.onclick=()=>button.closest('dialog').close());
 $('task-form').onsubmit=async event=>{event.preventDefault();const button=event.submitter||$('task-submit');const derive=!!parent;const project=projects.find(p=>p.id===(derive?current?.project_id:$('project-select').value));if(!taskProjectsFresh){toast('项目配置尚未刷新完成，请稍后再试。');renderTaskScope();return;}if(!project||project.unavailable||!project.execution_scope||typeof project.config_hash!=='string'){toast(project?.unavailable?'配置不可用：'+project.unavailable+'。请修复或重新登记配置后刷新工作台。':'无法确认配置执行范围，请刷新后重试。');renderTaskScope();return;}button.disabled=true;try{const data=await api('/runs',{method:'POST',body:{project_id:project.id,task:$('task-input').value,parent_id:derive?parent.id:null,expected_config_hash:project.config_hash,...(typeof executionOptions==='function'?{execution_options:executionOptions()}:{} )}});$('task-dialog').close();await refresh();await select(data.id);}catch(e){toast(e.message);if(e.status===409)await loadTaskProjects(derive);else renderTaskScope();}};
 $('message-form').onsubmit=async event=>{event.preventDefault();if(!current||!$('message').value.trim())return;const body=$('message').value;try{await api(`/runs/${encodeURIComponent(current.id)}/messages`,{method:'POST',body:{body}});$('message').value='';}catch(e){toast(e.message);}};
-$('discuss').onclick=()=>$('discussion-dialog').showModal();$('discussion-form').onsubmit=async event=>{event.preventDefault();const roles=[];if($('role-developer').checked)roles.push('developer');if($('role-reviewer').checked)roles.push('reviewer');const button=event.submitter;button.disabled=true;try{await api(`/runs/${encodeURIComponent(current.id)}/discussions`,{method:'POST',body:{question:$('question').value,roles,budget:Number($('discussion-budget').value)}});$('discussion-dialog').close();toast('会诊已排队，使用固定证据和明确分析预算。');}catch(e){toast(e.message);}finally{button.disabled=false;}};
+$('discuss').onclick=()=>$('discussion-dialog').showModal();$('discussion-form').onsubmit=async event=>{event.preventDefault();const roles=[],role_models={};for(const r of ['architect','developer','skeptic','reviewer']){if($('role-'+r)?.checked){roles.push(r);const mv=($('model-'+r)?.value||'').trim();if(mv)role_models[r]=mv;}}if(!roles.length){toast('请至少勾选 1 个讨论角色');return;}const files=($('discussion-files')?.value||'').split(/[,，\n]/).map(s=>s.trim()).filter(Boolean).slice(0,4);const rounds=Number($('discussion-rounds')?.value||2);const consensus=!!$('discussion-consensus')?.checked;const button=event.submitter;button.disabled=true;try{await api(`/runs/${encodeURIComponent(current.id)}/discussions`,{method:'POST',body:{question:$('question').value,roles,budget:Number($('discussion-budget').value),rounds,role_models,context_files:files,consensus}});$('discussion-dialog').close();toast(`已发起 ${rounds} 轮多模型圆桌对话（${roles.length} 个席位）。`);}catch(e){toast(e.message);}finally{button.disabled=false;}};
 document.querySelectorAll('[data-tab]').forEach(button=>button.onclick=()=>{rememberFeedView();tab=button.dataset.tab;document.querySelectorAll('[data-tab]').forEach(b=>{b.classList.toggle('active',b===button);b.ariaSelected=String(b===button);});const view=rememberedFeedViews.get(current?.id+':'+tab);renderFeed(!!view?.follow);if(!view?.follow)$('feed').scrollTop=view?.top||0;updateFeedNavigation();});
 $('older-events').onclick=loadEarlierEvents;
 if($('artifact-copy'))$('artifact-copy').onclick=()=>copyText($('artifact-body').textContent,'产物全文已复制');

@@ -198,3 +198,71 @@ class StreamingDiscussionTests(unittest.TestCase):
             e['payload']['delta'] for e in payload['events'] if e['kind'] == 'discussion_token'
         )
         self.assertEqual(tokens_joined, '建议修复边界校验')
+
+    def test_roundtable_multi_round_debate_at_file_and_consensus(self):
+        from orchestrator.collaboration.discussion import capture, execute
+        sse_lines = [
+            'data: {"id":"rt-1","model":"m-debate","choices":[{"delta":{"content":"### 已达成一致\\n- 保留依赖版本\\n### 建议执行步骤\\n- 修正端口"},"finish_reason":"stop"}]}',
+            'data: {"id":"rt-1","model":"m-debate","choices":[],"usage":{"prompt_tokens":10,"completion_tokens":15,"total_tokens":25}}',
+            'data: [DONE]',
+        ]
+        mock_api, api_thread = _start_mock_sse_server(sse_lines)
+        self.addCleanup(lambda: (mock_api.shutdown(), mock_api.server_close(), api_thread.join(3)))
+        os.environ['TEST_RT_API_KEY'] = 'dummy-rt-key-12345678'
+        self.addCleanup(lambda: os.environ.pop('TEST_RT_API_KEY', None))
+
+        scratch = tempfile.TemporaryDirectory()
+        self.addCleanup(scratch.cleanup)
+        root = Path(scratch.name)
+        ws = root / 'ws'
+        ws.mkdir()
+        (ws / 'app.py').write_text('PORT = 3008\n', encoding='utf8')
+        cfg = root / 'project.toml'
+        cfg.write_text(
+            f'task_workdir = "{ws.as_posix()}"\n'
+            f'state_dir = "{(root / "state").as_posix()}"\n'
+            '[run_budget]\nmax_tokens = 20000\nmax_duration_s = 120\n'
+            '[adapters.api]\ntype = "openai_compat"\n'
+            f'base_url = "http://127.0.0.1:{mock_api.server_port}/v1"\n'
+            'api_key_env = "TEST_RT_API_KEY"\nmodel = "m-default"\n'
+            '[[stages]]\nname = "design"\nkind = "report"\nadapter = "api"\nprompt = "设计"\n',
+            encoding='utf8',
+        )
+        server = create_server(root / 'db.sqlite3', [cfg], 0, recover=False)
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        self.addCleanup(lambda: (server.application.closed.set(), server.shutdown(),
+                                 server.server_close(), thread.join(3)))
+        service = server.application.service
+        project_id = service.store.projects()[0]['id']
+        run_key = service.store.register_run(project_id, 'run-rt', cfg, root / 'state')
+        run = service.store.run(run_key)
+
+        # @app.py 自动纳入固定快照；越界路径 ../secret.txt 被安全忽略
+        snap = capture(run, extra_files=['../secret.txt'], question='请结合 @app.py 讨论端口配置')
+        self.assertEqual([s['path'] for s in snap['sources']], ['app.py'])
+        self.assertIn('PORT = 3008', snap['sources'][0]['body'])
+
+        snap['roundtable'] = {
+            'rounds': 2,
+            'role_models': {'developer': 'm-dev', 'skeptic': 'm-red'},
+            'consensus': True,
+        }
+        topic = service.store.create_thread(
+            run_key, '请结合 @app.py 讨论端口配置', ['developer', 'skeptic'], 8000, snap, 'idem-rt-12345678'
+        )
+        execute(service.store, topic['id'], stream_tokens=True)
+
+        done_topic = service.store.thread(topic['id'])
+        self.assertEqual(done_topic['status'], 'completed')
+        self.assertEqual(done_topic['result']['rounds'], 2)
+        self.assertIn('已达成一致', done_topic['result'].get('consensus', ''))
+        # 2 轮 × 2 角色 + 1 共识 = 5 个分析阶段全部 done
+        self.assertEqual(len(done_topic['result']['results']), 5)
+        self.assertTrue(all(v == 'done' for v in done_topic['result']['results'].values()))
+        # 校验事件流里落地了 consensus 消息
+        evs = service.store.events(run_key, 0, 100)
+        msg_roles = [e['payload']['role'] for e in evs if e['kind'] == 'message']
+        self.assertIn('developer', msg_roles)
+        self.assertIn('skeptic', msg_roles)
+        self.assertIn('consensus', msg_roles)

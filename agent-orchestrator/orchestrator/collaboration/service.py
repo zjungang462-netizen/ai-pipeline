@@ -295,6 +295,8 @@ class Service:
             cfg = load_config(run['config'])
             from ..safety import build_subprocess_env
             allow = [a.options['api_key_env'] for a in cfg.adapters.values() if a.type == 'openai_compat']
+        if os.environ.get('PIPELINE_STREAM_DISCUSSION') == '1':
+            allow.append('PIPELINE_STREAM_DISCUSSION')
             with (directory(run) / 'manager.log').open('ab') as log:
                 self.active[key] = subprocess.Popen(
                     [sys.executable, '-X', 'utf8', '-m', 'orchestrator.collaboration.runner', str(self.store.path), key],
@@ -386,21 +388,48 @@ class Service:
                     self._command_waiters.discard(key)
         threading.Thread(target=wait,daemon=True).start()
 
-    def discuss(self, key, question, roles, budget, idem):
+    def discuss(self, key, question, roles, budget, idem, *, rounds=1, role_models=None, context_files=None, consensus=False):
         run = self.store.run(key)
         if not isinstance(question, str) or not 1 <= len(question) <= 4000:
             raise ValueError('问题必须为 1 到 4000 字符')
-        if not isinstance(roles, list) or not 1 <= len(roles) <= 2 or len(set(roles)) != len(roles) or not set(roles) <= {'developer', 'reviewer'}:
-            raise ValueError('会诊最多选择开发者和审查者两个角色')
-        if type(budget) is not int or not 1000 <= budget <= 6000:
-            raise ValueError('会诊额度必须在 1000 到 6000 tokens 之间')
+        allowed_roles = {'architect', 'developer', 'skeptic', 'reviewer'}
+        if not isinstance(roles, list) or not 1 <= len(roles) <= 4 or len(set(roles)) != len(roles) or not set(roles) <= allowed_roles:
+            raise ValueError('会诊需选择 1 到 4 个不重复角色（architect / developer / skeptic / reviewer）')
+        if type(budget) is not int or not 1000 <= budget <= 24000:
+            raise ValueError('会诊额度必须在 1000 到 24000 tokens 之间')
+        if type(rounds) is not int or not 1 <= rounds <= 3:
+            raise ValueError('会诊轮次必须在 1 到 3 轮之间')
+        if type(consensus) is not bool:
+            raise ValueError('consensus 必须为布尔值')
+        clean_models = {}
+        if role_models is not None:
+            if not isinstance(role_models, dict):
+                raise ValueError('role_models 必须为对象')
+            import re
+            for r, m in role_models.items():
+                if r not in allowed_roles and r != 'consensus':
+                    raise ValueError(f'未知会诊角色：{r}')
+                if not isinstance(m, str) or not m.strip():
+                    continue
+                mv = m.strip()
+                if len(mv) > 160 or not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9._:/-]{0,159}(?:\[(?:1M|200K)\])?', mv):
+                    raise ValueError(f'角色 {r} 的模型标识格式非法')
+                clean_models[r] = mv
+        clean_files = []
+        if context_files is not None:
+            if not isinstance(context_files, list) or len(context_files) > 4:
+                raise ValueError('context_files 最多指定 4 个相对文件路径')
+            clean_files = [str(f).strip() for f in context_files if isinstance(f, str) and f.strip()]
         status = self.snapshot(key)['lifecycle']
         if status in ('pending', 'running', 'recovering'):
             raise Conflict('请先在检查点暂停运行，再对固定快照发起会诊')
         if any(t['status'] in ('queued', 'running') and t['idempotency'] != idem for t in self.store.threads(key)):
             raise Conflict('该任务已有会诊，不能并行叠加模型调用')
         from .discussion import capture
-        topic = self.store.create_thread(key, question, roles, budget, capture(run), idem)
+        snap = capture(run, extra_files=clean_files, question=question)
+        if rounds > 1 or clean_models or consensus:
+            snap['roundtable'] = {'rounds': rounds, 'role_models': clean_models, 'consensus': consensus}
+        topic = self.store.create_thread(key, question, roles, budget, snap, idem)
         if topic['status'] == 'queued':
             self.launch_discussion(topic['id'])
         return topic
@@ -413,6 +442,8 @@ class Service:
         cfg = load_config(run['config'])
         from ..safety import build_subprocess_env
         allow = [a.options['api_key_env'] for a in cfg.adapters.values() if a.type == 'openai_compat']
+        if os.environ.get('PIPELINE_STREAM_DISCUSSION') == '1':
+            allow.append('PIPELINE_STREAM_DISCUSSION')
         base = Path(run['state_dir']) / 'discussions' / topic
         base.mkdir(parents=True, exist_ok=True)
         from ..state import _pid_alive
