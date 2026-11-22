@@ -156,23 +156,12 @@ def _collect_human_interjections(
     max_items: int = 5,
     max_chars: int = 1200,
 ) -> str:
-    """读取圆桌会诊启动后，人工主持人在该任务房间新发的留言（仅 source == 'human'）。"""
+    """读取圆桌会诊启动后，人工主持人在该任务房间新发的留言（直接查 messages 索引，不受事件数上限影响）。"""
     try:
-        events = store.events(run_id, 0, 500)
+        rows = store.human_messages_since(run_id, since_ts, limit=50)
     except Exception:
         return ''
-    notes: list[str] = []
-    for ev in events:
-        if ev.get('kind') != 'message':
-            continue
-        if float(ev.get('created', 0)) <= since_ts:
-            continue
-        payload = ev.get('payload') or {}
-        if payload.get('source') != 'human':
-            continue
-        body = str(payload.get('body') or '').strip()
-        if body:
-            notes.append(body)
+    notes = [str(r.get('body') or '').strip() for r in rows if str(r.get('body') or '').strip()]
     if not notes:
         return ''
     recent = notes[-max_items:]

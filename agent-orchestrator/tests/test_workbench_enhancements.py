@@ -345,6 +345,14 @@ prompt = "设计：{{task}}"
         self.assertEqual(td_def['stages'][1]['test_preset'], 'pytest')
         self.assertEqual(td_def['stages'][1]['feedback_to'], 'coding')
 
+        # 严格校验布尔参数，拒绝字符串 "false" 被误判为 True
+        status, _, _ = req(
+            'POST', f"/api/projects/{with_test['id']}/remove",
+            {'delete_config_file': 'false'},
+            {**auth_headers, 'Idempotency-Key': 'idem-rm-badb-12345'},
+        )
+        self.assertEqual(status, 400)
+
         # 安全移除项目登记（删除托管 toml，绝不碰用户工作目录）
         managed_toml = Path(with_test['config'])
         self.assertTrue(managed_toml.is_file())
@@ -370,6 +378,12 @@ prompt = "设计：{{task}}"
         self.assertEqual(exp['filename'], 'r1-report.md')
         self.assertIn('# 任务交付报告 · r1', exp['markdown'])
         self.assertIn('阶段执行汇总', exp['markdown'])
+
+        status, _, _ = req(
+            'POST', f'/api/runs/{run_key}/archive', {'archived': 'false'},
+            {**auth_headers, 'Idempotency-Key': 'idem-arch-badb-1234'},
+        )
+        self.assertEqual(status, 400)
 
         status, arch, _ = req(
             'POST', f'/api/runs/{run_key}/archive', {'archived': True},

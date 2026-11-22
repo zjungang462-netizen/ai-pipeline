@@ -52,12 +52,22 @@ class TestArena(unittest.TestCase):
         )
         cfg = load_config(cfg_path)
 
-        # 拒绝非白名单测试预设
+        # 拒绝非白名单测试预设、非 CLI 编码后端、以及 `-` 开头的模型参数注入
         with self.assertRaises(ValueError):
             run_arena(cfg, '修复 add', [
                 {'label': 'A', 'adapter_type': 'cli_agy', 'model': 'm-a'},
                 {'label': 'B', 'adapter_type': 'cli_agy', 'model': 'm-b'},
             ], test_preset='rm_rf')
+        with self.assertRaises(ValueError):
+            run_arena(cfg, '修复 add', [
+                {'label': 'A', 'adapter_type': 'openai_compat', 'model': 'deepseek-chat'},
+                {'label': 'B', 'adapter_type': 'cli_agy', 'model': 'm-b'},
+            ])
+        with self.assertRaises(ValueError):
+            run_arena(cfg, '修复 add', [
+                {'label': 'A', 'adapter_type': 'cli_agy', 'model': '--bad-flag'},
+                {'label': 'B', 'adapter_type': 'cli_agy', 'model': 'm-b'},
+            ])
 
         class _FakeCandidate:
             def __init__(self, label: str, model: str):

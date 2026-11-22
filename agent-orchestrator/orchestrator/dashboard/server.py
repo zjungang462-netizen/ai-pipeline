@@ -225,8 +225,11 @@ class Handler(BaseHTTPRequestHandler):
                     return self.respond(project_manager.project_stage_definition(service, project_id))
                 if action == 'remove' and method == 'POST':
                     self.idem()
+                    raw_del = body.get('delete_config_file', False)
+                    if type(raw_del) is not bool:
+                        raise ValueError('delete_config_file 必须是布尔值')
                     return self.respond(project_manager.remove_managed_project(
-                        service, project_id, delete_config_file=bool(body.get('delete_config_file', False))
+                        service, project_id, delete_config_file=raw_del
                     ))
                 if action == 'arena' and method == 'POST':
                     self.idem()
@@ -295,10 +298,12 @@ class Handler(BaseHTTPRequestHandler):
                     return self.respond(insights.export_run_report(service, key))
                 if action == 'archive' and method == 'POST':
                     self.idem()
-                    want_archived = bool(body.get('archived', True))
-                    if want_archived and service.snapshot(key)['lifecycle'] in ('pending', 'running', 'recovering'):
+                    raw_arch = body.get('archived', True)
+                    if type(raw_arch) is not bool:
+                        raise ValueError('archived 必须是布尔值')
+                    if raw_arch and service.snapshot(key)['lifecycle'] in ('pending', 'running', 'recovering'):
                         raise Conflict('运行中的任务请先暂停或停止后再归档')
-                    return self.respond(store.set_run_archived(key, want_archived))
+                    return self.respond(store.set_run_archived(key, raw_arch))
                 if action == 'events' and method == 'GET':
                     service.sync_run_events(run)
                     if 'before' in query:

@@ -20,11 +20,12 @@ from .safety import build_subprocess_env
 from .state import atomic_write_json
 
 _ALLOWED_ARENA_ADAPTERS = frozenset((
-    'cli_agy', 'openai_compat', 'cli_codex', 'cli_claude', 'cli_qwen', 'cli_qoder',
+    'cli_agy', 'cli_codex', 'cli_claude', 'cli_qwen', 'cli_qoder',
 ))
 _ARENA_ID_RE = re.compile(r'^[A-Za-z0-9_-]{6,64}$')
 _LABEL_RE = re.compile(r'^[A-Za-z0-9_-]{1,16}$')
 _SHA_RE = re.compile(r'^[0-9a-f]{7,40}$')
+_MODEL_ID_RE = re.compile(r'^[A-Za-z0-9][A-Za-z0-9._:/-]{0,159}(?:\[(?:1M|200K)\])?$')
 
 
 def _git(args: list[str], cwd: Path, git_exe: str | None = 'git', *, check: bool = True) -> subprocess.CompletedProcess:
@@ -90,12 +91,13 @@ def _run_single_candidate(
     ref_name = f'refs/arena/{arena_id}/{label}'
     t0 = time.monotonic()
 
-    if wt_dir.exists():
-        shutil.rmtree(wt_dir, ignore_errors=True)
-
-    with git_lock:
-        _git(['worktree', 'add', '--detach', str(wt_dir), base_sha], cfg.task_workdir, cfg.git_exe)
+    wt_created = False
     try:
+        if wt_dir.exists():
+            shutil.rmtree(wt_dir, ignore_errors=True)
+        with git_lock:
+            _git(['worktree', 'add', '--detach', str(wt_dir), base_sha], cfg.task_workdir, cfg.git_exe)
+            wt_created = True
         if adapter_factory is not None:
             adapter = adapter_factory(label, adapter_type, model)
         else:
@@ -195,8 +197,9 @@ def _run_single_candidate(
             'error': str(exc)[:500],
         }
     finally:
-        with git_lock:
-            _git(['worktree', 'remove', '--force', str(wt_dir)], cfg.task_workdir, cfg.git_exe, check=False)
+        if wt_created:
+            with git_lock:
+                _git(['worktree', 'remove', '--force', str(wt_dir)], cfg.task_workdir, cfg.git_exe, check=False)
         if wt_dir.exists():
             shutil.rmtree(wt_dir, ignore_errors=True)
 
@@ -231,8 +234,8 @@ def run_arena(
         if adapter_factory is None and atype not in _ALLOWED_ARENA_ADAPTERS:
             raise ValueError(f'候选 {label} 的适配器类型不受支持：{atype}')
         model = str(raw.get('model') or '').strip()
-        if len(model) > 160:
-            raise ValueError(f'候选 {label} 的模型名过长')
+        if model and (len(model) > 160 or not _MODEL_ID_RE.fullmatch(model)):
+            raise ValueError(f'候选 {label} 的模型标识格式非法')
         clean_cands.append({'label': label, 'adapter_type': atype, 'model': model})
 
     try:

@@ -127,7 +127,7 @@ def export_run_report(service, key) -> dict:
         commit = (sdata.get('commit_sha') or '')[:12]
         if sdata.get('commit_sha'):
             last_commit_stage = sname
-        err = str(sdata.get('last_error') or '').replace('\n', ' ')[:120]
+        err = str(sdata.get('last_error') or '').replace('\n', ' ').replace('|', '\\|')[:120]
         lines.append(
             f'| `{sname}` | `{sdata.get("status")}` | {sdata.get("current_attempt") or 0} | '
             f'{("`" + commit + "`") if commit else "—"} | {err or "—"} |'
@@ -170,11 +170,11 @@ def export_run_report(service, key) -> dict:
             if diff_body:
                 lines.append(f'## 累计代码差异（基线 → `{last_commit_stage}`）')
                 lines.append('')
-                lines.append('```diff')
+                lines.append('````diff')
                 lines.append(diff_body[:12000])
                 if len(diff_body) > 12000:
                     lines.append('# …（差异过长已截断）')
-                lines.append('```')
+                lines.append('````')
                 lines.append('')
         except Exception:
             pass

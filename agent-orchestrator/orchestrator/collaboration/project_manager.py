@@ -162,7 +162,12 @@ def project_stage_definition(service, project_id: str) -> dict[str, Any]:
 
 def remove_managed_project(service, project_id: str, *, delete_config_file: bool = False) -> dict[str, Any]:
     """从工作台安全注销项目；可选仅删除 managed_projects/ 下托管的 .toml，绝不碰用户工作目录或历史运行。"""
+    from .storage import Conflict
+
     entry = service.store.project(project_id)
+    for run_key, proc in list(getattr(service, 'active', {}).items()):
+        if proc is not None and proc.poll() is None and run_key.startswith(project_id + ':'):
+            raise Conflict('该项目尚有运行中的任务，请先停止后再移除登记')
     service.store.remove_project(project_id)
     service._configs.pop(entry['config'], None)
     config_deleted = False

@@ -150,6 +150,15 @@ class Store:
             row = db.execute('SELECT 1 FROM archived_runs WHERE run_id=?', (key,)).fetchone()
         return row is not None
 
+    def human_messages_since(self, run_id: str, since_ts: float, limit: int = 20) -> list[dict]:
+        with self.connect() as db:
+            rows = db.execute(
+                "SELECT body, created FROM messages WHERE run_id=? AND source='human' AND created>? "
+                "ORDER BY created ASC LIMIT ?",
+                (run_id, float(since_ts), max(1, min(100, int(limit)))),
+            ).fetchall()
+        return [dict(r) for r in rows]
+
     def pin_import_config(self, key, config):
         with self.connect() as db:
             db.execute('UPDATE runs SET config=? WHERE id=? AND managed=0', (str(Path(config).resolve()), key))

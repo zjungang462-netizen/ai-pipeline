@@ -477,7 +477,8 @@ if($('apply-route-recommend'))$('apply-route-recommend').onclick=async()=>{
    const matchKind=kinds.find(k=>recs[k]?.recommended&&recs[k].recommended.tool===model.type);
    const rec=matchKind?recs[matchKind].recommended:null;
    if(!rec||!rec.model)continue;
-   const inp=$('model-settings')?.querySelector(`input[data-adapter="${CSS.escape(model.name)}"][data-option="model"]`);
+   const inputs=Array.from($('model-settings')?.querySelectorAll('input[data-option="model"]')||[]);
+   const inp=inputs.find(el=>el.dataset.adapter===model.name);
    if(inp){
     inp.value=rec.model;
     inp.dispatchEvent(new Event('input'));
