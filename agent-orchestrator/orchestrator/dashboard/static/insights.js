@@ -405,7 +405,8 @@ if($('edit-project-nodes'))$('edit-project-nodes').onclick=async()=>{
  $('edit-project-nodes').disabled=true;
  try{
   const def=await api(`/projects/${encodeURIComponent(pid)}/stages`);
-  if($('pm-name'))$('pm-name').value=def.name||'custom-flow';
+  const baseName=def.name||'custom-flow';
+  if($('pm-name'))$('pm-name').value=def.managed?baseName:(baseName.endsWith('-custom')?baseName:`${baseName}-custom`).slice(0,48);
   if($('pm-workdir'))$('pm-workdir').value=def.workdir||'';
   if($('pm-proxy'))$('pm-proxy').value=def.proxy_url||'';
   if($('pm-max-duration'))$('pm-max-duration').value=String(def.max_duration_s||900);

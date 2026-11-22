@@ -47,6 +47,14 @@ def _toml_str(value: str) -> str:
     return json.dumps(str(value), ensure_ascii=False)
 
 
+def _strict_int(value: Any, default: int, *, minimum: int, maximum: int, label: str) -> int:
+    if value is None:
+        return default
+    if type(value) is not int or not minimum <= value <= maximum:
+        raise ValueError(f'{label} 须为 {minimum}..{maximum} 之间的整数')
+    return value
+
+
 def _find_project_config(service, project_id: str):
     entry = next((p for p in service.store.projects() if p['id'] == project_id), None)
     if entry is None:
@@ -118,9 +126,15 @@ def project_stage_definition(service, project_id: str) -> dict[str, Any]:
             'feedback_to': str(st.feedback_to or ''),
             'prompt': str(st.prompt or ''),
         })
+    managed_dir = Path(service.store.path).resolve().parent / 'managed_projects'
+    try:
+        is_managed = Path(entry['config']).resolve().is_relative_to(managed_dir)
+    except OSError:
+        is_managed = False
     return {
         'id': entry['id'],
         'name': entry['name'],
+        'managed': is_managed,
         'workdir': str(cfg.task_workdir),
         'proxy_url': proxy_url,
         'max_duration_s': int(cfg.run_budget.max_duration_s or 900),
@@ -165,12 +179,8 @@ def register_managed_project(service, payload: dict[str, Any]) -> dict[str, Any]
             raise ValueError('proxy_url 必须是不含凭据的 HTTP(S) 代理地址')
 
     allow_patch_probe = bool(payload.get('allow_patch_probe', True))
-    max_duration_s = int(payload.get('max_duration_s', 900))
-    max_model_calls = int(payload.get('max_model_calls', 15))
-    if not 60 <= max_duration_s <= 7200:
-        raise ValueError('max_duration_s 须在 60..7200 秒之间')
-    if not 1 <= max_model_calls <= 100:
-        raise ValueError('max_model_calls 须在 1..100 之间')
+    max_duration_s = _strict_int(payload.get('max_duration_s', 900), 900, minimum=60, maximum=7200, label='max_duration_s')
+    max_model_calls = _strict_int(payload.get('max_model_calls', 15), 15, minimum=1, maximum=100, label='max_model_calls')
 
     raw_stage_adapters = payload.get('stage_adapters')
     if raw_stage_adapters is not None and not isinstance(raw_stage_adapters, dict):
@@ -215,9 +225,11 @@ def register_managed_project(service, payload: dict[str, Any]) -> dict[str, Any]
                     raise ValueError(f'仅 review 节点可配置 feedback_to（节点 {sname}）')
                 if feedback_to not in seen_names:
                     raise ValueError(f'节点 {sname} 的 feedback_to ({feedback_to}) 必须指向之前的节点')
-            max_rounds = int(item.get('max_rounds', 2 if feedback_to else 1))
-            if not 1 <= max_rounds <= 5:
-                raise ValueError(f'节点 {sname} 的 max_rounds 须在 1..5 之间')
+            max_rounds = _strict_int(
+                item.get('max_rounds', 2 if feedback_to else 1),
+                2 if feedback_to else 1,
+                minimum=1, maximum=5, label=f'节点 {sname} 的 max_rounds',
+            )
             prompt = str(item.get('prompt') or '').strip() or _DEFAULT_PROMPTS_BY_KIND[kind]
             seen_names.append(sname)
             dynamic_stages.append({
@@ -262,6 +274,8 @@ def register_managed_project(service, payload: dict[str, Any]) -> dict[str, Any]
             else:
                 if st['model']:
                     lines.append(f'model = {_toml_str(st["model"])}')
+                if atype == 'cli_codex':
+                    lines.append('isolate_config = true')
                 if atype in ('cli_grok', 'cli_doubao') and proxy_url:
                     lines.append(f'proxy_url = {_toml_str(proxy_url)}')
             lines.append('')

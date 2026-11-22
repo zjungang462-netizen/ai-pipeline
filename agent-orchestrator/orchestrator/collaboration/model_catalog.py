@@ -13,6 +13,9 @@ import urllib.error
 import urllib.request
 
 from ..adapters.cli_base import resolve_exe
+from ..safety import build_subprocess_env
+
+_MAX_CATALOG_HTTP_BYTES = 256 * 1024
 
 _CACHE_LOCK = threading.Lock()
 _CACHE_TTL_S = 300.0
@@ -82,7 +85,7 @@ def _parse_agy_models(stdout: str) -> list[dict[str, str]]:
 
 
 def _probe_agy_models(exe: str, proxy_url: str = '') -> list[dict[str, str]]:
-    env = dict(os.environ)
+    env = build_subprocess_env()
     if proxy_url:
         env.update(HTTP_PROXY=proxy_url, HTTPS_PROXY=proxy_url, ALL_PROXY=proxy_url,
                    NO_PROXY='localhost,127.0.0.1,::1')
@@ -109,7 +112,10 @@ def _probe_openai_compat_models(base_url: str, api_key_env: str) -> tuple[bool, 
     req = urllib.request.Request(url, headers={'Authorization': f'Bearer {key}', 'Accept': 'application/json'})
     try:
         with urllib.request.urlopen(req, timeout=6) as resp:
-            payload = json.loads(resp.read().decode('utf-8', errors='replace'))
+            raw = resp.read(_MAX_CATALOG_HTTP_BYTES + 1)
+            if len(raw) > _MAX_CATALOG_HTTP_BYTES:
+                return True, []
+            payload = json.loads(raw.decode('utf-8', errors='replace'))
         rows = payload.get('data') if isinstance(payload, dict) else None
         if isinstance(rows, list):
             items = []

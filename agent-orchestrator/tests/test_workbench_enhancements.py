@@ -270,9 +270,42 @@ prompt = "设计：{{task}}"
         # 读取已登记项目的当前节点定义（供「新建任务 → 增删/编排节点」回填）
         status, stage_def, _ = req('GET', f"/api/projects/{dyn['id']}/stages", headers={'Cookie': cookie})
         self.assertEqual(status, 200)
+        self.assertTrue(stage_def['managed'])
         self.assertEqual([s['name'] for s in stage_def['stages']],
                          ['lead', 'design', 'coding', 'cross_review', 'final_review'])
         self.assertEqual(stage_def['stages'][2]['adapter_type'], 'cli_codex')
+        # 外部 --config 项目应标记 managed=False，避免同名重复登记
+        status, ext_def, _ = req('GET', f'/api/projects/{seed_id}/stages', headers={'Cookie': cookie})
+        self.assertEqual(status, 200)
+        self.assertFalse(ext_def['managed'])
+        # 校验生成的 cli_codex 默认带 isolate_config = true
+        self.assertIn('isolate_config = true', Path(dyn['config']).read_text(encoding='utf-8'))
+
+        # 拒绝 bool / None 整数字段（必须返回 400 而非 500 或静默转 1）
+        status, _, _ = req('POST', '/api/projects/register', {
+            'name': 'bad-bool',
+            'workdir': str(target_repo),
+            'max_model_calls': True,
+        }, {**auth_headers, 'Idempotency-Key': 'idem-bool-12345678'})
+        self.assertEqual(status, 400)
+
+        status, _, _ = req('POST', f'/api/projects/{seed_id}/lessons/approve', {
+            'proposal': lessons_data['proposal'],
+            'max_items': True,
+        }, {**auth_headers, 'Idempotency-Key': 'idem-maxb-12345678'})
+        self.assertEqual(status, 400)
+
+        # _probe_agy_models 不透传宿主机无关凭据（如 DEEPSEEK_API_KEY）
+        from orchestrator.collaboration.model_catalog import _probe_agy_models
+        captured_env = {}
+        def _fake_run(cmd, **kw):
+            captured_env.update(kw.get('env') or {})
+            return subprocess.CompletedProcess(cmd, 0, 'gemini-4-neon-high\tGemini 4 Neon\n', '')
+        with mock.patch.dict('os.environ', {'DEEPSEEK_API_KEY': 'DUMMY_HOST_ONLY_KEY_9999'}), \
+                mock.patch('orchestrator.collaboration.model_catalog.subprocess.run', side_effect=_fake_run):
+            models = _probe_agy_models('agy-bin')
+            self.assertEqual([m['id'] for m in models], ['gemini-4-neon-high'])
+            self.assertNotIn('DEEPSEEK_API_KEY', captured_env)
 
         # 拒绝重复节点名
         status, _, _ = req('POST', '/api/projects/register', {

@@ -213,7 +213,7 @@ class Handler(BaseHTTPRequestHandler):
                 from ..collaboration import project_manager
                 return self.respond(project_manager.register_managed_project(service, body), 201)
             if len(parts) == 4 and parts[:2] == ['api', 'projects']:
-                project_id, action = parts[2:4]
+                project_id, action = parts[2], parts[3]
                 from ..collaboration import project_manager
                 if action == 'route-recommend' and method == 'GET':
                     min_runs = int(query.get('min_runs', ['2'])[0])
@@ -226,8 +226,10 @@ class Handler(BaseHTTPRequestHandler):
             if len(parts) == 5 and parts[:2] == ['api', 'projects'] and parts[3:] == ['lessons', 'approve'] and method == 'POST':
                 self.idem()
                 from ..collaboration import project_manager
-                max_items = int(body.get('max_items', 12))
-                return self.respond(project_manager.approve_project_lessons(service, parts[2], body.get('proposal'), max_items=max_items))
+                raw_max = body.get('max_items', 12)
+                if type(raw_max) is not int:
+                    raise ValueError('max_items 必须是整数')
+                return self.respond(project_manager.approve_project_lessons(service, parts[2], body.get('proposal'), max_items=raw_max))
             if path == '/api/runs':
                 if method == 'GET':
                     for name in ('limit', 'before', 'cursor', 'q', 'project_id', 'status', 'sort'):
