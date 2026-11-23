@@ -406,6 +406,76 @@ prompt = "设计：{{task}}"
         self.assertEqual(status, 200)
         self.assertFalse(unarch['archived'])
 
+        # 7. 项目登记安全校验：拒绝 CLI flag 注入模型名、拒绝非 bool 开关、失败不留孤儿 state 目录
+        managed_root = (root / 'wb.sqlite3').resolve().parent / 'managed_projects'
+        status, _, _ = req('POST', '/api/projects/register', {
+            'name': 'bad-model-flag',
+            'workdir': str(target_repo),
+            'stages': [{'name': 's1', 'kind': 'code', 'adapter_type': 'cli_agy', 'model': '--danger'}],
+        }, {**auth_headers, 'Idempotency-Key': 'idem-badm-12345678'})
+        self.assertEqual(status, 400)
+        self.assertFalse((managed_root / 'state-bad-model-flag').exists())
+
+        status, _, _ = req('POST', '/api/projects/register', {
+            'name': 'bad-probe-bool',
+            'workdir': str(target_repo),
+            'preset': 'review_only',
+            'allow_patch_probe': 'false',
+        }, {**auth_headers, 'Idempotency-Key': 'idem-badp-12345678'})
+        self.assertEqual(status, 400)
+        self.assertFalse((managed_root / 'state-bad-probe-bool').exists())
+
+        # preset 分支选择 cli_codex 也应写入 isolate_config = true
+        status, preset_codex, _ = req('POST', '/api/projects/register', {
+            'name': 'preset-codex',
+            'workdir': str(target_repo),
+            'preset': 'standard_dev',
+            'stage_adapters': {'coding': {'type': 'cli_codex', 'model': 'gpt-5.4'}},
+        }, {**auth_headers, 'Idempotency-Key': 'idem-pcod-12345678'})
+        self.assertEqual(status, 201)
+        self.assertIn('isolate_config = true', Path(preset_codex['config']).read_text(encoding='utf-8'))
+
+        # 多余路径段必须 404，不误匹配 /api/runs/<key>/snapshot
+        status, _, _ = req('GET', f'/api/runs/{run_key}/snapshot/extra', headers={'Cookie': cookie})
+        self.assertEqual(status, 404)
+
+    def test_export_report_includes_verified_cumulative_code_diff_and_dynamic_fence(self):
+        from orchestrator.adapters.factory import build_all
+        from orchestrator.collaboration.insights import export_run_report
+        from orchestrator.collaboration.service import Service
+
+        td = tempfile.TemporaryDirectory()
+        self.addCleanup(td.cleanup)
+        root = Path(td.name)
+        ws = root / 'ws'
+        ws.mkdir()
+        (ws / 'doc.md').write_text('old\n', encoding='utf-8')
+        cfg_path = root / 'code_project.toml'
+        cfg_path.write_text(
+            f'task_workdir = "{ws.as_posix()}"\n'
+            f'state_dir = "{(root / "state").as_posix()}"\n'
+            '[run_budget]\nmax_tokens = 20000\nmax_duration_s = 120\n'
+            '[adapters.fake]\ntype = "fake"\n'
+            '[[stages]]\nname = "coding"\nkind = "code"\nadapter = "fake"\n'
+            'prompt = "这是一个很长的内联提示词：' + ('甲' * 120) + '"\n',
+            encoding='utf-8',
+        )
+        cfg = load_config(cfg_path)
+        eng = Engine(cfg, build_all(cfg.adapters, {}), 'run-diff-exp', '测试导出代码差异 ````fence')
+        eng.run()
+
+        svc = Service(root / 'wb.sqlite3', [cfg_path], recover=False)
+        pid = svc.store.projects()[0]['id']
+        run_key = svc.store.register_run(pid, 'run-diff-exp', cfg_path, root / 'state')
+        report = export_run_report(svc, run_key)
+        self.assertIn('## 累计代码差异（基线 → `coding`）', report['markdown'])
+        self.assertIn('coding_output.py', report['markdown'])
+
+        # 同时验证长内联提示词项目可安全 derive 派生后续工作区（不会因 Path.is_file 抛出 OSError）
+        from orchestrator.collaboration.config_copy import derive
+        derived_cfg = derive(svc.store.run(run_key), 'derived-long-prompt')
+        self.assertTrue(derived_cfg.is_file())
+
 
 if __name__ == '__main__':
     unittest.main()

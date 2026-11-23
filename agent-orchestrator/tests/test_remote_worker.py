@@ -125,3 +125,25 @@ class RemoteWorkerTests(unittest.TestCase):
         with self.assertRaises(urllib.error.HTTPError) as ctx:
             urllib.request.urlopen(req, timeout=5)
         self.assertEqual(ctx.exception.code, 403)
+
+        # 客户端也必须拒绝过期/重放的回执时间戳
+        from unittest import mock
+
+        class _StaleResp:
+            headers = {
+                'X-Worker-Timestamp': '1000000000',
+                'X-Worker-Signature-256': compute_signature(b'{"job_id":"job-stale"}', secret, timestamp='1000000000'),
+            }
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *args):
+                return False
+
+            def read(self, n=-1):
+                return b'{"job_id":"job-stale"}'
+
+        with mock.patch('orchestrator.remote_worker.urllib.request.urlopen', return_value=_StaleResp()):
+            with self.assertRaisesRegex(RemoteWorkerError, '时间戳'):
+                client.dispatch(RemoteJobSpec('job-stale', 'run-1', 'review', 'report', 'hi'))

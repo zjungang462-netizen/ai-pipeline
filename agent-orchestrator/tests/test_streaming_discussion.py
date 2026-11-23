@@ -364,3 +364,87 @@ class StreamingDiscussionTests(unittest.TestCase):
         self.assertIn('人工主持人最新插话引导', captured_prompts[1])
         self.assertIn('不要改数据库表结构', captured_prompts[1])
         self.assertIn('人工主持人最新插话引导', captured_prompts[2])
+
+    def test_discussion_security_dotfile_exe_inheritance_budget_refund_and_cli_agy_capability(self):
+        import time as _time
+        from orchestrator.collaboration.discussion import (
+            _build_seat_adapter,
+            _safe_read_workspace_files,
+            capture,
+            execute,
+        )
+        from orchestrator.config import load_config
+        from orchestrator.state import RunState, atomic_write_json
+
+        scratch = tempfile.TemporaryDirectory()
+        self.addCleanup(scratch.cleanup)
+        root = Path(scratch.name)
+        ws = root / 'ws'
+        (ws / '.github' / 'workflows').mkdir(parents=True)
+        (ws / '.github' / 'workflows' / 'ci.yml').write_text('name: CI\n', encoding='utf-8')
+        (ws / '.env').write_text('SECRET_TOKEN=super-secret-value\n', encoding='utf-8')
+        (ws / '.env.production').write_text('API_KEY=prod-secret\n', encoding='utf-8')
+        (ws / 'private.key').write_text('PRIVATE KEY DATA\n', encoding='utf-8')
+        (ws / 'ok.py').write_text('OK = True\n', encoding='utf-8')
+
+        # 合法点文件 .github/workflows/ci.yml 可读取，敏感凭据文件与越界路径均被拦截
+        files = _safe_read_workspace_files(
+            ws, ['.env', '.env.production', 'private.key', '../outside.txt', './.github/workflows/ci.yml', 'ok.py']
+        )
+        paths = [f['path'] for f in files]
+        self.assertEqual(paths, ['.github/workflows/ci.yml', 'ok.py'])
+
+        # cli_agy-only 项目：1) snapshot.capabilities.discussion 为 True；2) 席位继承 exe；3) 失败时退还父运行预留预算
+        state_dir = root / 'state'
+        cfg_path = root / 'agy_only.toml'
+        cfg_path.write_text(
+            f'task_workdir = "{ws.as_posix()}"\n'
+            f'state_dir = "{state_dir.as_posix()}"\n'
+            '[run_budget]\nmax_tokens = 20000\nmax_duration_s = 120\n'
+            '[adapters.agy]\ntype = "cli_agy"\nexe = "C:/custom/agy.cmd"\nmodel = "gemini-4-neon-high"\n'
+            'proxy_url = "http://127.0.0.1:7897"\n'
+            '[[stages]]\nname = "code_review"\nkind = "report"\nadapter = "agy"\nprompt = "审查"\n',
+            encoding='utf-8',
+        )
+        cfg = load_config(cfg_path)
+        agys = [a for a in cfg.adapters.values() if a.type == 'cli_agy']
+        seat = _build_seat_adapter('reviewer', 'cli_agy', '', cfg, [], agys)
+        self.assertEqual(seat.options.get('exe'), 'C:/custom/agy.cmd')
+
+        server = create_server(root / 'db.sqlite3', [cfg_path], 0, recover=False)
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        self.addCleanup(lambda: (server.application.closed.set(), server.shutdown(),
+                                 server.server_close(), thread.join(3)))
+        service = server.application.service
+        project_id = service.store.projects()[0]['id']
+        run_state = RunState(state_dir, 'run-agy-cap')
+        run_state.stage('code_review')
+        run_state.usage_total = {'tokens': 1000, 'reported_tokens': 1000, 'reserved_tokens': 0, 'duration_s': 1.0}
+        run_state.save()
+        atomic_write_json(
+            run_state.run_dir / 'job.json',
+            {'status': 'paused', 'started_at': _time.time(), 'max_duration_s': 120, 'config_hash': cfg.source_hash},
+        )
+        run_key = service.store.register_run(project_id, 'run-agy-cap', cfg_path, state_dir, managed=True)
+        snap_view = service.snapshot(run_key)
+        self.assertTrue(snap_view['capabilities']['discussion'])
+
+        # 构造席位强制选择不存在的 openai_compat 触发异常，验证 reserve_parent 后预算自动结算退还
+        run = service.store.run(run_key)
+        snap = capture(run, question='测试预算回退')
+        snap['roundtable'] = {'rounds': 1, 'role_models': {}, 'role_adapters': {'developer': 'openai_compat'}, 'consensus': False}
+        topic = service.store.create_thread(run_key, '测试预算回退', ['developer'], 4000, snap, 'idem-refund-12345')
+        with self.assertRaises(ValueError):
+            execute(service.store, topic['id'], stream_tokens=False)
+        reloaded = RunState(state_dir, 'run-agy-cap')
+        reloaded.load()
+        self.assertEqual(reloaded.usage_total['tokens'], 1000)
+        self.assertEqual(reloaded.usage_total.get('reserved_tokens', 0), 0)
+
+        # human_messages_since 超过 limit 时返回最新记录而非最早记录
+        base_ts = _time.time() - 10
+        for idx in range(6):
+            service.store.message(run_key, f'插话-{idx}', f'idem-interj-{idx:04d}')
+        newest = service.store.human_messages_since(run_key, base_ts, limit=3)
+        self.assertEqual([r['body'] for r in newest], ['插话-3', '插话-4', '插话-5'])

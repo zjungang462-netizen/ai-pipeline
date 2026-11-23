@@ -137,7 +137,13 @@ class RemoteWorkerClient:
         except (urllib.error.URLError, TimeoutError, OSError) as error:
             raise RemoteWorkerError(f'远程 Worker 通信失败: {error}') from None
 
-        if not verify_signature(resp_body, secret, sig, timestamp=resp_ts):
+        try:
+            resp_ts_val = int(resp_ts.strip())
+        except ValueError:
+            raise RemoteWorkerError('远程 Worker 回执缺少有效时间戳') from None
+        if abs(time.time() - resp_ts_val) > MAX_CLOCK_SKEW_S:
+            raise RemoteWorkerError('远程 Worker 回执时间戳超出允许偏差')
+        if not verify_signature(resp_body, secret, sig, timestamp=resp_ts.strip()):
             raise RemoteWorkerError('远程 Worker 回执签名校验失败')
         try:
             data = json.loads(resp_body.decode('utf-8'))
@@ -256,7 +262,7 @@ class RemoteWorkerServer:
                         self._send_json(409, {'error': 'duplicate_job_id'})
                         return
                     if len(parent._seen_jobs) >= _MAX_SEEN_JOBS:
-                        oldest = min(parent._seen_jobs, key=parent._seen_jobs.get)
+                        oldest = next(iter(parent._seen_jobs))
                         parent._seen_jobs.pop(oldest, None)
                     parent._seen_jobs[spec.job_id] = time.time()
                 try:

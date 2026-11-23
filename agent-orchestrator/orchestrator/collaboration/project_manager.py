@@ -15,6 +15,7 @@ from .model_settings import describe_models
 
 _PROJECT_NAME_RE = re.compile(r'^[A-Za-z0-9][A-Za-z0-9._-]{0,47}$')
 _STAGE_NAME_RE = re.compile(r'^[A-Za-z0-9][A-Za-z0-9_-]{0,31}$')
+_MODEL_ID_RE = re.compile(r'^[A-Za-z0-9][A-Za-z0-9._:/-]{0,159}(?:\[(?:1M|200K)\])?$')
 _PROMPTS_ROOT = Path(__file__).resolve().parents[2] / 'prompts'
 _ALLOWED_STAGE_KINDS = frozenset(('report', 'code', 'review', 'test'))
 TEST_PRESETS: dict[str, tuple[str, ...]] = {
@@ -59,6 +60,46 @@ def _strict_int(value: Any, default: int, *, minimum: int, maximum: int, label: 
     if type(value) is not int or not minimum <= value <= maximum:
         raise ValueError(f'{label} 须为 {minimum}..{maximum} 之间的整数')
     return value
+
+
+def _strict_bool(value: Any, default: bool, *, label: str) -> bool:
+    if value is None:
+        return default
+    if type(value) is not bool:
+        raise ValueError(f'{label} 必须是布尔值')
+    return value
+
+
+def _validate_model_id(value: str, label: str) -> str:
+    cleaned = str(value or '').strip()
+    if cleaned and (len(cleaned) > 160 or not _MODEL_ID_RE.fullmatch(cleaned)):
+        raise ValueError(f'{label} 格式非法（禁止以 - 开头或含空白/控制字符）')
+    return cleaned
+
+
+def has_active_project_work(service, project_id: str) -> bool:
+    """检查该项目是否存在本进程托管或跨重启存活的活跃任务/会诊进程。"""
+    from ..state import _pid_alive
+    from .projection import directory, read_json
+
+    prefix = project_id + ':'
+    for run_key, proc in list(getattr(service, 'active', {}).items()):
+        if proc is not None and proc.poll() is None and run_key.startswith(prefix):
+            return True
+    for topic_id, proc in list(getattr(service, 'active_topics', {}).items()):
+        if proc is None or proc.poll() is not None:
+            continue
+        try:
+            thread = service.store.thread(topic_id)
+            if str(thread.get('run_id') or '').startswith(prefix):
+                return True
+        except Exception:
+            continue
+    for run in service.store.project_runs(project_id):
+        lock = read_json(directory(run) / '.supervisor.lock')
+        if lock and _pid_alive(lock.get('pid')):
+            return True
+    return False
 
 
 def _find_project_config(service, project_id: str):
@@ -164,28 +205,28 @@ def remove_managed_project(service, project_id: str, *, delete_config_file: bool
     """从工作台安全注销项目；可选仅删除 managed_projects/ 下托管的 .toml，绝不碰用户工作目录或历史运行。"""
     from .storage import Conflict
 
-    entry = service.store.project(project_id)
-    for run_key, proc in list(getattr(service, 'active', {}).items()):
-        if proc is not None and proc.poll() is None and run_key.startswith(project_id + ':'):
-            raise Conflict('该项目尚有运行中的任务，请先停止后再移除登记')
-    service.store.remove_project(project_id)
-    service._configs.pop(entry['config'], None)
-    config_deleted = False
-    if delete_config_file:
-        managed_dir = Path(service.store.path).resolve().parent / 'managed_projects'
-        cfg_path = Path(entry['config']).resolve()
-        try:
-            if cfg_path.is_relative_to(managed_dir) and cfg_path.is_file() and not cfg_path.is_symlink():
-                cfg_path.unlink()
-                config_deleted = True
-        except OSError:
-            config_deleted = False
-    return {
-        'removed': True,
-        'project_id': project_id,
-        'name': entry['name'],
-        'config_deleted': config_deleted,
-    }
+    with service.operations:
+        entry = service.store.project(project_id)
+        if has_active_project_work(service, project_id):
+            raise Conflict('该项目尚有运行中的任务或会诊，请先停止后再移除登记')
+        service.store.remove_project(project_id)
+        service._configs.pop(entry['config'], None)
+        config_deleted = False
+        if delete_config_file:
+            managed_dir = Path(service.store.path).resolve().parent / 'managed_projects'
+            cfg_path = Path(entry['config']).resolve()
+            try:
+                if cfg_path.is_relative_to(managed_dir) and cfg_path.is_file() and not cfg_path.is_symlink():
+                    cfg_path.unlink()
+                    config_deleted = True
+            except OSError:
+                config_deleted = False
+        return {
+            'removed': True,
+            'project_id': project_id,
+            'name': entry['name'],
+            'config_deleted': config_deleted,
+        }
 
 
 def register_managed_project(service, payload: dict[str, Any]) -> dict[str, Any]:
@@ -206,8 +247,8 @@ def register_managed_project(service, payload: dict[str, Any]) -> dict[str, Any]
     if preset not in ('review_only', 'review_plan_fix', 'standard_dev'):
         raise ValueError('preset 必须为 review_only / review_plan_fix / standard_dev 之一')
 
-    agy_model = str(payload.get('agy_model') or 'gemini-3.8-flash-high').strip()
-    api_model = str(payload.get('api_model') or 'deepseek-chat').strip()
+    agy_model = _validate_model_id(payload.get('agy_model') or 'gemini-3.8-flash-high', 'agy_model')
+    api_model = _validate_model_id(payload.get('api_model') or 'deepseek-chat', 'api_model')
     api_base_url = str(payload.get('api_base_url') or 'https://api.deepseek.com/v1').strip()
     api_key_env = str(payload.get('api_key_env') or 'DEEPSEEK_API_KEY').strip()
     if not re.fullmatch(r'[A-Za-z_][A-Za-z0-9_]{0,63}', api_key_env):
@@ -222,7 +263,7 @@ def register_managed_project(service, payload: dict[str, Any]) -> dict[str, Any]
         if parsed_proxy.scheme not in ('http', 'https') or not parsed_proxy.hostname or parsed_proxy.username or parsed_proxy.password:
             raise ValueError('proxy_url 必须是不含凭据的 HTTP(S) 代理地址')
 
-    allow_patch_probe = bool(payload.get('allow_patch_probe', True))
+    allow_patch_probe = _strict_bool(payload.get('allow_patch_probe'), True, label='allow_patch_probe')
     max_duration_s = _strict_int(payload.get('max_duration_s', 900), 900, minimum=60, maximum=7200, label='max_duration_s')
     max_model_calls = _strict_int(payload.get('max_model_calls', 15), 15, minimum=1, maximum=100, label='max_model_calls')
 
@@ -232,9 +273,7 @@ def register_managed_project(service, payload: dict[str, Any]) -> dict[str, Any]
     stage_adapters = raw_stage_adapters or {}
 
     managed_dir = Path(service.store.path).resolve().parent / 'managed_projects'
-    managed_dir.mkdir(parents=True, exist_ok=True)
     state_dir = managed_dir / f'state-{name}'
-    state_dir.mkdir(parents=True, exist_ok=True)
     config_path = managed_dir / f'{name}.toml'
 
     evidence_review = (_PROMPTS_ROOT / 'evidence_review.md').as_posix()
@@ -287,8 +326,9 @@ def register_managed_project(service, payload: dict[str, Any]) -> dict[str, Any]
             if atype not in _ALLOWED_STAGE_ADAPTER_TYPES:
                 raise ValueError(f'节点 {sname} 的适配器类型不受支持：{atype}')
             default_model = api_model if atype == 'openai_compat' else (agy_model if atype == 'cli_agy' else '')
-            model = str(item.get('model') if item.get('model') is not None else default_model).strip()
-            approval = bool(item.get('approval', False))
+            raw_model = item.get('model') if item.get('model') is not None else default_model
+            model = _validate_model_id(raw_model, f'节点 {sname} 的模型标识')
+            approval = _strict_bool(item.get('approval'), False, label=f'节点 {sname} 的 approval')
             prompt = str(item.get('prompt') or '').strip() or _DEFAULT_PROMPTS_BY_KIND[kind]
             seen_names.append(sname)
             dynamic_stages.append({
@@ -386,7 +426,8 @@ def register_managed_project(service, payload: dict[str, Any]) -> dict[str, Any]
             if atype not in _ALLOWED_STAGE_ADAPTER_TYPES:
                 raise ValueError(f'阶段 {stage_name} 的适配器类型不受支持：{atype}')
             default_model = api_model if atype == 'openai_compat' else (agy_model if atype == 'cli_agy' else '')
-            model = str(override.get('model') if override.get('model') is not None else default_model).strip()
+            raw_model = override.get('model') if override.get('model') is not None else default_model
+            model = _validate_model_id(raw_model, f'阶段 {stage_name} 的模型标识')
             adapter_name = f'{stage_name}_agent'
             stage_adapter_names[stage_name] = adapter_name
             lines.append(f'[adapters.{adapter_name}]')
@@ -405,6 +446,8 @@ def register_managed_project(service, payload: dict[str, Any]) -> dict[str, Any]
             else:
                 if model:
                     lines.append(f'model = {_toml_str(model)}')
+                if atype == 'cli_codex':
+                    lines.append('isolate_config = true')
                 if atype in ('cli_grok', 'cli_doubao') and proxy_url:
                     lines.append(f'proxy_url = {_toml_str(proxy_url)}')
             lines.append('')
@@ -486,6 +529,8 @@ def register_managed_project(service, payload: dict[str, Any]) -> dict[str, Any]
                 'max_attempts = 1',
             ]
 
+    managed_dir.mkdir(parents=True, exist_ok=True)
+    state_dir.mkdir(parents=True, exist_ok=True)
     tmp_path = config_path.with_suffix('.toml.tmp')
     tmp_path.write_text('\n'.join(lines) + '\n', encoding='utf-8')
     try:

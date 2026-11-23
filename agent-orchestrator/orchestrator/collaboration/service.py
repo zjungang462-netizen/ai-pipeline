@@ -175,7 +175,9 @@ class Service:
                             'repair_batch_size': cfg.autonomy.repair_batch_size,
                             'auto_apply': cfg.autotune.auto_apply}
         data['capabilities']['derive'] = any(s.get('commit_sha') for s in state.get('stages', {}).values())
-        data['capabilities']['discussion'] = bool(state.get('stages')) and any(a.type == 'openai_compat' for a in cfg.adapters.values())
+        data['capabilities']['discussion'] = bool(state.get('stages')) and any(
+            a.type in ('openai_compat', 'cli_agy') for a in cfg.adapters.values()
+        )
         data['config_integrity'] = ('not_recorded' if not job.get('config_hash') else
                                     'valid' if cfg.source_hash == job['config_hash'] else 'changed')
         from ..reporting import budget_alerts
@@ -258,9 +260,9 @@ class Service:
                 if job.get('execution_options') != overrides:
                     raise Conflict('同一创建标识不能更换模型或 token 选项')
             else:
-                if any(r['id'] != parent and r['project_id'] == project_id and self.snapshot(r['id'])['lifecycle'] in
+                if any(r['id'] != parent and self._summary_cache.read(r)[1] in
                        ('pending', 'running', 'recovering', 'paused', 'waiting_approval',
-                        'waiting_external', 'waiting_owner') for r in self.store.runs()):
+                        'waiting_external', 'waiting_owner') for r in self.store.project_runs(project_id)):
                     raise Conflict('此项目已有未结束任务；请先处理或取消')
                 if parent:
                     from .config_copy import derive
@@ -295,8 +297,8 @@ class Service:
             cfg = load_config(run['config'])
             from ..safety import build_subprocess_env
             allow = [a.options['api_key_env'] for a in cfg.adapters.values() if a.type == 'openai_compat']
-        if os.environ.get('PIPELINE_STREAM_DISCUSSION') == '1':
-            allow.append('PIPELINE_STREAM_DISCUSSION')
+            if os.environ.get('PIPELINE_STREAM_DISCUSSION') == '1':
+                allow.append('PIPELINE_STREAM_DISCUSSION')
             with (directory(run) / 'manager.log').open('ab') as log:
                 self.active[key] = subprocess.Popen(
                     [sys.executable, '-X', 'utf8', '-m', 'orchestrator.collaboration.runner', str(self.store.path), key],
@@ -433,47 +435,50 @@ class Service:
             if not isinstance(context_files, list) or len(context_files) > 4:
                 raise ValueError('context_files 最多指定 4 个相对文件路径')
             clean_files = [str(f).strip() for f in context_files if isinstance(f, str) and f.strip()]
-        status = self.snapshot(key)['lifecycle']
-        if status in ('pending', 'running', 'recovering'):
-            raise Conflict('请先在检查点暂停运行，再对固定快照发起会诊')
-        if any(t['status'] in ('queued', 'running') and t['idempotency'] != idem for t in self.store.threads(key)):
-            raise Conflict('该任务已有会诊，不能并行叠加模型调用')
-        from .discussion import capture
-        snap = capture(run, extra_files=clean_files, question=question)
-        if rounds > 1 or clean_models or clean_adapters or consensus:
-            snap['roundtable'] = {
-                'rounds': rounds,
-                'role_models': clean_models,
-                'role_adapters': clean_adapters,
-                'consensus': consensus,
-            }
-        topic = self.store.create_thread(key, question, roles, budget, snap, idem)
-        if topic['status'] == 'queued':
-            self.launch_discussion(topic['id'])
-        return topic
+        with self.operations:
+            status = self.snapshot(key)['lifecycle']
+            if status in ('pending', 'running', 'recovering'):
+                raise Conflict('请先在检查点暂停运行，再对固定快照发起会诊')
+            if any(t['status'] in ('queued', 'running') and t['idempotency'] != idem for t in self.store.threads(key)):
+                raise Conflict('该任务已有会诊，不能并行叠加模型调用')
+            from .discussion import capture
+            snap = capture(run, extra_files=clean_files, question=question)
+            if rounds > 1 or clean_models or clean_adapters or consensus:
+                snap['roundtable'] = {
+                    'rounds': rounds,
+                    'role_models': clean_models,
+                    'role_adapters': clean_adapters,
+                    'consensus': consensus,
+                }
+            topic = self.store.create_thread(key, question, roles, budget, snap, idem)
+            if topic['status'] == 'queued':
+                self.launch_discussion(topic['id'])
+            return topic
 
     def launch_discussion(self, topic):
-        if topic in self.active_topics and self.active_topics[topic].poll() is None:
-            return
-        thread = self.store.thread(topic)
-        run = self.store.run(thread['run_id'])
-        cfg = load_config(run['config'])
-        from ..safety import build_subprocess_env
-        allow = [a.options['api_key_env'] for a in cfg.adapters.values() if a.type == 'openai_compat']
-        if os.environ.get('PIPELINE_STREAM_DISCUSSION') == '1':
-            allow.append('PIPELINE_STREAM_DISCUSSION')
-        base = Path(run['state_dir']) / 'discussions' / topic
-        base.mkdir(parents=True, exist_ok=True)
-        from ..state import _pid_alive
-        lock = read_json(base / '.discussion.lock')
-        if lock and _pid_alive(lock.get('pid')):
-            return
-        with (base / 'worker.log').open('ab') as log:
-            self.active_topics[topic] = subprocess.Popen([sys.executable, '-X', 'utf8', '-m', 'orchestrator.collaboration.discussion_runner',
-                              str(self.store.path), topic], cwd=Path(__file__).resolve().parents[2],
-                             env=build_subprocess_env(allow), stdout=log, stderr=subprocess.STDOUT,
-                             start_new_session=os.name != 'nt',
-                             creationflags=subprocess.CREATE_NEW_PROCESS_GROUP if os.name == 'nt' else 0)
+        with self.operations:
+            if topic in self.active_topics and self.active_topics[topic].poll() is None:
+                return
+            thread = self.store.thread(topic)
+            run = self.store.run(thread['run_id'])
+            cfg = load_config(run['config'])
+            from ..safety import build_subprocess_env
+            allow = [a.options['api_key_env'] for a in cfg.adapters.values() if a.type == 'openai_compat']
+            if os.environ.get('PIPELINE_STREAM_DISCUSSION') == '1':
+                allow.append('PIPELINE_STREAM_DISCUSSION')
+            base = Path(run['state_dir']) / 'discussions' / topic
+            base.mkdir(parents=True, exist_ok=True)
+            from ..state import _pid_alive
+            lock = read_json(base / '.discussion.lock')
+            if lock and _pid_alive(lock.get('pid')):
+                return
+            with (base / 'worker.log').open('ab') as log:
+                self.active_topics[topic] = subprocess.Popen(
+                    [sys.executable, '-X', 'utf8', '-m', 'orchestrator.collaboration.discussion_runner',
+                     str(self.store.path), topic], cwd=Path(__file__).resolve().parents[2],
+                    env=build_subprocess_env(allow), stdout=log, stderr=subprocess.STDOUT,
+                    start_new_session=os.name != 'nt',
+                    creationflags=subprocess.CREATE_NEW_PROCESS_GROUP if os.name == 'nt' else 0)
 
     def _discuss(self, topic):
         from .discussion import execute

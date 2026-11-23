@@ -18,6 +18,8 @@ class Element{
    if(url==='/templates')return {saved:true};
    if(url.startsWith('/compare'))return {same_config:false,left:{lifecycle:'failed'},right:{lifecycle:'done'},delta:{tokens:10,reported_tokens:null,reserved_tokens:0,duration_s:2}};
    if(url.startsWith('/failures')){page++;return {failures:[{id:'r1',run_id:'run1',categories:['timeout']}],errors:[],has_more:page===1,next_after:page===1?'cursor-1':null};}
+   if(url.includes('/route-recommend'))return {recommendations:{code:{recommended:{tool:'cli_agy',model:'gemini-4-neon-high'}}}};
+   if(url.startsWith('/models/catalog'))return {adapters:{}};
    throw Error('unexpected '+url);},toast:message=>messages.push(message),select(){},renderTaskScope(){}});
  vm.runInContext(`const $=id=>document.getElementById(id);function el(tag,cls,text){const n=document.createElement(tag);if(text!==undefined)n.textContent=text;return n;}function show(){};const num=n=>String(n);const labels={done:'完成',failed:'失败'};let parent=null,taskProjectsFresh=true;const projects=[{id:'p',config_hash:'hash',models:[{name:'api',type:'openai_compat',model:'fixture-model',supports_effort:true,supports_thinking:true}]}],runs=[{id:'a',run_id:'a'},{id:'b',run_id:'b'}];`,context);
  vm.runInContext(fs.readFileSync(path.join(dir,'insights.js'),'utf8'),context);
@@ -106,5 +108,17 @@ class Element{
  assert.equal(multiRound.length,2);
  assert.equal(multiRound[0].payload.text,'一轮');
  assert.equal(multiRound[1].payload.text,'二轮');
+ // Route recommendation auto-apply must resolve stage kinds from execution_scope.stages when model.stages holds string names.
+ vm.runInContext("projects.push({id:'route-p',config_hash:'rh',execution_scope:{stages:[{name:'coding',kind:'code',adapter_type:'cli_agy'}]},models:[{name:'coding_agent',type:'cli_agy',model:'gemini-3.8-flash-high',stages:['coding'],supports_effort:false,supports_thinking:false}]});",context);
+ nodes.get('project-select').value='route-p';
+ vm.runInContext('renderModelSettings()',context);
+ await nodes.get('apply-route-recommend').onclick();
+ const routedModelInput=nodes.get('model-settings').querySelectorAll().find(n=>n.dataset.adapter==='coding_agent'&&n.dataset.option==='model');
+ assert.equal(routedModelInput.value,'gemini-4-neon-high','apply-route-recommend must populate recommended model for string-typed model.stages');
+ assert.ok(messages.at(-1).includes('gemini-4-neon-high'),'toast must show applied model recommendation');
+ // Dynamic stage editor cleans up stale feedback_to when nodes are reordered.
+ vm.runInContext("pmDraftStages=[{name:'coding',kind:'code',adapter_type:'cli_agy',model:'m1'},{name:'review',kind:'review',adapter_type:'openai_compat',model:'m2',feedback_to:'coding'}];renderProjectStageEditor();",context);
+ vm.runInContext("pmDraftStages.reverse();renderProjectStageEditor();",context);
+ assert.equal(vm.runInContext("pmDraftStages[0].feedback_to",context),'','review moved to index 0 must clear stale feedback_to');
  console.log('INSIGHTS_UI_OK');
 })().catch(error=>{console.error(error);process.exitCode=1;});

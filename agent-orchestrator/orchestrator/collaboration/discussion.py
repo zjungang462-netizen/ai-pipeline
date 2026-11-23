@@ -28,6 +28,17 @@ _ROLE_GUIDANCE = {
     'reviewer': '你是独立审查者：核查证据充分性、安全护栏、测试覆盖与结论是否经得起验证。',
 }
 _MENTION_FILE_RE = re.compile(r'@([A-Za-z0-9_./\\-]+\.[A-Za-z0-9]{1,12})')
+_SENSITIVE_FILE_NAMES = frozenset((
+    '.env', '.npmrc', '.pypirc', '.netrc', 'id_rsa', 'id_ed25519', 'id_ecdsa', 'id_dsa',
+))
+_SENSITIVE_FILE_SUFFIXES = ('.pem', '.key', '.p12', '.pfx', '.jks')
+
+
+def _is_sensitive_workspace_file(rel: str) -> bool:
+    name = Path(rel).name.lower()
+    if name in _SENSITIVE_FILE_NAMES or name.startswith('.env.'):
+        return True
+    return name.endswith(_SENSITIVE_FILE_SUFFIXES)
 
 
 def _safe_read_workspace_files(workdir: Path, rel_paths: list[str], *, max_files: int = 4, max_chars: int = 3000) -> list[dict]:
@@ -35,8 +46,10 @@ def _safe_read_workspace_files(workdir: Path, rel_paths: list[str], *, max_files
     out: list[dict] = []
     seen: set[str] = set()
     for raw in rel_paths:
-        rel = str(raw or '').strip().replace('\\', '/').lstrip('./')
-        if not rel or rel in seen:
+        rel = str(raw or '').strip().replace('\\', '/')
+        while rel.startswith('./'):
+            rel = rel[2:]
+        if not rel or rel in seen or _is_sensitive_workspace_file(rel):
             continue
         seen.add(rel)
         try:
@@ -206,11 +219,15 @@ def _wrap_roundtable_adapter(
                     return run_streaming_turn(self._inner, prompt, workdir, ctx, sink)
                 # 只读 CLI 席位无逐 token HTTP 流：推送起止事件以便前端展示实时思考状态
                 sink.start()
-                result = self._inner.run(prompt, workdir, ctx)
-                if result.ok and result.text:
-                    sink.on_token(result.text[:1600])
-                sink.finish(status='done' if result.ok else 'failed')
-                return result
+                status = 'failed'
+                try:
+                    result = self._inner.run(prompt, workdir, ctx)
+                    if result.ok and result.text:
+                        sink.on_token(result.text[:1600])
+                    status = 'done' if result.ok else 'failed'
+                    return result
+                finally:
+                    sink.finish(status=status)
             return self._inner.run(prompt, workdir, ctx)
 
     return _RoundtableProxy(adapter)
@@ -228,7 +245,7 @@ def _build_seat_adapter(
         agy_base = agys[0] if agys else None
         opts: dict = {}
         if agy_base:
-            for k in ('executable', 'proxy_url', 'model', 'allow_patch_probe'):
+            for k in ('exe', 'proxy_url', 'model', 'allow_patch_probe'):
                 if k in agy_base.options:
                     opts[k] = agy_base.options[k]
         # 严格强制只读 plan + sandbox，绝不允许圆桌讨论改写代码
@@ -277,12 +294,15 @@ def execute(store, topic_id, *, stream_tokens: bool = False):
     lock = StageLock(base / '.discussion.lock')
     if not lock.acquire():
         return
+    reserved = False
+    settled = False
     try:
         if store.thread(topic_id)['status'] not in ('queued', 'running'):
             return
         topic_started_at = float(topic.get('created') or time.time())
         store.update_thread(topic_id, 'running', analysis_run=topic_id)
         budget = reserve_parent(run, topic, original)
+        reserved = True
         rounds = rt.get('rounds', 1)
         if type(rounds) is not int or not 1 <= rounds <= 3:
             rounds = 1
@@ -354,7 +374,8 @@ def execute(store, topic_id, *, stream_tokens: bool = False):
         maximum_duration = min(360, max(90, sum(s.timeout_s for s in stages)))
         parent_job = read_json(directory(run) / 'job.json')
         if parent_job.get('status') in ('paused', 'waiting_approval'):
-            maximum_duration = max(1, min(maximum_duration, parent_job['started_at'] + parent_job['max_duration_s'] - time.time()))
+            remaining_s = parent_job['started_at'] + parent_job['max_duration_s'] - time.time()
+            maximum_duration = max(1, int(min(maximum_duration, remaining_s)))
         config_path = base / 'analysis.toml'
         config_path.write_text(dump_config({
             'task_workdir': str(base / 'readonly'), 'state_dir': str(base / 'state'),
@@ -384,6 +405,7 @@ def execute(store, topic_id, *, stream_tokens: bool = False):
                 engine.prepare()
         result = {s.name: engine.state.stage(s.name).status.value for s in stages}
         settle_parent(run, topic, engine.state.usage_total)
+        settled = True
         consensus_text = ''
         for spec, role, r_idx in turn_meta:
             attempt = engine.state.current_attempt_dir(spec.name)
@@ -414,5 +436,13 @@ def execute(store, topic_id, *, stream_tokens: bool = False):
             **({'consensus': consensus_text} if consensus_text else {}),
             'kind': 'proposal_only', 'task_status_unchanged': True,
             'note': '角色建议仅供参考；可一键填入审批附注或基于共识创建后续任务，经真实测试与审查后生效。'})
+    except BaseException:
+        if reserved and not settled:
+            try:
+                settle_parent(run, topic, {'tokens': 0, 'reported_tokens': 0, 'reserved_tokens': 0,
+                                           'unknown_calls': 0, 'duration_s': 0.0})
+            except Exception:
+                pass
+        raise
     finally:
         lock.release()

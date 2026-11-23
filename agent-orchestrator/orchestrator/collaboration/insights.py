@@ -127,7 +127,7 @@ def export_run_report(service, key) -> dict:
         commit = (sdata.get('commit_sha') or '')[:12]
         if sdata.get('commit_sha'):
             last_commit_stage = sname
-        err = str(sdata.get('last_error') or '').replace('\n', ' ').replace('|', '\\|')[:120]
+        err = re.sub(r'[\r\n]+', ' ', str(sdata.get('last_error') or '')).replace('|', '\\|')[:120]
         lines.append(
             f'| `{sname}` | `{sdata.get("status")}` | {sdata.get("current_attempt") or 0} | '
             f'{("`" + commit + "`") if commit else "—"} | {err or "—"} |'
@@ -165,16 +165,19 @@ def export_run_report(service, key) -> dict:
     # 累计代码差异（如有代码提交）
     if last_commit_stage:
         try:
-            diff = code_diff(run, last_commit_stage, 'start')
+            diff = code_diff(run, last_commit_stage, 'project')
             diff_body = (diff.get('body') or '').strip()
             if diff_body:
+                clipped = diff_body[:12000]
+                max_ticks = max((len(m.group(0)) for m in re.finditer(r'`+', clipped)), default=0)
+                fence = '`' * max(4, max_ticks + 1)
                 lines.append(f'## 累计代码差异（基线 → `{last_commit_stage}`）')
                 lines.append('')
-                lines.append('````diff')
-                lines.append(diff_body[:12000])
+                lines.append(f'{fence}diff')
+                lines.append(clipped)
                 if len(diff_body) > 12000:
                     lines.append('# …（差异过长已截断）')
-                lines.append('````')
+                lines.append(fence)
                 lines.append('')
         except Exception:
             pass
@@ -186,7 +189,8 @@ def export_run_report(service, key) -> dict:
         lines.append('')
         for t in threads:
             res = t.get('result') or {}
-            lines.append(f'### 议题：{t.get("question", "")[:120]}')
+            q_line = re.sub(r'[\r\n]+', ' ', str(t.get('question', '') or '')).strip()[:120]
+            lines.append(f'### 议题：{q_line}')
             lines.append('')
             consensus = res.get('consensus')
             if consensus:

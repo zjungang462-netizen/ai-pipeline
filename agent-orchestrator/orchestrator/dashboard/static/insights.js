@@ -336,6 +336,8 @@ function renderRegisteredProjectsList(){
     projects=(await api('/projects')).projects;
     if(typeof applyProjects==='function')applyProjects();
     if(typeof restoreListFilters==='function')restoreListFilters();
+    if(typeof renderTaskScope==='function')renderTaskScope();
+    renderModelSettings();
     renderRegisteredProjectsList();
     toast(`已安全移除项目 ${p.name} 的登记（未删除代码目录或历史运行）。`);
    }catch(e){toast(e.message);}finally{delBtn.disabled=false;}
@@ -372,7 +374,14 @@ function renderProjectStageEditor(){
   const head=el('div','pm-node-head');
   const numBadge=el('span','stage-number',String(idx+1).padStart(2,'0'));
   const nameInp=el('input','pm-node-name');nameInp.value=st.name;nameInp.maxLength=32;nameInp.placeholder='节点英文名（如 lead / coding）';
-  nameInp.oninput=()=>{st.name=nameInp.value.trim();};
+  nameInp.oninput=()=>{
+   const prev=st.name,next=nameInp.value.trim();
+   st.name=next;
+   if(prev&&prev!==next){
+    for(let j=idx+1;j<pmDraftStages.length;j++){if(pmDraftStages[j].feedback_to===prev)pmDraftStages[j].feedback_to=next;}
+   }
+  };
+  nameInp.onchange=()=>{renderProjectStageEditor();};
   const kindSel=el('select','pm-node-kind');
   for(const [k,v] of [['report','方案/报告 (report)'],['code','代码实现 (code)'],['review','独立审查 (review)'],['test','确定性测试 (test)']]){
    kindSel.append(Object.assign(el('option','',v),{value:k}));
@@ -432,12 +441,16 @@ function renderProjectStageEditor(){
    const fbWrap=el('label','pm-inline-fb','不通过时打回：');
    const fbSel=el('select');
    fbSel.append(Object.assign(el('option','','不自动打回'),{value:''}));
+   const prevNames=[];
    for(const prev of pmDraftStages.slice(0,idx)){
-    if(prev.name)fbSel.append(Object.assign(el('option','',prev.name),{value:prev.name}));
+    if(prev.name){prevNames.push(prev.name);fbSel.append(Object.assign(el('option','',prev.name),{value:prev.name}));}
    }
+   if(st.feedback_to&&!prevNames.includes(st.feedback_to))st.feedback_to='';
    fbSel.value=st.feedback_to||'';
    fbSel.onchange=()=>{st.feedback_to=fbSel.value;};
    fbWrap.append(fbSel);foot.append(fbWrap);
+  }else if(st.feedback_to){
+   st.feedback_to='';
   }
   card.append(head,body,foot);
   if(st.kind!=='test'){
@@ -471,18 +484,21 @@ if($('apply-route-recommend'))$('apply-route-recommend').onclick=async()=>{
  try{
   const data=await api(`/projects/${encodeURIComponent(pid)}/route-recommend?min_runs=1`);
   const recs=data.recommendations||{};
+  const stageKindByName=new Map((project.execution_scope?.stages||[]).map(s=>[s.name,s.kind]));
   const applied=[];
+  const inputs=Array.from($('model-settings')?.querySelectorAll('input[data-option="model"]')||[]);
   for(const model of project.models){
-   const kinds=(model.stages||[]).map(s=>s.kind).filter(Boolean);
+   const rawStages=model.stages||[];
+   const kinds=rawStages.map(s=>typeof s==='string'?stageKindByName.get(s):s?.kind).filter(Boolean);
    const matchKind=kinds.find(k=>recs[k]?.recommended&&recs[k].recommended.tool===model.type);
    const rec=matchKind?recs[matchKind].recommended:null;
    if(!rec||!rec.model)continue;
-   const inputs=Array.from($('model-settings')?.querySelectorAll('input[data-option="model"]')||[]);
-   const inp=inputs.find(el=>el.dataset.adapter===model.name);
+   const inp=inputs.find(el=>el.dataset.adapter===model.name&&el.dataset.option==='model');
    if(inp){
     inp.value=rec.model;
-    inp.dispatchEvent(new Event('input'));
-    const stageNames=(model.stages||[]).map(s=>s.name).join('/')||model.name;
+    if(typeof inp.dispatchEvent==='function'&&typeof Event==='function')inp.dispatchEvent(new Event('input'));
+    else if(typeof inp.oninput==='function')inp.oninput();
+    const stageNames=rawStages.map(s=>{const name=typeof s==='string'?s:(s?.name||'');return (typeof stages!=='undefined'&&stages[name])||name;}).filter(Boolean).join('/')||model.name;
     applied.push(`${stageNames} → ${rec.model}`);
    }
   }

@@ -156,7 +156,7 @@ class Handler(BaseHTTPRequestHandler):
                 if self.headers.get('Origin') != self.app.origin:
                     return self.respond({'error': '写操作必须来自同一工作台'}, 403)
                 length = int(self.headers.get('Content-Length', '0'))
-                if not 0 < length <= 256000 or self.headers.get('Content-Type', '').split(';')[0] != 'application/json':
+                if not 0 < length <= 256000 or self.headers.get('Content-Type', '').split(';')[0].strip().lower() != 'application/json':
                     return self.respond({'error': '请求必须为有界 JSON 对象'}, 400)
                 body = json.loads(self.rfile.read(length))
                 if not isinstance(body, dict):
@@ -194,18 +194,25 @@ class Handler(BaseHTTPRequestHandler):
                 from ..collaboration.model_catalog import discover_local_catalog
                 force = query.get('refresh', ['0'])[0] in ('1', 'true', 'yes')
                 proxy_url = ''
+                api_base_url = ''
+                api_key_env = ''
                 for proj in service.list_projects():
                     try:
                         cfg = service.config(proj['config'])
                         for ad in cfg.adapters.values():
-                            if ad.type == 'cli_agy' and ad.options.get('proxy_url'):
+                            if not proxy_url and ad.type == 'cli_agy' and ad.options.get('proxy_url'):
                                 proxy_url = ad.options['proxy_url']
-                                break
+                            if not api_base_url and ad.type == 'openai_compat' and ad.options.get('base_url') and ad.options.get('api_key_env'):
+                                api_base_url = ad.options['base_url']
+                                api_key_env = ad.options['api_key_env']
                     except Exception:
                         pass
-                    if proxy_url:
+                    if proxy_url and api_base_url:
                         break
-                return self.respond(discover_local_catalog(proxy_url=proxy_url, force=force))
+                kwargs = {'proxy_url': proxy_url, 'force': force}
+                if api_base_url and api_key_env:
+                    kwargs.update(api_base_url=api_base_url, api_key_env=api_key_env)
+                return self.respond(discover_local_catalog(**kwargs))
             if path == '/api/projects' and method == 'GET':
                 return self.respond({'projects': service.list_projects()})
             if path == '/api/projects/register' and method == 'POST':
@@ -216,9 +223,13 @@ class Handler(BaseHTTPRequestHandler):
                 project_id, action = parts[2], parts[3]
                 from ..collaboration import project_manager
                 if action == 'route-recommend' and method == 'GET':
+                    if 'min_runs' in query and len(query['min_runs']) != 1:
+                        raise ValueError('min_runs 不可重复提供')
                     min_runs = int(query.get('min_runs', ['2'])[0])
                     return self.respond(project_manager.project_route_recommend(service, project_id, min_runs=min_runs))
                 if action == 'lessons' and method == 'GET':
+                    if 'min_occurrences' in query and len(query['min_occurrences']) != 1:
+                        raise ValueError('min_occurrences 不可重复提供')
                     min_occ = int(query.get('min_occurrences', ['2'])[0])
                     return self.respond(project_manager.project_lessons(service, project_id, min_occurrences=min_occ))
                 if action == 'stages' and method == 'GET':
@@ -236,19 +247,23 @@ class Handler(BaseHTTPRequestHandler):
                     from ..arena import run_arena
                     entry = store.project(project_id)
                     cfg = service.config(entry['config'])
-                    return self.respond(service.redact(run_arena(
+                    return self.respond(run_arena(
                         cfg,
                         body.get('task', ''),
                         body.get('candidates', []),
                         test_preset=str(body.get('test_preset') or ''),
-                    )))
+                    ))
             if len(parts) == 5 and parts[:2] == ['api', 'projects'] and parts[3:] == ['arena', 'apply'] and method == 'POST':
                 self.idem()
                 from ..arena import apply_arena_winner
-                entry = store.project(parts[2])
+                from ..collaboration import project_manager
+                project_id = parts[2]
+                entry = store.project(project_id)
                 cfg = service.config(entry['config'])
                 try:
                     with service.operations:
+                        if project_manager.has_active_project_work(service, project_id):
+                            raise Conflict('该项目尚有运行中的任务或会诊，请先停止后再合入竞技场方案')
                         return self.respond(apply_arena_winner(
                             cfg,
                             str(body.get('arena_id') or ''),
@@ -289,48 +304,49 @@ class Handler(BaseHTTPRequestHandler):
             if len(parts) >= 4 and parts[:2] == ['api', 'runs']:
                 key, action = parts[2:4]
                 run = store.run(key)
-                if action == 'snapshot' and method == 'GET':
-                    snap = service.snapshot(key)
-                    snap['archived'] = store.is_run_archived(key)
-                    return self.respond(snap)
-                if action == 'usage' and method == 'GET':
-                    return self.respond(insights.run_summary(service, key))
-                if action == 'export-report' and method == 'GET':
-                    return self.respond(insights.export_run_report(service, key))
-                if action == 'archive' and method == 'POST':
-                    self.idem()
-                    raw_arch = body.get('archived', True)
-                    if type(raw_arch) is not bool:
-                        raise ValueError('archived 必须是布尔值')
-                    if raw_arch and service.snapshot(key)['lifecycle'] in ('pending', 'running', 'recovering'):
-                        raise Conflict('运行中的任务请先暂停或停止后再归档')
-                    return self.respond(store.set_run_archived(key, raw_arch))
-                if action == 'events' and method == 'GET':
-                    service.sync_run_events(run)
-                    if 'before' in query:
-                        events = store.history(key, int(query['before'][0]), int(query.get('limit', ['100'])[0]))
-                    else:
-                        events = store.events(key, int(query.get('after', ['0'])[0]), int(query.get('limit', ['100'])[0]))
-                    return self.respond({'events': events, 'last_cursor': store.last_cursor(key)})
-                if action == 'stream' and method == 'GET':
-                    return self.stream(run, query)
-                if action == 'messages' and method == 'POST':
-                    return self.respond(store.message(key, body['body'], self.idem()), 201)
-                if action == 'commands' and method == 'POST':
-                    return self.respond(service.command(key, body['intent'], body.get('payload', {}), self.idem()), 202)
-                if action == 'discussions':
-                    if method == 'GET':
-                        return self.respond({'threads': store.threads(key)})
-                    if method == 'POST':
-                        return self.respond(service.discuss(
-                            key, body['question'], body.get('roles', ['developer', 'reviewer']),
-                            body.get('budget', 6000), self.idem(),
-                            rounds=body.get('rounds', 1),
-                            role_models=body.get('role_models'),
-                            role_adapters=body.get('role_adapters'),
-                            context_files=body.get('context_files'),
-                            consensus=body.get('consensus', False),
-                        ), 202)
+                if len(parts) == 4:
+                    if action == 'snapshot' and method == 'GET':
+                        snap = service.snapshot(key)
+                        snap['archived'] = store.is_run_archived(key)
+                        return self.respond(snap)
+                    if action == 'usage' and method == 'GET':
+                        return self.respond(insights.run_summary(service, key))
+                    if action == 'export-report' and method == 'GET':
+                        return self.respond(insights.export_run_report(service, key))
+                    if action == 'archive' and method == 'POST':
+                        self.idem()
+                        raw_arch = body.get('archived', True)
+                        if type(raw_arch) is not bool:
+                            raise ValueError('archived 必须是布尔值')
+                        if raw_arch and service.snapshot(key)['lifecycle'] in ('pending', 'running', 'recovering'):
+                            raise Conflict('运行中的任务请先暂停或停止后再归档')
+                        return self.respond(store.set_run_archived(key, raw_arch))
+                    if action == 'events' and method == 'GET':
+                        service.sync_run_events(run)
+                        if 'before' in query:
+                            events = store.history(key, int(query['before'][0]), int(query.get('limit', ['100'])[0]))
+                        else:
+                            events = store.events(key, int(query.get('after', ['0'])[0]), int(query.get('limit', ['100'])[0]))
+                        return self.respond({'events': events, 'last_cursor': store.last_cursor(key)})
+                    if action == 'stream' and method == 'GET':
+                        return self.stream(run, query)
+                    if action == 'messages' and method == 'POST':
+                        return self.respond(store.message(key, body['body'], self.idem()), 201)
+                    if action == 'commands' and method == 'POST':
+                        return self.respond(service.command(key, body['intent'], body.get('payload', {}), self.idem()), 202)
+                    if action == 'discussions':
+                        if method == 'GET':
+                            return self.respond({'threads': store.threads(key)})
+                        if method == 'POST':
+                            return self.respond(service.discuss(
+                                key, body['question'], body.get('roles', ['developer', 'reviewer']),
+                                body.get('budget', 6000), self.idem(),
+                                rounds=body.get('rounds', 1),
+                                role_models=body.get('role_models'),
+                                role_adapters=body.get('role_adapters'),
+                                context_files=body.get('context_files'),
+                                consensus=body.get('consensus', False),
+                            ), 202)
                 if action == 'artifacts' and method == 'GET' and len(parts) == 7:
                     return self.respond(read_artifact(run, '/'.join(parts[4:])))
                 if action == 'diff' and method == 'GET' and len(parts) == 5:
@@ -355,6 +371,7 @@ class Handler(BaseHTTPRequestHandler):
     def stream(self, run, query):
         if not self.app.streams.acquire(blocking=False):
             return self.respond({'error': '实时连接数量已到上限'}, 429)
+        headers_sent = False
         try:
             cursor = max(0, int(self.headers.get('Last-Event-ID') or query.get('after', ['0'])[0]))
             self.send_response(200)
@@ -362,6 +379,7 @@ class Handler(BaseHTTPRequestHandler):
             self.send_header('Content-Type', 'text/event-stream; charset=utf-8')
             self.send_header('Connection', 'keep-alive')
             self.end_headers()
+            headers_sent = True
             self.wfile.write(b'retry: 1500\n\n')
             self.wfile.flush()
             last_heartbeat = time.monotonic()
@@ -381,6 +399,10 @@ class Handler(BaseHTTPRequestHandler):
                 self.app.closed.wait(.5)
         except (BrokenPipeError, ConnectionResetError, OSError):
             pass
+        except Exception:
+            # 响应头已发出时不能再回写错误 JSON，直接安全结束当前 SSE 连接由前端自动重连。
+            if not headers_sent:
+                raise
         finally:
             self.close_connection = True
             self.app.streams.release()

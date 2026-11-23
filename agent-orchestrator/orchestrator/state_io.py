@@ -38,19 +38,23 @@ def atomic_write_json(path: Path, data: dict[str, Any]) -> None:
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_name(path.name + f".tmp.{uuid.uuid4().hex}")
-    with tmp.open("w", encoding="utf-8") as f:
-        json.dump(data, f, ensure_ascii=False, indent=2)
-        f.flush()
-        os.fsync(f.fileno())
-    # Windows 下读者/防护软件可能短暂持有目标文件；只重试尚未生效的原子替换。
-    for attempt in range(7):
-        try:
-            os.replace(tmp, path)
-            break
-        except PermissionError:
-            if attempt == 6:
-                raise
-            time.sleep(min(.01 * (2 ** attempt), .2))
+    try:
+        with tmp.open("w", encoding="utf-8") as f:
+            json.dump(data, f, ensure_ascii=False, indent=2)
+            f.flush()
+            os.fsync(f.fileno())
+        # Windows 下读者/防护软件可能短暂持有目标文件；只重试尚未生效的原子替换。
+        for attempt in range(7):
+            try:
+                os.replace(tmp, path)
+                break
+            except PermissionError:
+                if attempt == 6:
+                    raise
+                time.sleep(min(.01 * (2 ** attempt), .2))
+    except BaseException:
+        tmp.unlink(missing_ok=True)
+        raise
 
 
 def _pid_alive(pid: object) -> bool:

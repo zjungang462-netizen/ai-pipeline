@@ -372,30 +372,46 @@ function renderEvent(e){
   content.append(head);
 
   const rawBody=String(data.body||'');
-  const bodyWrap=el('div','message-body-wrap');
-  const bodyEl=el('div','message-body');
-  if(data.source==='tool_result'){
-   const pre=el('pre','tool-output',rawBody);bodyEl.append(pre);
-  }else{
-   bodyEl.append(renderMarkdown(rawBody));
-  }
-  bodyWrap.append(bodyEl);
-  const isLong=data.source!=='human'&&rawBody.length>900;
-  if(isLong){
+  if(data.source==='tool_result'&&rawBody.length>260){
    const messageKey=(current?.id||'')+':'+e.cursor;
-   let expanded=expandedMessages.has(messageKey);
-   bodyWrap.classList.toggle('collapsible',!expanded);
-   const toggle=el('button','expand-toggle',expanded?'收起内容 ⌃':'展开完整报告 ⌄');toggle.type='button';
-   toggle.onclick=()=>{
-    expanded=!expanded;
-    if(expanded)expandedMessages.add(messageKey);else expandedMessages.delete(messageKey);
+   const preview=el('div','message-preview',rawBody.split('\n').filter(Boolean).slice(0,3).join('\n').slice(0,420));
+   const details=el('details','message-log'),summary=el('summary','','查看完整记录');
+   details.open=expandedMessages.has(messageKey);
+   details.ontoggle=()=>{
+    if(details.isConnected===false)return;
+    if(details.open)expandedMessages.add(messageKey);else expandedMessages.delete(messageKey);
     while(expandedMessages.size>500)expandedMessages.delete(expandedMessages.values().next().value);
-    bodyWrap.classList.toggle('collapsible',!expanded);
-    toggle.textContent=expanded?'收起内容 ⌃':'展开完整报告 ⌄';
    };
-   bodyWrap.append(toggle);
+   const bodyEl=el('div','message-body');
+   bodyEl.append(el('pre','tool-output',rawBody));
+   details.append(summary,bodyEl);
+   content.append(preview,details);
+  }else{
+   const bodyWrap=el('div','message-body-wrap');
+   const bodyEl=el('div','message-body');
+   if(data.source==='tool_result'){
+    const pre=el('pre','tool-output',rawBody);bodyEl.append(pre);
+   }else{
+    bodyEl.append(renderMarkdown(rawBody));
+   }
+   bodyWrap.append(bodyEl);
+   const isLong=data.source!=='human'&&rawBody.length>900;
+   if(isLong){
+    const messageKey=(current?.id||'')+':'+e.cursor;
+    let expanded=expandedMessages.has(messageKey);
+    bodyWrap.classList.toggle('collapsible',!expanded);
+    const toggle=el('button','expand-toggle',expanded?'收起内容 ⌃':'展开完整报告 ⌄');toggle.type='button';
+    toggle.onclick=()=>{
+     expanded=!expanded;
+     if(expanded)expandedMessages.add(messageKey);else expandedMessages.delete(messageKey);
+     while(expandedMessages.size>500)expandedMessages.delete(expandedMessages.values().next().value);
+     bodyWrap.classList.toggle('collapsible',!expanded);
+     toggle.textContent=expanded?'收起内容 ⌃':'展开完整报告 ⌄';
+    };
+    bodyWrap.append(toggle);
+   }
+   content.append(bodyWrap);
   }
-  content.append(bodyWrap);
 
   const footer=el('div','message-footer');
   if(data.thread_id)footer.append(el('span','meta-chip',data.role==='consensus'?'圆桌共识 · 可一键采纳执行':'会诊建议 · 未改变任务结论'));
@@ -416,6 +432,7 @@ function renderEvent(e){
     if(current?.project_id&&$('project-select'))$('project-select').value=current.project_id;
     if($('task-input'))$('task-input').value=`基于多模型圆桌共识执行：\n${rawBody.slice(0,6000)}`;
     renderTaskScope();
+    if(typeof renderModelSettings==='function')renderModelSettings();
    };
    footer.append(adoptTask);
   }
@@ -464,7 +481,7 @@ if($('archive-run'))$('archive-run').onclick=async()=>{if(!current)return;const 
 $('confirm-form').onsubmit=event=>{event.preventDefault();const note=$('confirm-note')&&!$('confirm-note-wrap')?.classList.contains('hidden')?$('confirm-note').value.trim():'';$('confirm-dialog').close();if(confirmation)confirmation(note);};document.querySelectorAll('.close-dialog').forEach(button=>button.onclick=()=>button.closest('dialog').close());
 $('task-form').onsubmit=async event=>{event.preventDefault();const button=event.submitter||$('task-submit');const derive=!!parent;const project=projects.find(p=>p.id===(derive?current?.project_id:$('project-select').value));if(!taskProjectsFresh){toast('项目配置尚未刷新完成，请稍后再试。');renderTaskScope();return;}if(!project||project.unavailable||!project.execution_scope||typeof project.config_hash!=='string'){toast(project?.unavailable?'配置不可用：'+project.unavailable+'。请修复或重新登记配置后刷新工作台。':'无法确认配置执行范围，请刷新后重试。');renderTaskScope();return;}button.disabled=true;try{const data=await api('/runs',{method:'POST',body:{project_id:project.id,task:$('task-input').value,parent_id:derive?parent.id:null,expected_config_hash:project.config_hash,...(typeof executionOptions==='function'?{execution_options:executionOptions()}:{} )}});$('task-dialog').close();await refresh();await select(data.id);}catch(e){toast(e.message);if(e.status===409)await loadTaskProjects(derive);else renderTaskScope();}};
 $('message-form').onsubmit=async event=>{event.preventDefault();if(!current||!$('message').value.trim())return;const body=$('message').value;try{await api(`/runs/${encodeURIComponent(current.id)}/messages`,{method:'POST',body:{body}});$('message').value='';}catch(e){toast(e.message);}};
-function syncDiscussionSeatOptions(){for(const r of ['architect','developer','skeptic','reviewer']){const sel=$('adapter-'+r),dl=$('dl-models-'+r);if(!dl)continue;const tool=sel?.value||'openai_compat';const models=typeof catalogModelsFor==='function'?catalogModelsFor(tool):[];dl.replaceChildren(...models.map(m=>{const o=document.createElement('option');const id=typeof m==='string'?m:(m?.id||'');o.value=id;if(m&&typeof m==='object'&&m.label&&m.label!==id)o.textContent=m.label;return o;}).filter(o=>o.value));}}
+function syncDiscussionSeatOptions(){const defaultTool=current?.models?.some(m=>m.type==='openai_compat')?'openai_compat':(current?.models?.some(m=>m.type==='cli_agy')?'cli_agy':'openai_compat');for(const r of ['architect','developer','skeptic','reviewer']){const sel=$('adapter-'+r),dl=$('dl-models-'+r);if(!dl)continue;const tool=sel?.value||defaultTool;const models=typeof catalogModelsFor==='function'?catalogModelsFor(tool):[];dl.replaceChildren(...models.map(m=>{const o=document.createElement('option');const id=typeof m==='string'?m:(m?.id||'');o.value=id;if(m&&typeof m==='object'&&m.label&&m.label!==id)o.textContent=m.label;return o;}).filter(o=>o.value));}}
 for(const r of ['architect','developer','skeptic','reviewer']){if($('adapter-'+r))$('adapter-'+r).onchange=syncDiscussionSeatOptions;}
 $('discuss').onclick=async()=>{if(typeof loadModelCatalog==='function')await loadModelCatalog(false);syncDiscussionSeatOptions();$('discussion-dialog').showModal();};$('discussion-form').onsubmit=async event=>{event.preventDefault();const roles=[],role_models={},role_adapters={};for(const r of ['architect','developer','skeptic','reviewer']){if($('role-'+r)?.checked){roles.push(r);const mv=($('model-'+r)?.value||'').trim();if(mv)role_models[r]=mv;const av=($('adapter-'+r)?.value||'').trim();if(av)role_adapters[r]=av;}}if(!roles.length){toast('请至少勾选 1 个讨论角色');return;}const files=($('discussion-files')?.value||'').split(/[,，\n]/).map(s=>s.trim()).filter(Boolean).slice(0,4);const rounds=Number($('discussion-rounds')?.value||2);const consensus=!!$('discussion-consensus')?.checked;const button=event.submitter;button.disabled=true;try{await api(`/runs/${encodeURIComponent(current.id)}/discussions`,{method:'POST',body:{question:$('question').value,roles,budget:Number($('discussion-budget').value),rounds,role_models,role_adapters,context_files:files,consensus}});$('discussion-dialog').close();toast(`已发起 ${rounds} 轮多模型圆桌对话（${roles.length} 个席位）。`);}catch(e){toast(e.message);}finally{button.disabled=false;}};
 document.querySelectorAll('[data-tab]').forEach(button=>button.onclick=()=>{rememberFeedView();tab=button.dataset.tab;document.querySelectorAll('[data-tab]').forEach(b=>{b.classList.toggle('active',b===button);b.ariaSelected=String(b===button);});const view=rememberedFeedViews.get(current?.id+':'+tab);renderFeed(!!view?.follow);if(!view?.follow)$('feed').scrollTop=view?.top||0;updateFeedNavigation();});

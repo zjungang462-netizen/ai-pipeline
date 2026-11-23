@@ -82,9 +82,12 @@ def derive(run, new_id):
     for stage in raw['stages']:
         prompt = stage.get('prompt')
         if prompt:
-            candidate = cfg.base_dir / prompt
-            if candidate.is_file():
-                stage['prompt'] = str(candidate.resolve())
+            try:
+                candidate = cfg.base_dir / prompt
+                if candidate.is_file():
+                    stage['prompt'] = str(candidate.resolve())
+            except OSError:
+                pass  # 长内联提示词不作为文件路径处理。
     output = base / 'config.toml'
     output.write_text(dump_config(raw), encoding='utf8')
     load_config(output)

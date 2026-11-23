@@ -39,10 +39,17 @@ def run_test_cmd(cmd: list[str], workdir: Path, timeout_s: int = 600,
     t0 = time.monotonic()
     env = build_subprocess_env(extra_allow=extra_env)
     argv = list(cmd)
-    if argv and not Path(argv[0]).is_file():
-        resolved = shutil.which(argv[0], path=env.get("PATH"))
-        if resolved:
-            argv[0] = resolved
+    if argv:
+        entry = argv[0]
+        if '/' in entry or '\\' in entry or Path(entry).is_absolute():
+            entry_path = Path(entry) if Path(entry).is_absolute() else (workdir / entry)
+            if entry_path.is_file():
+                argv[0] = str(entry_path)
+        else:
+            resolved = shutil.which(entry, path=env.get("PATH"))
+            if resolved:
+                argv[0] = resolved
+    stream_truncated = False
     try:
         proc = subprocess.Popen(
             argv, cwd=str(workdir),
@@ -88,11 +95,16 @@ def run_test_cmd(cmd: list[str], workdir: Path, timeout_s: int = 600,
                     pass
             if proc.poll() is None:
                 proc.kill()
-            proc.wait(timeout=5)
+            try:
+                proc.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                pass
             for thread in threads:
                 thread.join(1)
             err = f"测试超时（{timeout_s}s）"
-        stdout, stderr = (bytes(t).decode("utf-8", errors="replace")[-MAX_OUTPUT:] for t in tails)
+        decoded = [bytes(t).decode("utf-8", errors="replace") for t in tails]
+        stream_truncated = any(c > MAX_OUTPUT * 4 for c in counts) or any(len(s) > MAX_OUTPUT for s in decoded)
+        stdout, stderr = (s[-MAX_OUTPUT:] for s in decoded)
         out = stdout + stderr
         code = -1 if err else proc.returncode
     except subprocess.TimeoutExpired as e:
@@ -108,7 +120,7 @@ def run_test_cmd(cmd: list[str], workdir: Path, timeout_s: int = 600,
         code = -1
         err = f"无法执行测试命令: {e}"
     duration = time.monotonic() - t0
-    truncated = len(out) > MAX_OUTPUT or any(c > MAX_OUTPUT for c in locals().get("counts", []))
+    truncated = stream_truncated or len(out) > MAX_OUTPUT
     failure_ids = re.findall(r'(?m)^(?:FAIL|ERROR):\s*(.+)$', out)
     failure_ids += re.findall(r'(?m)^FAILED\s+([^\n]+)', out)
     if re.search(r'Ran 0 tests\b', out):

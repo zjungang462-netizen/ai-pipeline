@@ -1,6 +1,7 @@
 """本机已安装 CLI 工具与真实可用模型目录探测（只读、不触发推理、不泄漏凭据）。"""
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor
 import json
 import os
 from pathlib import Path
@@ -11,11 +12,13 @@ import time
 from typing import Any
 import urllib.error
 import urllib.request
+from urllib.parse import urlsplit
 
 from ..adapters.cli_base import resolve_exe
 from ..safety import build_subprocess_env
 
 _MAX_CATALOG_HTTP_BYTES = 256 * 1024
+_MAX_CACHE_ENTRIES = 32
 
 _CACHE_LOCK = threading.Lock()
 _CACHE_TTL_S = 300.0
@@ -105,6 +108,9 @@ def _probe_agy_models(exe: str, proxy_url: str = '') -> list[dict[str, str]]:
 
 
 def _probe_openai_compat_models(base_url: str, api_key_env: str) -> tuple[bool, list[dict[str, str]]]:
+    parsed = urlsplit(str(base_url or '').strip())
+    if parsed.scheme not in ('http', 'https') or not parsed.hostname or parsed.username or parsed.password:
+        return False, []
     key = os.environ.get(api_key_env, '').strip()
     if not key:
         return False, []
@@ -149,17 +155,23 @@ def discover_local_catalog(
 
     adapters: dict[str, dict[str, Any]] = {}
 
-    # 1. OpenAI 兼容 API（如 DeepSeek）
-    api_configured, api_live = _probe_openai_compat_models(api_base_url, api_key_env)
+    # 1 & 2. 并行探测 OpenAI 兼容 API 与反重力 CLI（真机 agy models），缩短冷启动延迟
+    agy_exe = resolve_exe('agy')
+    if agy_exe:
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            api_fut = pool.submit(_probe_openai_compat_models, api_base_url, api_key_env)
+            agy_fut = pool.submit(_probe_agy_models, agy_exe, proxy_url=proxy_url)
+            api_configured, api_live = api_fut.result()
+            agy_live = agy_fut.result()
+    else:
+        api_configured, api_live = _probe_openai_compat_models(api_base_url, api_key_env)
+        agy_live = []
+
     adapters['openai_compat'] = {
         'installed': api_configured,
         'source': 'live_api' if api_live else 'preset',
         'models': api_live or list(_FALLBACK_MODELS['openai_compat']),
     }
-
-    # 2. 反重力 CLI（真机 agy models）
-    agy_exe = resolve_exe('agy')
-    agy_live = _probe_agy_models(agy_exe, proxy_url=proxy_url) if agy_exe else []
     adapters['cli_agy'] = {
         'installed': bool(agy_exe),
         'source': 'live_cli' if agy_live else 'preset',
@@ -194,5 +206,7 @@ def discover_local_catalog(
         'adapters': adapters,
     }
     with _CACHE_LOCK:
+        if len(_CACHE) >= _MAX_CACHE_ENTRIES and cache_key not in _CACHE:
+            _CACHE.pop(next(iter(_CACHE)), None)
         _CACHE[cache_key] = (now, result)
     return result

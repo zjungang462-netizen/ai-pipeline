@@ -161,6 +161,102 @@ class TestArena(unittest.TestCase):
             self.assertEqual(seen_argv, ['C:\\nodejs\\npm.cmd', 'test'])
             mock_which.assert_called_once()
 
+    def test_arena_failed_candidate_preserves_stderr_and_skips_base_tests_and_rejects_dup_id(self):
+        from orchestrator.contracts import ErrorKind
+        from orchestrator.state import StageLock
+
+        td = tempfile.TemporaryDirectory()
+        self.addCleanup(td.cleanup)
+        root = Path(td.name)
+        repo = root / 'repo'
+        repo.mkdir()
+        _git(['init'], repo)
+        _git(['config', 'user.name', 'Test User'], repo)
+        _git(['config', 'user.email', 'test@local'], repo)
+        (repo / 'calc.py').write_text('x = 1\n', encoding='utf-8')
+        _git(['add', '-A'], repo)
+        _git(['commit', '-m', 'init'], repo)
+        base_sha = _git(['rev-parse', 'HEAD'], repo)
+
+        cfg_path = root / 'project.toml'
+        cfg_path.write_text(
+            f'task_workdir = "{repo.as_posix()}"\n'
+            f'state_dir = "{(root / "state").as_posix()}"\n'
+            '[run_budget]\nmax_tokens = 20000\nmax_duration_s = 120\n'
+            '[[stages]]\nname = "t"\nkind = "test"\ntest_cmd = ["python", "-c", "pass"]\n',
+            encoding='utf-8',
+        )
+        cfg = load_config(cfg_path)
+
+        class _MixedCandidate:
+            def __init__(self, label: str):
+                self.label = label
+                self.model = 'm-' + label
+
+            def run(self, prompt, workdir: Path, ctx):
+                if self.label == 'A':
+                    return Result(
+                        ok=False, exit_code=1, stderr='真实 CLI 鉴权失败详情',
+                        error_kind=ErrorKind.AUTH, usage={'tokens': 88},
+                    )
+                (workdir / 'calc.py').write_text('x = 2\n', encoding='utf-8')
+                return Result(ok=True, text='方案 B 完成', usage={'tokens': 42})
+
+        res = run_arena(
+            cfg,
+            '修改 x',
+            [
+                {'label': 'A', 'adapter_type': 'cli_agy', 'model': 'm-a'},
+                {'label': 'B', 'adapter_type': 'cli_agy', 'model': 'm-b'},
+            ],
+            test_preset='python_unittest',
+            arena_id='arena-failtest',
+            adapter_factory=lambda label, atype, model: _MixedCandidate(label),
+        )
+        by_label = {c['label']: c for c in res['candidates']}
+        # Result 无 .error 属性时不能退化为 AttributeError，应保留真实 stderr 与 tokens，且未改动的失败候选不误跑测试
+        self.assertFalse(by_label['A']['ok'])
+        self.assertIn('真实 CLI 鉴权失败详情', by_label['A']['error'])
+        self.assertEqual(by_label['A']['tokens'], 88)
+        self.assertIsNone(by_label['A']['test_exit_code'])
+        self.assertTrue(by_label['B']['ok'])
+        self.assertTrue(by_label['B']['commit_sha'])
+
+        # 禁止覆盖已有竞技场记录
+        with self.assertRaises(ValueError):
+            run_arena(
+                cfg,
+                '再次覆盖',
+                [
+                    {'label': 'A', 'adapter_type': 'cli_agy', 'model': 'm-a'},
+                    {'label': 'B', 'adapter_type': 'cli_agy', 'model': 'm-b'},
+                ],
+                arena_id='arena-failtest',
+                adapter_factory=lambda label, atype, model: _MixedCandidate(label),
+            )
+
+        # .apply.lock 被占用时，直接调用 apply_arena_winner 也必须拒绝并发合并
+        lock = StageLock(cfg.state_dir / 'arenas' / '.apply.lock')
+        self.assertTrue(lock.acquire())
+        try:
+            with self.assertRaises(RuntimeError):
+                apply_arena_winner(cfg, 'arena-failtest', 'B', base_sha)
+        finally:
+            lock.release()
+
+    def test_run_test_cmd_multibyte_utf8_under_char_limit_is_not_marked_truncated(self):
+        import sys
+        from orchestrator.testrun import run_test_cmd
+
+        td = tempfile.TemporaryDirectory()
+        self.addCleanup(td.cleanup)
+        root = Path(td.name)
+        # 8000 个中文字符约 24000 字节（> MAX_OUTPUT=20000 字节），但字符数 < 20000，不应误判截断
+        rec = run_test_cmd([sys.executable, '-c', 'print("测" * 8000)'], root, timeout_s=30)
+        self.assertTrue(rec['ok'])
+        self.assertFalse(rec['truncated'])
+        self.assertGreaterEqual(len(rec['output'].strip()), 8000)
+
 
 if __name__ == '__main__':
     unittest.main()

@@ -154,9 +154,14 @@ class Store:
         with self.connect() as db:
             rows = db.execute(
                 "SELECT body, created FROM messages WHERE run_id=? AND source='human' AND created>? "
-                "ORDER BY created ASC LIMIT ?",
+                "ORDER BY created DESC LIMIT ?",
                 (run_id, float(since_ts), max(1, min(100, int(limit)))),
             ).fetchall()
+        return [dict(r) for r in reversed(rows)]
+
+    def project_runs(self, project_id: str) -> list[dict]:
+        with self.connect() as db:
+            rows = db.execute('SELECT * FROM runs WHERE project_id=? ORDER BY created DESC', (project_id,)).fetchall()
         return [dict(r) for r in rows]
 
     def pin_import_config(self, key, config):
@@ -289,8 +294,10 @@ class Store:
 
     def update_thread(self, key, status, result=None, analysis_run=None):
         with self.connect() as db:
+            row = db.execute('SELECT run_id FROM threads WHERE id=?', (key,)).fetchone()
+            if not row:
+                raise KeyError('议题不存在')
             db.execute('UPDATE threads SET status=?,result=?,analysis_run=COALESCE(?,analysis_run) WHERE id=?',
                        (status, encode(result) if result else None, analysis_run, key))
-            row = db.execute('SELECT run_id FROM threads WHERE id=?', (key,)).fetchone()
             self._event(db, key + ':' + status, row['run_id'], 'discussion_status',
                         {'thread_id': key, 'status': status, 'result': result})

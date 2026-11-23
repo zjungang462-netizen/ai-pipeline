@@ -13,10 +13,12 @@ from typing import Any
 import uuid
 
 from .adapters.factory import build_adapter
+from .artifacts import GitContext, _no_hooks_dir, resolve_git
 from .collaboration.project_manager import TEST_PRESETS
 from .config import AdapterConfig, Config
 from .contracts import RunContext
-from .state import atomic_write_json
+from .safety import build_subprocess_env
+from .state import StageLock, atomic_write_json
 from .testrun import run_test_cmd
 
 _ALLOWED_ARENA_ADAPTERS = frozenset((
@@ -29,9 +31,11 @@ _MODEL_ID_RE = re.compile(r'^[A-Za-z0-9][A-Za-z0-9._:/-]{0,159}(?:\[(?:1M|200K)\
 
 
 def _git(args: list[str], cwd: Path, git_exe: str | None = 'git', *, check: bool = True) -> subprocess.CompletedProcess:
+    exe = resolve_git(GitContext(git_exe if git_exe and git_exe != 'git' else None)) or (git_exe or 'git')
     proc = subprocess.run(
-        [git_exe or 'git', *args],
+        [exe, '-c', f'core.hooksPath={_no_hooks_dir()}', *args],
         cwd=str(cwd),
+        env=build_subprocess_env(),
         capture_output=True,
         text=True,
         encoding='utf-8',
@@ -120,7 +124,8 @@ def _run_single_candidate(
             _git([
                 '-c', 'user.name=Pipeline Arena',
                 '-c', 'user.email=arena@local',
-                'commit', '-m', f'arena({arena_id}): candidate {label}',
+                '-c', 'commit.gpgsign=false',
+                'commit', '--no-verify', '-m', f'arena({arena_id}): candidate {label}',
             ], wt_dir, cfg.git_exe)
             commit_sha = _git(['rev-parse', 'HEAD'], wt_dir, cfg.git_exe).stdout.strip()
             with git_lock:
@@ -136,7 +141,7 @@ def _run_single_candidate(
 
         test_exit_code: int | None = None
         test_output = ''
-        if test_preset:
+        if test_preset and (result.ok or commit_sha):
             trec = run_test_cmd(list(TEST_PRESETS[test_preset]), wt_dir, timeout_s=120)
             test_exit_code = int(trec.get('exit_code', -1))
             raw_out = str(trec.get('output') or '')
@@ -145,6 +150,10 @@ def _run_single_candidate(
             test_output = raw_out[:4000]
 
         usage = result.usage if isinstance(result.usage, dict) else {}
+        err_msg = ''
+        if not result.ok:
+            err_kind = getattr(getattr(result, 'error_kind', None), 'value', '') or ''
+            err_msg = (result.stderr or err_kind or '执行失败')[:500]
         return {
             'label': label,
             'adapter_type': adapter_type,
@@ -160,7 +169,7 @@ def _run_single_candidate(
             'tokens': int(usage.get('tokens') or 0),
             'usage_unknown': bool(usage.get('usage_unknown')),
             'summary': (result.text or '')[:2000],
-            'error': (result.error or '')[:500] if not result.ok else '',
+            'error': err_msg,
         }
     except Exception as exc:
         return {
@@ -231,6 +240,8 @@ def run_arena(
     if not _ARENA_ID_RE.fullmatch(aid):
         raise ValueError('arena_id 格式不合法')
     arena_dir = cfg.state_dir / 'arenas' / aid
+    if (arena_dir / 'result.json').exists():
+        raise ValueError(f'竞技场记录已存在：{aid}')
     arena_dir.mkdir(parents=True, exist_ok=True)
 
     git_lock = threading.Lock()
@@ -273,41 +284,47 @@ def apply_arena_winner(
     result_path = cfg.state_dir / 'arenas' / arena_id / 'result.json'
     if not result_path.is_file():
         raise KeyError(f'未找到竞技场记录：{arena_id}')
-    record = json.loads(result_path.read_text(encoding='utf-8'))
-    if record.get('applied_label'):
-        raise RuntimeError(f'竞技场 {arena_id} 已采纳过方案 {record["applied_label"]}，禁止重复合并')
-    if record.get('base_sha') != expected_base_sha:
-        raise ValueError('expected_base_sha 与竞技场基线提交不一致')
+    lock = StageLock(cfg.state_dir / 'arenas' / '.apply.lock')
+    if not lock.acquire():
+        raise RuntimeError('已有另一个竞技场合并操作正在执行，请稍后重试')
+    try:
+        record = json.loads(result_path.read_text(encoding='utf-8'))
+        if record.get('applied_label'):
+            raise RuntimeError(f'竞技场 {arena_id} 已采纳过方案 {record["applied_label"]}，禁止重复合并')
+        if record.get('base_sha') != expected_base_sha:
+            raise ValueError('expected_base_sha 与竞技场基线提交不一致')
 
-    cand = next((c for c in record.get('candidates') or [] if c.get('label') == label), None)
-    if cand is None:
-        raise KeyError(f'竞技场 {arena_id} 中不存在候选 {label}')
-    commit_sha = str(cand.get('commit_sha') or '')
-    if not _SHA_RE.fullmatch(commit_sha):
-        raise ValueError(f'候选 {label} 没有产生可合并的代码提交')
+        cand = next((c for c in record.get('candidates') or [] if c.get('label') == label), None)
+        if cand is None:
+            raise KeyError(f'竞技场 {arena_id} 中不存在候选 {label}')
+        commit_sha = str(cand.get('commit_sha') or '')
+        if not _SHA_RE.fullmatch(commit_sha):
+            raise ValueError(f'候选 {label} 没有产生可合并的代码提交')
 
-    current_head = _git(['rev-parse', 'HEAD'], cfg.task_workdir, cfg.git_exe).stdout.strip()
-    if current_head != expected_base_sha:
-        raise RuntimeError(f'工作区 HEAD 已变化（当前 {current_head[:12]}，期望 {expected_base_sha[:12]}），拒绝自动合并')
-    dirty = _git(['status', '--porcelain'], cfg.task_workdir, cfg.git_exe).stdout.strip()
-    if dirty:
-        raise RuntimeError('工作区存在未提交改动，请先清理或提交后再采纳竞技场方案')
+        current_head = _git(['rev-parse', 'HEAD'], cfg.task_workdir, cfg.git_exe).stdout.strip()
+        if current_head != expected_base_sha:
+            raise RuntimeError(f'工作区 HEAD 已变化（当前 {current_head[:12]}，期望 {expected_base_sha[:12]}），拒绝自动合并')
+        dirty = _git(['status', '--porcelain'], cfg.task_workdir, cfg.git_exe).stdout.strip()
+        if dirty:
+            raise RuntimeError('工作区存在未提交改动，请先清理或提交后再采纳竞技场方案')
 
-    anc = _git(['merge-base', '--is-ancestor', expected_base_sha, commit_sha],
-               cfg.task_workdir, cfg.git_exe, check=False)
-    if anc.returncode != 0:
-        raise RuntimeError('获胜提交不是基线提交的直接后代，拒绝合并')
+        anc = _git(['merge-base', '--is-ancestor', expected_base_sha, commit_sha],
+                   cfg.task_workdir, cfg.git_exe, check=False)
+        if anc.returncode != 0:
+            raise RuntimeError('获胜提交不是基线提交的直接后代，拒绝合并')
 
-    _git(['merge', '--ff-only', commit_sha], cfg.task_workdir, cfg.git_exe)
-    new_head = _git(['rev-parse', 'HEAD'], cfg.task_workdir, cfg.git_exe).stdout.strip()
-    record['applied_label'] = label
-    record['applied_commit_sha'] = commit_sha
-    record['applied_at'] = time.time()
-    atomic_write_json(result_path, record)
-    return {
-        'applied': True,
-        'arena_id': arena_id,
-        'label': label,
-        'commit_sha': commit_sha,
-        'head_sha': new_head,
-    }
+        _git(['merge', '--ff-only', commit_sha], cfg.task_workdir, cfg.git_exe)
+        new_head = _git(['rev-parse', 'HEAD'], cfg.task_workdir, cfg.git_exe).stdout.strip()
+        record['applied_label'] = label
+        record['applied_commit_sha'] = commit_sha
+        record['applied_at'] = time.time()
+        atomic_write_json(result_path, record)
+        return {
+            'applied': True,
+            'arena_id': arena_id,
+            'label': label,
+            'commit_sha': commit_sha,
+            'head_sha': new_head,
+        }
+    finally:
+        lock.release()
