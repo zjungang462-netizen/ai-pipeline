@@ -1,0 +1,16 @@
+{
+  "name": "Verify Orchestrator Precommit & Unit Tests",
+  "version": "1.0.0",
+  "description": "Run static configuration checks and unit test suite when orchestrator Python or dashboard static files change.",
+  "when": {
+    "type": "fileEdited",
+    "patterns": [
+      "agent-orchestrator/orchestrator/**/*.py",
+      "agent-orchestrator/orchestrator/dashboard/static/*"
+    ]
+  },
+  "then": {
+    "type": "runCommand",
+    "command": "python -m unittest discover -s agent-orchestrator/tests -p 'test_*.py'"
+  }
+}

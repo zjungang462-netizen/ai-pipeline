@@ -1,0 +1,84 @@
+# Kiroween 2026 Zero-Key End-to-End Showcase Pipeline
+# Demonstrates multi-agent stages (requirements -> design -> coding -> real test -> review + human approval)
+# using the built-in offline FakeAdapter and real Python test execution — no API keys or local CLIs required.
+
+# schema: root.task_workdir：任务工作目录，相对配置文件目录解析
+task_workdir = ".workbench/kiroween-demo-workspace"
+# schema: root.state_dir：状态目录，相对配置文件目录解析
+state_dir = ".workbench/kiroween-demo-state"
+
+[run_budget]
+# schema: run_budget.max_tokens：运行累计 token 上限；unlimited_tokens=true 时不设置
+max_tokens = 20000
+# schema: run_budget.max_duration_s：运行累计秒数上限；无人值守时必须为正数
+max_duration_s = 3600
+
+[adapters.architect]
+type = "fake"
+kind = "report"
+
+[adapters.coder]
+type = "fake"
+kind = "code"
+
+[adapters.reviewer]
+type = "fake"
+kind = "report"
+
+[[stages]]
+# schema: stages.name：唯一阶段名；字母数字、下划线、点或横线，禁止父目录段
+name = "requirements"
+# schema: stages.kind：code/report/review/test；verify 是 test 的兼容别名
+kind = "report"
+# schema: stages.adapter：非 test 阶段必填，引用具名适配器
+adapter = "architect"
+# schema: stages.timeout_s：单次执行超时，秒
+timeout_s = 30
+# schema: stages.prompt：非 test 阶段必填；提示词文件或内联文本
+prompt = "Analyze requirements and produce a structured specification artifact."
+
+[[stages]]
+# schema: stages.name：唯一阶段名；字母数字、下划线、点或横线，禁止父目录段
+name = "design"
+# schema: stages.kind：code/report/review/test；verify 是 test 的兼容别名
+kind = "report"
+# schema: stages.adapter：非 test 阶段必填，引用具名适配器
+adapter = "architect"
+# schema: stages.timeout_s：单次执行超时，秒
+timeout_s = 30
+# schema: stages.prompt：非 test 阶段必填；提示词文件或内联文本
+prompt = "Design module boundaries, state contracts, and verification criteria."
+
+[[stages]]
+# schema: stages.name：唯一阶段名；字母数字、下划线、点或横线，禁止父目录段
+name = "coding"
+# schema: stages.kind：code/report/review/test；verify 是 test 的兼容别名
+kind = "code"
+# schema: stages.adapter：非 test 阶段必填，引用具名适配器
+adapter = "coder"
+# schema: stages.timeout_s：单次执行超时，秒
+timeout_s = 30
+# schema: stages.prompt：非 test 阶段必填；提示词文件或内联文本
+prompt = "Generate implementation module and stage artifact for repository commit."
+
+[[stages]]
+# schema: stages.name：唯一阶段名；字母数字、下划线、点或横线，禁止父目录段
+name = "testing"
+# schema: stages.kind：code/report/review/test；verify 是 test 的兼容别名
+kind = "test"
+# schema: stages.timeout_s：单次执行超时，秒
+timeout_s = 30
+# schema: stages.test_cmd：test 必填的非空 argv 数组，其它类型禁止设置
+test_cmd = ["python", "-X", "utf8", "-c", "import os; assert os.path.exists('coding_output.py'); print('Real test execution passed: coding_output.py verified')"]
+
+[[stages]]
+# schema: stages.name：唯一阶段名；字母数字、下划线、点或横线，禁止父目录段
+name = "acceptance"
+# schema: stages.kind：code/report/review/test；verify 是 test 的兼容别名
+kind = "test"
+# schema: stages.approval：成功产物是否等待人工审批
+approval = true
+# schema: stages.timeout_s：单次执行超时，秒
+timeout_s = 20
+# schema: stages.test_cmd：test 必填的非空 argv 数组，其它类型禁止设置
+test_cmd = ["python", "-X", "utf8", "-c", "print('Ready for human approval gate in Web Workbench')"]

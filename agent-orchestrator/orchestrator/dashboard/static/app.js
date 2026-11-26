@@ -104,6 +104,16 @@ function renderRuns(){
  const filters=[];if(listFilters.q)filters.push('关键词：'+listFilters.q);if(listFilters.project_id)filters.push(projects.find(p=>p.id===listFilters.project_id)?.name||'项目筛选');if(listFilters.status!=='all')filters.push(labels[listFilters.status]||listFilters.status);
  $('filter-summary').textContent=filters.join(' · ');show($('active-filters'),filters.length>0);$('clear-filters').disabled=filters.length===0;
  $('collapse-days').disabled=!visible.length||[...groups.keys()].every(key=>collapsedDays.has(key));$('expand-days').disabled=![...groups.keys()].some(key=>collapsedDays.has(key));
+ updateWelcomeStats();
+}
+function updateWelcomeStats(){
+ if($('stat-projects'))$('stat-projects').textContent=String(projects.length);
+ if($('stat-runs'))$('stat-runs').textContent=String(runs.length)+(hasOlderRuns?'+':'');
+ if($('stat-done')){
+  const doneCnt=runs.filter(r=>r.lifecycle==='done').length;
+  const waitCnt=runs.filter(r=>['waiting_approval','waiting_owner','waiting_external'].includes(r.lifecycle)).length;
+  $('stat-done').textContent=`${doneCnt} / ${waitCnt}`;
+ }
 }
 
 async function select(key){
@@ -134,6 +144,23 @@ function openStream(key,cursor){
  });
 }
 function renderCLIActivity(r){const call=r.cli_activity?.[0];const box=$('cli-activity');if(!call){show(box,false);return;}const state=call.status==='running'?'处理中':call.status==='stopped'?'调用已停止，等待归档':'进程已退出，等待阶段确认';const quiet=Math.max(0,Math.floor(Date.now()/1000-(call.last_output_at||Date.now()/1000)));box.textContent=`${call.channel} · ${state} · ${call.tool||'等待模型输出'}${call.file?' · '+call.file:''} · 本次已报告 ${num(call.known_tokens)} tokens（${call.usage_complete?'待结算':'仅完成响应下界'}） · 缓存读取 ${num(call.cache_read_tokens)} · ${quiet} 秒无新输出。活动记录不代表任务完成。`;show(box);}
+function diagnoseStageError(msg){
+ const text=String(msg||'');
+ if(!text)return null;
+ if(/401|403|unauthorized|api[_\s-]?key|认证|鉴权|未登录|token.*invalid/i.test(text))
+  return {category:'鉴权与凭据错误',hint:'请检查对应适配器配置指定的环境变量（如 DEEPSEEK_API_KEY / DASHSCOPE_API_KEY）或本机 CLI 登录状态。'};
+ if(/version|版本|preflight|未验证|不支持.*版本|patch_probe/i.test(text))
+  return {category:'适配器版本/兼容性门禁',hint:'可先运行 python -m orchestrator.cli doctor 检查工具版本，或在配置中核对适配器类型与版本白名单。'};
+ if(/timeout|timed out|超时|deadline/i.test(text))
+  return {category:'执行或响应超时',hint:'可调大对应阶段的 timeout_s、缩短输入上下文或降低模型思考强度（reasoning_effort）。'};
+ if(/429|rate[_\s-]?limit|quota|余额|限流|budget/i.test(text))
+  return {category:'配额/限流/预算上限',hint:'请检查服务商速率限制或适当提高 [run_budget] 中的 max_tokens / max_duration_s。'};
+ if(/json|schema|review_verdict|协议/i.test(text))
+  return {category:'结构化输出协议校验未通过',hint:'建议启用「结构化审查 JSON」或调整审查模型参数，确保输出合法 JSON 对象。'};
+ if(/zero_diff|零净变更|empty_run|未产生.*修改/i.test(text))
+  return {category:'零净变更拦截',hint:'编码阶段未对白名单文件产生实际改动；请补充明确的文件修改目标后重试。'};
+ return {category:'阶段执行异常',hint:'请展开下方执行证据或查看 attempt 日志定位具体原因，修正配置后可点击「从此阶段重跑」。'};
+}
 function stagePlan(scope){return (scope.stages||[]).map(s=>(stages[s.name]||s.name)+'（'+({code:'开发',report:'报告',review:'审查',test:'固定测试'}[s.kind]||s.kind)+' / '+(adapterLabels[s.adapter_type]||s.adapter_type)+'）').join(' → ');}
 function scopeText(scope){return scope.summary+' 实际工作目录：'+scope.workdir+'。执行阶段：'+stagePlan(scope)+'。任务描述中的路径不会自动切换工作目录或增加阶段。';}
 function renderExecutionScope(r){const scope=r.execution_scope,box=$('execution-scope');show(box,!!scope);if(!scope)return;box.textContent=scope.matches_run_config===false?'无法核实当前配置与原运行一致，以下是当前登记范围，不能据此推断旧运行交付：'+scopeText(scope):scopeText(scope);}
@@ -143,7 +170,7 @@ function renderWaitContext(r){const box=$('wait-context'),items=Object.entries(r
 async function loadTaskProjects(derive){const generation=++taskProjectsGeneration;try{const list=(await api('/projects')).projects;if(generation!==taskProjectsGeneration)return;projects=list;applyProjects();if(derive)$('project-select').value=current?.project_id||'';taskProjectsFresh=true;renderTaskScope();if(typeof renderModelSettings==='function')renderModelSettings();}catch(error){if(generation!==taskProjectsGeneration)return;taskProjectsFresh=false;toast('无法刷新项目配置：'+error.message);renderTaskScope();}}
 function renderSnapshot(){const r=current;if(!r)return;if(typeof renderBudgetAlerts==='function')renderBudgetAlerts(r);renderCLIActivity(r);renderExecutionScope(r);$('breadcrumb').textContent=(projects.find(p=>p.id===r.project_id)?.name||'本地项目')+' / 任务房间';$('run-identifier').textContent=r.run_id.toUpperCase();$('task-title').textContent=r.task||r.run_id;$('task-title').title=r.task;$('task-description').textContent=r.task||r.run_id;$('lifecycle').className='pill '+r.lifecycle;$('lifecycle').textContent=r.lifecycle==='done'&&r.execution_scope?.mode==='fixed_tests'&&r.execution_scope.matches_run_config!==false?'固定测试已通过':labels[r.lifecycle]||r.lifecycle;const values=Object.values(r.stages);$('stage-summary').textContent=`${values.filter(s=>s.status==='done').length} / ${values.length} 个阶段完成`;$('updated').textContent='同步于 '+new Date().toLocaleTimeString('zh-CN',{hour:'2-digit',minute:'2-digit'});for(const action of ['pause','resume','cancel'])show($(action),r.capabilities[action]);show($('derive'),!!r.capabilities.derive);show($('discuss'),!!r.capabilities.discussion);$('derive').disabled=!r.capabilities.derive||['running','pending','recovering'].includes(r.lifecycle);$('discuss').disabled=!r.capabilities.discussion||['running','pending','recovering'].includes(r.lifecycle);const active=r.threads?.some(t=>['queued','running'].includes(t.status));if(active){for(const a of ['pause','resume','cancel','derive'])$(a).disabled=true;}else for(const a of ['pause','resume','cancel'])$(a).disabled=false;
  const notice=r.config_integrity==='changed'?'运行绑定的配置已变化，不能用新配置批准或继续旧任务。':r.lifecycle==='paused'?'已在检查点暂停。原任务有效期和预算保持不变。':r.lifecycle==='waiting_approval'?'请核对具体产物后批准。聊天留言不会代替审批。':!r.managed?'历史运行只读导入；本页面不会接管原进程或改写历史结论。':r.lifecycle==='cancelled'?'执行已停止。已有提交和已发生用量保留，取消不会撤销修改。':'';$('notice').textContent=notice;show($('notice'),!!notice);const critical=r.config_integrity==='changed'||r.lifecycle==='waiting_approval';$('scope-summary').textContent=critical?'需关注 · '+(r.config_integrity==='changed'?'运行配置已变化':'有产物等待审批'):'流程说明 · '+(r.execution_scope?.matches_run_config===false?'历史配置绑定待核实':r.execution_scope?.label||'执行范围');const panelKey=r.id+':'+critical;if(scopePanelKey!==panelKey){$('scope-panel').open=critical;scopePanelKey=panelKey;}
- $('stage-cards').replaceChildren(...Object.entries(r.stages).map(([name,s],i)=>{const box=el('article','stage-card'),line=el('div','stage-line');line.append(el('span','stage-number',String(i+1).padStart(2,'0')),el('span','',stages[name]||name),el('span','pill '+s.status,stageLabels[s.status]||s.status));box.append(line,el('div','stage-sub',`Attempt ${s.current_attempt??'—'} · 反馈轮次 ${r.rounds[name]||0}`));if(s.error)box.append(el('div','stage-error',s.error));if(r.pending_approvals[name]&&r.capabilities.approve){const button=el('button','approve','核对并批准此产物');button.onclick=()=>confirmAction('批准当前产物',`批准 ${stages[name]||name} 的第 ${s.current_attempt} 次尝试。后端将再次校验输入和产物哈希。`,note=>sendCommand('approve',{stage:name,target:{attempt:s.current_attempt,inputs_hash:s.inputs_hash,outputs_hash:s.outputs_hash},...(note?{note}:{})}),{withNote:true});box.append(button);}if(r.code_stages?.includes(name)){const diff=el('button','evidence-ref','查看代码差异 ↗');diff.onclick=()=>openDiff(name);box.append(diff);}if(r.capabilities.rerun){const rerun=el('button','evidence-ref','从此阶段重跑');rerun.onclick=()=>confirmAction('从阶段重跑','将使该阶段及下游产物失效。费用、总轮次和有效期不会重置。',()=>sendCommand('rerun',{stage:name,revision:r.revision}));box.append(rerun);}return box;}));
+ $('stage-cards').replaceChildren(...Object.entries(r.stages).map(([name,s],i)=>{const box=el('article','stage-card'),line=el('div','stage-line');box.dataset.stageCard=name;line.append(el('span','stage-number',String(i+1).padStart(2,'0')),el('span','',stages[name]||name),el('span','pill '+s.status,stageLabels[s.status]||s.status));box.append(line,el('div','stage-sub',`Attempt ${s.current_attempt??'—'} · 反馈轮次 ${r.rounds[name]||0}`));if(s.error){box.append(el('div','stage-error',s.error));const diag=diagnoseStageError(s.error);if(diag){const tip=el('div','stage-error-hint');tip.append(el('strong','',`[${diag.category}] `),el('span','',diag.hint));box.append(tip);}}if(r.pending_approvals[name]&&r.capabilities.approve){const button=el('button','approve','核对并批准此产物');button.onclick=()=>confirmAction('批准当前产物',`批准 ${stages[name]||name} 的第 ${s.current_attempt} 次尝试。后端将再次校验输入和产物哈希。`,note=>sendCommand('approve',{stage:name,target:{attempt:s.current_attempt,inputs_hash:s.inputs_hash,outputs_hash:s.outputs_hash},...(note?{note}:{})}),{withNote:true});box.append(button);}if(r.code_stages?.includes(name)){const diff=el('button','evidence-ref','查看代码差异 ↗');diff.onclick=()=>openDiff(name);box.append(diff);}if(r.capabilities.rerun){const rerun=el('button','evidence-ref','从此阶段重跑');rerun.onclick=()=>confirmAction('从阶段重跑','将使该阶段及下游产物失效。费用、总轮次和有效期不会重置。',()=>sendCommand('rerun',{stage:name,revision:r.revision}));box.append(rerun);}return box;}));
  const u=r.usage||{};$('reported').textContent=num(u.reported_tokens??u.tokens);$('reserved').textContent=num(u.reserved_tokens);$('token-total').textContent=num(u.tokens)+' tokens';$('token-progress').value=Math.min(100,(u.tokens||0)/(r.budget?.max_tokens||12000)*100);if($('model-calls')){$('model-calls').textContent=u.model_calls!=null?(r.budget?.max_model_calls?`${num(u.model_calls)} / ${num(r.budget.max_model_calls)}`:num(u.model_calls)):'—';}if($('unknown-calls')){$('unknown-calls').textContent=r.budget?.max_unknown_calls?`${num(u.unknown_calls||0)} / ${num(r.budget.max_unknown_calls)}`:num(u.unknown_calls||0);}if($('duration-total')){const sec=Math.round(Number(u.duration_s||0));$('duration-total').textContent=sec>=60?`${Math.floor(sec/60)}m ${sec%60}s`:`${sec}s`;}$('deadline').textContent=r.deadline?'任务有效期至 '+new Date(r.deadline*1000).toLocaleString('zh-CN'):'未记录运行有效期';$('artifact-count').textContent=r.artifacts.length+' 项';$('artifact-list').replaceChildren(...r.artifacts.map(a=>{const b=el('button','artifact-button',`${a.stage} · #${a.attempt} · ${a.name}`);b.title=a.id;b.onclick=()=>openArtifact(a.id);return b;}));if(!r.artifacts.length)$('artifact-list').append(el('p','empty','尚无已归档产物'));
  $('thread-list').replaceChildren(...r.threads.map(t=>{const item=el('div','thread-item');item.append(el('strong','',t.question),el('p','muted',`${labels[t.status]||t.status} · 上限 ${num(t.budget)} tokens`));if(t.result?.usage)item.append(el('p','muted',`已计入分析 ${num(t.result.usage.tokens)} tokens`));if(t.result?.reason)item.append(el('p','muted',t.result.reason));return item;}));if(!r.threads.length)$('thread-list').append(el('p','empty','未发起角色会诊'));}
 function copyText(text,label='已复制到剪贴板'){if(navigator.clipboard?.writeText){navigator.clipboard.writeText(text).then(()=>toast(label)).catch(()=>toast('复制失败，请手动选择复制'));}else toast('当前环境不支持自动复制');}
@@ -244,19 +271,40 @@ function renderStageStepper(r){
  const bar=$('stage-stepper');if(!bar)return;
  const entries=Object.entries(r.stages||{});
  if(!entries.length){show(bar,false);return;}
- bar.replaceChildren(...entries.map(([name,s],idx)=>{
+ const nodes=[];
+ entries.forEach(([name,s],idx)=>{
+  if(idx>0){
+   const prevStatus=entries[idx-1][1]?.status;
+   const conn=el('span','stepper-connector'+(prevStatus==='done'?' done':''),'→');
+   conn.ariaHidden='true';
+   nodes.push(conn);
+  }
   const step=el('div','stepper-item '+s.status);
   const dot=el('span','stepper-dot',s.status==='done'?'✓':s.status==='failed'?'!':s.status==='awaiting_approval'||s.status==='waiting_approval'?'审':String(idx+1));
   const info=el('div','stepper-info');
-  info.append(el('span','stepper-name',stages[name]||name),el('span','stepper-state',stageLabels[s.status]||s.status));
+  const attemptTag=s.current_attempt?` · #${s.current_attempt}`:'';
+  info.append(el('span','stepper-name',stages[name]||name),el('span','stepper-state',(stageLabels[s.status]||s.status)+attemptTag));
   step.append(dot,info);
   if(r.pending_approvals?.[name]&&r.capabilities?.approve){
    const approveBtn=el('button','stepper-approve','批准进入下一步');approveBtn.type='button';
    approveBtn.onclick=()=>confirmAction('批准当前产物',`批准 ${stages[name]||name} 的第 ${s.current_attempt} 次尝试。后端将再次校验输入和产物哈希。`,note=>sendCommand('approve',{stage:name,target:{attempt:s.current_attempt,inputs_hash:s.inputs_hash,outputs_hash:s.outputs_hash},...(note?{note}:{})}),{withNote:true});
    step.append(approveBtn);
   }
-  return step;
- }));
+  step.title='点击定位右侧阶段执行证据';
+  step.onclick=e=>{
+   if(e?.target?.classList?.contains?.('stepper-approve'))return;
+   $('room').classList.toggle('evidence-visible',true);
+   $('evidence-toggle').ariaExpanded='true';
+   const cards=$('stage-cards')?.children||[];
+   for(const c of cards){
+    const match=c.dataset?.stageCard===name;
+    c.classList?.toggle?.('stage-card-focus',match);
+    if(match&&typeof c.scrollIntoView==='function')c.scrollIntoView({behavior:'smooth',block:'nearest'});
+   }
+  };
+  nodes.push(step);
+ });
+ bar.replaceChildren(...nodes);
  show(bar,true);
 }
 const renderSnapshotBase=renderSnapshot;renderSnapshot=function(){renderSnapshotBase();if(current){renderWaitContext(current);renderStageStepper(current);const archBtn=$('archive-run');if(archBtn){archBtn.textContent=current.archived?'取消归档':'归档';archBtn.disabled=['pending','running','recovering'].includes(current.lifecycle);}}};
@@ -487,5 +535,82 @@ $('discuss').onclick=async()=>{if(typeof loadModelCatalog==='function')await loa
 document.querySelectorAll('[data-tab]').forEach(button=>button.onclick=()=>{rememberFeedView();tab=button.dataset.tab;document.querySelectorAll('[data-tab]').forEach(b=>{b.classList.toggle('active',b===button);b.ariaSelected=String(b===button);});const view=rememberedFeedViews.get(current?.id+':'+tab);renderFeed(!!view?.follow);if(!view?.follow)$('feed').scrollTop=view?.top||0;updateFeedNavigation();});
 $('older-events').onclick=loadEarlierEvents;
 if($('artifact-copy'))$('artifact-copy').onclick=()=>copyText($('artifact-body').textContent,'产物全文已复制');
+const THEMES=[{id:'light',label:'◐ 日间'},{id:'dark',label:'☾ 暗黑'},{id:'kiroween',label:'🎃 Kiroween'}];
+let currentThemeIndex=0;
+function applyTheme(index){
+ currentThemeIndex=((index%THEMES.length)+THEMES.length)%THEMES.length;
+ const t=THEMES[currentThemeIndex];
+ if(typeof document!=='undefined'&&document.documentElement?.setAttribute){
+  if(t.id==='light')document.documentElement.removeAttribute('data-theme');
+  else document.documentElement.setAttribute('data-theme',t.id);
+ }
+ if($('theme-toggle'))$('theme-toggle').textContent=t.label;
+ try{if(typeof localStorage!=='undefined')localStorage.setItem('wb_theme',t.id);}catch{}
+}
+try{if(typeof localStorage!=='undefined'){const saved=localStorage.getItem('wb_theme');const idx=THEMES.findIndex(x=>x.id===saved);if(idx>=0)applyTheme(idx);}}catch{}
+if($('theme-toggle'))$('theme-toggle').onclick=()=>applyTheme(currentThemeIndex+1);
+async function launchQuickDemo(){
+ newTask(false);
+ await loadTaskProjects(false);
+ const target=projects.find(p=>!p.unavailable&&(p.name.includes('kiroween')||p.name.includes('workbench')))||projects.find(p=>!p.unavailable);
+ if(target){$('project-select').value=target.id;renderTaskScope();}
+ $('task-input').value='【Kiroween 五阶段闭环演练】构建状态校验模块：生成需求分析与架构边界报告，输出实现代码并提交变更清单，通过真实 Python 退出码断言测试后进入人工审批门禁。';
+}
+if($('welcome-quick-demo'))$('welcome-quick-demo').onclick=()=>launchQuickDemo();
+if($('welcome-project'))$('welcome-project').onclick=()=>$('project-manage-open')?.click();
+if($('welcome-insights'))$('welcome-insights').onclick=()=>$('insights-open')?.click();
+let cmdIndex=0,cmdItems=[];
+function buildCmdItems(q){
+ const term=String(q||'').trim().toLowerCase();
+ const base=[
+  {tag:'ACTION',title:'＋ 新建流水线任务',sub:'创建并启动新的多阶段任务',run:()=>newTask(false)},
+  {tag:'DEMO',title:'⚡ 一键载入五阶段演练模板',sub:'自动选择可用配置并填入标准验收任务描述',run:()=>launchQuickDemo()},
+  {tag:'BUILDER',title:'⚙ 动态编排多节点项目',sub:'可视化增删排序 1~12 个模型与确定性测试节点',run:()=>$('project-manage-open')?.click()},
+  {tag:'ARENA',title:'⚔️ 打开用量看板与双模型竞技场',sub:'对比运行指标、失败经验库与双模型隔离比拼',run:()=>$('insights-open')?.click()},
+  {tag:'THEME',title:'🎨 切换界面主题（日间 / 暗黑 / Kiroween 紫金）',sub:'当前主题：'+THEMES[currentThemeIndex].label,run:()=>applyTheme(currentThemeIndex+1)},
+  ...(current?[
+   {tag:'ROOM',title:'💬 发起多模型圆桌会诊',sub:'围绕当前任务开启多角色交叉质询',run:()=>$('discuss')?.click()},
+   {tag:'EXPORT',title:'📥 导出当前任务 Markdown 报告',sub:'下载完整执行证据与用量报告',run:()=>$('export-report')?.click()}
+  ]:[])
+ ];
+ const runItems=runs.slice(0,30).map(r=>({tag:labels[r.lifecycle]||r.lifecycle,title:r.task||r.run_id,sub:`任务 ID: ${r.run_id}`,run:()=>select(r.id)}));
+ return [...base,...runItems].filter(item=>!term||item.title.toLowerCase().includes(term)||item.sub.toLowerCase().includes(term)||item.tag.toLowerCase().includes(term)).slice(0,18);
+}
+function renderCmdList(){
+ const box=$('cmd-list');if(!box)return;
+ cmdItems=buildCmdItems($('cmd-input')?.value||'');
+ if(cmdIndex>=cmdItems.length)cmdIndex=0;
+ box.replaceChildren(...cmdItems.map((item,idx)=>{
+  const row=el('button','cmd-item'+(idx===cmdIndex?' active':''));row.type='button';
+  const left=el('div','cmd-item-main');
+  left.append(el('span','cmd-item-title',item.title),el('span','cmd-item-sub',item.sub));
+  row.append(left,el('span','cmd-item-tag',item.tag));
+  row.onclick=()=>{$('cmd-dialog').close();item.run();};
+  return row;
+ }));
+ if(!cmdItems.length)box.append(el('p','empty','没有匹配的命令或任务'));
+}
+function openCmdPalette(){
+ if(!$('cmd-dialog'))return;
+ $('cmd-input').value='';cmdIndex=0;renderCmdList();
+ $('cmd-dialog').showModal();
+ if(typeof $('cmd-input').focus==='function')$('cmd-input').focus();
+}
+if($('cmd-open'))$('cmd-open').onclick=openCmdPalette;
+if($('cmd-input')){
+ $('cmd-input').oninput=()=>{cmdIndex=0;renderCmdList();};
+ $('cmd-input').onkeydown=e=>{
+  if(e.key==='ArrowDown'){e.preventDefault();cmdIndex=Math.min(cmdItems.length-1,cmdIndex+1);renderCmdList();}
+  else if(e.key==='ArrowUp'){e.preventDefault();cmdIndex=Math.max(0,cmdIndex-1);renderCmdList();}
+  else if(e.key==='Enter'&&cmdItems[cmdIndex]){e.preventDefault();const chosen=cmdItems[cmdIndex];$('cmd-dialog').close();chosen.run();}
+ };
+}
+if(typeof document!=='undefined'&&typeof document.addEventListener==='function'){
+ document.addEventListener('keydown',e=>{
+  if((e.ctrlKey||e.metaKey)&&e.key.toLowerCase()==='k'){
+   if(!$('app').classList.contains('hidden')){e.preventDefault();openCmdPalette();}
+  }
+ });
+}
 $('help-button').onclick=()=>toast('聊天建议不会覆盖测试与审批结论。暂停在检查点生效，取消不撤销提交。仅本机单用户；可写范围和预算由登记配置决定。');
 setInterval(()=>{if(csrf)refresh();},7000);connect();

@@ -2,10 +2,10 @@
 <html lang="zh-CN">
 <head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>流水线 · 协作工作台</title><link rel="stylesheet" href="/style.css"><script src="/app.js" defer></script><script src="/insights.js" defer></script></head>
 <body>
-<div id="login" class="login hidden"><div class="login-card"><div class="brand-mark">▥</div><h1>连接本地工作台</h1><p>请打开终端中本次启动的完整链接。会话只用于本机，不需要模型 API Key。</p><label>本地会话令牌<input id="token" autocomplete="off" type="password"></label><button id="connect" class="primary">建立会话</button><p id="login-error" role="alert"></p></div></div>
+<div id="login" class="login hidden"><div class="login-card"><div class="brand-mark" aria-hidden="true"><svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><circle cx="6" cy="6" r="2.5"/><circle cx="18" cy="6" r="2.5"/><circle cx="12" cy="18" r="2.5"/><path d="M8 7.5l3 8.5M16 7.5l-3 8.5M8.5 6h7"/></svg></div><h1>连接本地工作台</h1><p>请打开终端中本次启动的完整链接。会话只用于本机，不需要模型 API Key。</p><label>本地会话令牌<input id="token" autocomplete="off" type="password"></label><button id="connect" class="primary">建立会话</button><p id="login-error" role="alert"></p></div></div>
 <div id="app" class="app hidden">
   <aside class="sidebar">
-    <a class="brand" href="/"><span class="brand-mark">▥</span><span>流水线<span class="brand-sub">协作工作台</span></span></a>
+    <a class="brand" href="/"><span class="brand-mark" aria-hidden="true"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><circle cx="6" cy="6" r="2.5"/><circle cx="18" cy="6" r="2.5"/><circle cx="12" cy="18" r="2.5"/><path d="M8 7.5l3 8.5M16 7.5l-3 8.5M8.5 6h7"/></svg></span><span>AI Pipeline<span class="brand-sub">MULTI-AGENT WORKBENCH</span></span></a>
     <div class="workspace-label">本地工作空间 <span class="local-dot"></span></div>
     <button id="new-run" class="new-run">＋ 新建任务</button>
     <div class="sidebar-quick-actions"><button id="project-manage-open" class="secondary">新增项目</button><button id="insights-open" class="secondary">看板与优化</button></div>
@@ -21,8 +21,46 @@
     <footer class="sidebar-footer"><span id="connection-dot" class="connection-dot"></span><span id="connection">连接中</span><span class="version">LOCAL · v0.5.9</span></footer>
   </aside>
   <main>
-    <header class="topbar"><div class="topbar-location"><button id="sidebar-toggle" class="icon-button mobile-menu" aria-label="展开任务列表" aria-expanded="false">☰</button><span id="breadcrumb">工作空间 / 运行概览</span></div><div><span class="pill subtle">本地工作台 · v0.5.9</span><button id="help-button" class="icon-button" aria-label="工作台说明">ⓘ</button></div></header>
-    <section id="welcome" class="welcome"><div class="eyebrow">WORKFLOW / WORKBENCH · v0.5.9</div><h1>让每一步协作，<br>都有据可查。</h1><p>查看真实运行、参与关键决策，在容器隔离与预算边界内推进研发、会诊与受控发布。</p><button id="welcome-new" class="primary">＋ 开始一个任务</button><div class="welcome-cards"><article><span>01</span><h3>运行动态与证据</h3><p>跟踪阶段、测试与返工，封存每次尝试的产物哈希与代码差异。</p></article><article><span>02</span><h3>容器隔离与受控部署</h3><p>支持 Grok / 豆包 Docker 沙箱按声明文件原子回写，发布强制前置验收与审批绑定。</p></article><article><span>03</span><h3>逐 token 实时会诊</h3><p>固定快照、独立预算，支持角色流式发言，建议经验证后再采用。</p></article><article><span>04</span><h3>多维预算与状态通知</h3><p>支持 token、时长与模型/未知调用次数上限，关键节点可推送脱敏 Webhook。</p></article></div></section>
+    <header class="topbar"><div class="topbar-location"><button id="sidebar-toggle" class="icon-button mobile-menu" aria-label="展开任务列表" aria-expanded="false">☰</button><span id="breadcrumb">工作空间 / 运行概览</span></div><div class="topbar-right"><button id="cmd-open" type="button" class="kbd-btn" title="打开全局命令面板 (Ctrl+K)">⌘K 命令面板</button><button id="theme-toggle" type="button" class="theme-btn" title="切换日间 / 暗黑 / Kiroween 主题">◐ 日间</button><span class="pill subtle">EVIDENCE-FIRST · v0.5.9</span><button id="help-button" class="icon-button" aria-label="工作台说明" title="安全边界与操作说明">ⓘ</button></div></header>
+    <section id="welcome" class="welcome">
+  <div class="welcome-hero">
+    <div class="welcome-hero-copy">
+      <div class="hero-badge"><span class="hero-badge-dot"></span>MULTI-MODEL &amp; CLI ORCHESTRATOR · v0.5.9</div>
+      <h1>让每一步多智能体协作，<br><span class="hero-accent">都有硬核证据可查。</span></h1>
+      <p>编排 OpenAI 兼容 API 与 Claude / Codex / Qwen / Qoder / 反重力等本机编程 CLI，通过真实测试退出码、产物哈希指纹与人工审批门禁推进研发闭环。</p>
+      <div class="welcome-cta">
+        <button id="welcome-new" class="primary hero-primary">＋ 新建流水线任务</button>
+        <button id="welcome-quick-demo" type="button" class="secondary hero-demo">⚡ 一键载入五阶段演练模板</button>
+        <button id="welcome-project" type="button" class="secondary hero-secondary">⚙ 动态编排多节点项目</button>
+        <button id="welcome-insights" type="button" class="secondary hero-secondary">📊 用量看板与双模型竞技场</button>
+      </div>
+      <div id="welcome-stats" class="welcome-stats" aria-label="工作空间概览">
+        <div class="stat-tile"><span class="stat-label">已登记项目</span><b id="stat-projects" class="stat-val">—</b></div>
+        <div class="stat-tile"><span class="stat-label">已加载任务</span><b id="stat-runs" class="stat-val">—</b></div>
+        <div class="stat-tile"><span class="stat-label">已完成 / 待审批</span><b id="stat-done" class="stat-val">—</b></div>
+        <div class="stat-tile"><span class="stat-label">接入适配器</span><b class="stat-val">10 种</b></div>
+      </div>
+    </div>
+    <div class="welcome-flow-card" aria-label="标准证据流水线拓扑">
+      <div class="flow-card-head"><span>EVIDENCE-DRIVEN PIPELINE</span><span class="pill done">ZERO-TRUST VERIFY</span></div>
+      <div class="flow-nodes">
+        <div class="flow-node"><span class="flow-step">01</span><div><b>需求与架构设计</b><span>Architect · Report 产物指纹</span></div></div>
+        <div class="flow-arrow">↓</div>
+        <div class="flow-node"><span class="flow-step">02</span><div><b>多模型协同编码</b><span>Claude / Codex / Qwen · 净变更校验</span></div></div>
+        <div class="flow-arrow">↓</div>
+        <div class="flow-node"><span class="flow-step">03</span><div><b>无模型干预真实验证</b><span>Deterministic argv · 退出码取证</span></div></div>
+        <div class="flow-arrow">↓</div>
+        <div class="flow-node highlight"><span class="flow-step">04</span><div><b>独立审查与人工审批门禁</b><span>JSON Verdict + 哈希锁定发布</span></div></div>
+      </div>
+    </div>
+  </div>
+  <div class="welcome-cards">
+    <article><div class="card-top"><span class="card-num">01</span><span class="card-tag">ARTIFACT &amp; DIFF</span></div><h3>运行动态与不可变证据</h3><p>跟踪阶段流转、测试退出码与返工循环，封存每次尝试的输入输出 SHA-256 指纹与红绿代码差异。</p></article>
+    <article><div class="card-top"><span class="card-num">02</span><span class="card-tag">SANDBOX &amp; GATES</span></div><h3>容器隔离与受控部署</h3><p>支持 Grok / 豆包 Docker 沙箱按声明白名单原子回写，发布强制前置验收与人工审批绑定。</p></article>
+    <article><div class="card-top"><span class="card-num">03</span><span class="card-tag">ROUNDTABLE</span></div><h3>多模型圆桌实时会诊</h3><p>支持兼容 API 与只读 CLI 混合席位多轮交叉质询，独立分析预算，建议经验证后再注入任务。</p></article>
+    <article><div class="card-top"><span class="card-num">04</span><span class="card-tag">TELEMETRY &amp; ARENA</span></div><h3>多维预算与双模型竞技场</h3><p>实时追踪 token、时长与调用次数上限；支持隔离 Git Worktree 双模型同题比拼并一键采纳胜出方案。</p></article>
+  </div>
+</section>
     <section id="room" class="room hidden">
       <div class="room-header"><div class="room-title"><div class="eyebrow" id="run-identifier"></div><h1 id="task-title"></h1><div class="room-meta"><span id="lifecycle" class="pill"></span><span id="stage-summary"></span><span id="updated"></span></div></div><div class="actions"><button id="pause" class="secondary">Ⅱ 暂停</button><button id="resume" class="secondary">▷ 继续</button><button id="cancel" class="danger-outline">停止执行</button><button id="export-report" class="secondary">导出报告</button><button id="archive-run" class="secondary">归档</button><button id="derive" class="secondary">创建后续任务 ↗</button></div></div>
       <div id="stage-stepper" class="stage-stepper hidden" aria-label="阶段进度条"></div>
@@ -46,5 +84,6 @@
 <dialog id="discussion-dialog" class="task-dialog"><form id="discussion-form"><div class="dialog-top task-dialog-head"><div><div class="eyebrow">MULTI-MODEL ROUNDTABLE</div><h2>多模型圆桌直接对话</h2></div><button type="button" class="icon-button close-dialog" aria-label="关闭">×</button></div><div class="task-dialog-body"><p class="form-note">支持「兼容 API」与「反重力 CLI（严格只读 plan+sandbox）」混合席位多轮交叉质询；讨论进行中可在房间留言框随时插话，系统会在下一轮自动注入您的引导。</p><label class="task-desc-field">议题（支持用 @相对路径 直接附带工作区源码，如 @package.json）<textarea id="question" rows="4" required maxlength="4000" placeholder="例如：请围绕 @App.vue 讨论 MQTT 断线重连是否存在竞态？给出最小修复方案。"></textarea></label><div class="roundtable-seats"><div class="pm-stages-head"><span>参与席位、后端工具与模型（勾选 1~4 个角色）</span></div><div class="seat-row"><label class="pm-inline-check"><input type="checkbox" id="role-architect"><span>架构师 (architect)</span></label><select id="adapter-architect" aria-label="架构师后端"><option value="">自动后端</option><option value="openai_compat">兼容 API</option><option value="cli_agy">反重力 CLI (只读)</option></select><input id="model-architect" list="dl-models-architect" maxlength="160" placeholder="默认沿用配置模型"><datalist id="dl-models-architect"></datalist></div><div class="seat-row"><label class="pm-inline-check"><input type="checkbox" id="role-developer" checked><span>开发者 (developer)</span></label><select id="adapter-developer" aria-label="开发者后端"><option value="">自动后端</option><option value="openai_compat">兼容 API</option><option value="cli_agy">反重力 CLI (只读)</option></select><input id="model-developer" list="dl-models-developer" maxlength="160" placeholder="默认沿用配置模型"><datalist id="dl-models-developer"></datalist></div><div class="seat-row"><label class="pm-inline-check"><input type="checkbox" id="role-skeptic" checked><span>红队质疑者 (skeptic)</span></label><select id="adapter-skeptic" aria-label="红队后端"><option value="">自动后端</option><option value="openai_compat">兼容 API</option><option value="cli_agy">反重力 CLI (只读)</option></select><input id="model-skeptic" list="dl-models-skeptic" maxlength="160" placeholder="建议用不同模型挑刺"><datalist id="dl-models-skeptic"></datalist></div><div class="seat-row"><label class="pm-inline-check"><input type="checkbox" id="role-reviewer" checked><span>审查者 (reviewer)</span></label><select id="adapter-reviewer" aria-label="审查者后端"><option value="">自动后端</option><option value="openai_compat">兼容 API</option><option value="cli_agy">反重力 CLI (只读)</option></select><input id="model-reviewer" list="dl-models-reviewer" maxlength="160" placeholder="默认沿用配置模型"><datalist id="dl-models-reviewer"></datalist></div></div><div class="task-top-grid"><label>交叉辩论轮次<select id="discussion-rounds"><option value="1">1 轮（快速各自发言）</option><option value="2" selected>2 轮（交叉质询反驳 · 推荐）</option><option value="3">3 轮（深度多轮收敛）</option></select></label><label>会诊预算上限（tokens）<input id="discussion-budget" type="number" min="1000" max="24000" step="500" value="8000"></label></div><label class="task-desc-field">附加工作区只读文件（可选，逗号分隔，最多 4 个）<input id="discussion-files" maxlength="400" placeholder="例如：package.json, vite.config.js"></label><label class="unlimited-option"><input id="discussion-consensus" type="checkbox" checked><span>讨论结束后自动生成结构化「圆桌共识总结」</span></label><p class="form-note subtle-note">活动任务需先暂停。对已结束任务提问使用独立分析预算，不改写原 metrics。</p></div><div class="dialog-actions task-dialog-foot"><button type="button" class="secondary close-dialog">取消</button><button type="submit" class="primary">发起圆桌对话</button></div></form></dialog>
 <dialog id="artifact-dialog" class="artifact-dialog"><div class="dialog-top"><div><div class="eyebrow" id="artifact-tag"></div><h2 id="artifact-title">产物</h2></div><div class="artifact-head-actions"><button type="button" id="artifact-copy" class="secondary small">复制全文</button><button class="icon-button close-dialog" aria-label="关闭">×</button></div></div><p id="artifact-integrity" class="form-note"></p><pre id="artifact-body"></pre><div id="artifact-diff-view" class="diff-view hidden"></div></dialog>
 <dialog id="confirm-dialog"><form id="confirm-form"><div class="dialog-top"><h2 id="confirm-title"></h2><button type="button" class="icon-button close-dialog" aria-label="关闭">×</button></div><p id="confirm-body"></p><label id="confirm-note-wrap" class="hidden">审批附注 / 修订指令（可选，下游阶段优先遵守）<textarea id="confirm-note" rows="3" maxlength="4000" placeholder="例如：忽略第 1 条依赖降级，只执行第 2、3 条修复…"></textarea></label><div class="dialog-actions"><button type="button" class="secondary close-dialog">返回</button><button id="confirm-submit" class="primary" type="submit">确认操作</button></div></form></dialog>
+<dialog id="cmd-dialog" class="cmd-dialog"><div class="cmd-head"><span class="cmd-icon">⌕</span><input id="cmd-input" type="search" autocomplete="off" placeholder="输入命令或搜索历史任务名称 / ID… (↑↓ 选择，Enter 执行)" aria-label="全局命令搜索"><button type="button" class="icon-button close-dialog" aria-label="关闭">×</button></div><div id="cmd-list" class="cmd-list" role="listbox" aria-label="可执行命令与任务"></div><div class="cmd-foot"><span><b>↑↓</b> 移动高亮</span><span><b>Enter</b> 立即执行</span><span><b>Esc</b> 关闭面板</span></div></dialog>
 <div id="toast" class="toast hidden" role="alert"></div>
 </body></html>

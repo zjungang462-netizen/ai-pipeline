@@ -139,10 +139,25 @@ class Handler(BaseHTTPRequestHandler):
             if path == '/api/health' and method == 'GET':
                 return self.respond({'status': 'ok', 'pid': os.getpid(), 'version': self.app.version})
             if method == 'GET' and path in ('/', '/app.js', '/insights.js', '/style.css'):
+                import gzip
+                import hashlib
                 name = {'/': 'index.html', '/app.js': 'app.js', '/insights.js': 'insights.js', '/style.css': 'style.css'}[path]
-                body = (Path(__file__).parent / 'static' / name).read_bytes()
+                raw_body = (Path(__file__).parent / 'static' / name).read_bytes()
+                etag = f'"{hashlib.sha256(raw_body).hexdigest()[:16]}"'
+                if self.headers.get('If-None-Match') == etag:
+                    self.send_response(304)
+                    self.headers_common()
+                    self.send_header('ETag', etag)
+                    self.end_headers()
+                    return
+                use_gzip = 'gzip' in self.headers.get('Accept-Encoding', '').lower() and len(raw_body) >= 1024
+                body = gzip.compress(raw_body, compresslevel=6) if use_gzip else raw_body
                 self.send_response(200)
                 self.headers_common()
+                self.send_header('ETag', etag)
+                self.send_header('Vary', 'Accept-Encoding')
+                if use_gzip:
+                    self.send_header('Content-Encoding', 'gzip')
                 self.send_header('Content-Type', {'index.html': 'text/html; charset=utf-8',
                                                   'app.js': 'text/javascript; charset=utf-8',
                                                   'insights.js': 'text/javascript; charset=utf-8',

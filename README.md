@@ -1,3 +1,6 @@
+> **English Documentation / Kiroween 2026 Judges**: See **[README.en.md](README.en.md)** for the English overview, `/.kiro` architecture breakdown, and 3-step zero-key quickstart (`kiroween-demo.example.toml`).
+> **历史审查与观测文档归档**：原根目录下的各轮审查报告与观测记录已整理归档至 [`docs/archive/`](docs/archive/)。
+
 # AI Pipeline
 
 ## 当前开发入口
