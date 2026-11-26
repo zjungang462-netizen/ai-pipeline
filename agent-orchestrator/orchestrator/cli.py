@@ -379,11 +379,18 @@ def cmd_lessons_approve(args) -> int:
 def cmd_route_recommend(args) -> int:
     from .model_router import recommend_adapters
 
+    paired_results = getattr(args, 'paired_results', None)
+    if paired_results and args.stage_kind not in (None, 'code'):
+        raise ValueError('--paired-results 仅适用于编码路由')
     report = recommend_adapters(
         Path(args.state_dir),
         stage_kind=args.stage_kind,
         min_runs=args.min_runs,
     )
+    if paired_results:
+        from .route_shadow import review_paired_results
+
+        report['shadow_comparison'] = review_paired_results(Path(paired_results), report)
     print(json.dumps(report, ensure_ascii=False, indent=2))
     return 0
 
@@ -511,6 +518,7 @@ def main(argv=None) -> int:
     sp.add_argument("--state-dir", required=True)
     sp.add_argument("--stage-kind", choices=("code", "report", "review"))
     sp.add_argument("--min-runs", type=int, default=2)
+    sp.add_argument("--paired-results", type=Path, help="与一份真实配对评测 results.json 做只读编码路由对照")
     sp.set_defaults(func=cmd_route_recommend)
 
     sp = sub.add_parser("approve-tune", help="批准提案，只写入新的配置副本")

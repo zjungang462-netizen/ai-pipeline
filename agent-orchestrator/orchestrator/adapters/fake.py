@@ -62,3 +62,15 @@ class FakeAdapter(Adapter):
         return Result(ok=True, exit_code=0, channel=self.channel,
                       text=f"{ctx.stage} 完成", changed_files=[str(src)],
                       tool_version="fake-1.0")
+
+
+from .spec import AdapterSpec, Capabilities, OptionSpec  # noqa: E402
+
+SPEC = AdapterSpec(
+    type="fake",
+    factory=FakeAdapter,
+    options=(
+        OptionSpec("kind", str, None, "固定产出类型；缺省按阶段名推断", choices=("report", "code", "review")),
+    ),
+    capabilities=Capabilities(file_tools=True, usage_reporting="unknown"),
+)

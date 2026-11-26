@@ -23,7 +23,7 @@ MAX_OUTPUT = 20000        # 落盘输出上限（字符）
 
 
 def run_test_cmd(cmd: list[str], workdir: Path, timeout_s: int = 600,
-                 extra_env: list[str] | None = None) -> dict[str, Any]:
+                 extra_env: list[str] | None = None, *, cancel_requested=None) -> dict[str, Any]:
     """执行测试命令，返回确定性记录。不经过 shell，避免注入。"""
     if not cmd:
         return {"ok": False, "exit_code": -1, "cmd": [], "duration_s": 0.0,
@@ -74,9 +74,16 @@ def run_test_cmd(cmd: list[str], workdir: Path, timeout_s: int = 600,
             thread.start()
         err = None
         try:
-            proc.wait(timeout=timeout_s)
-            for thread in threads:
-                thread.join(max(0, timeout_s - (time.monotonic() - t0)))
+            if cancel_requested is None:
+                proc.wait(timeout=timeout_s)
+                for thread in threads:
+                    thread.join(max(0, timeout_s - (time.monotonic() - t0)))
+            else:
+                deadline = t0 + timeout_s
+                while proc.poll() is None or any(thread.is_alive() for thread in threads):
+                    if cancel_requested() or time.monotonic() >= deadline:
+                        raise subprocess.TimeoutExpired(cmd, timeout_s)
+                    time.sleep(.05)
             if any(thread.is_alive() for thread in threads):
                 raise subprocess.TimeoutExpired(cmd, timeout_s)
         except subprocess.TimeoutExpired:
@@ -101,7 +108,7 @@ def run_test_cmd(cmd: list[str], workdir: Path, timeout_s: int = 600,
                 pass
             for thread in threads:
                 thread.join(1)
-            err = f"测试超时（{timeout_s}s）"
+            err = "测试已取消" if cancel_requested and cancel_requested() else f"测试超时（{timeout_s}s）"
         decoded = [bytes(t).decode("utf-8", errors="replace") for t in tails]
         stream_truncated = any(c > MAX_OUTPUT * 4 for c in counts) or any(len(s) > MAX_OUTPUT for s in decoded)
         stdout, stderr = (s[-MAX_OUTPUT:] for s in decoded)

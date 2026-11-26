@@ -118,6 +118,8 @@ class Config:
     watch_enforce: bool = config_field('根外快照变化是否判失败，默认仅告警', default=False)
     source_path: Path | None = None
     source_hash: str = ""
+    # 适配器参数的非致命问题（如未知键）；doctor 与工作台展示，不参与比较与指纹。
+    adapter_warnings: list = field(default_factory=list, compare=False, repr=False)
     tune_proposal_id: str = config_field('已批准调优提案标识；空或 tune- 加 12 位十六进制', default='')
     autonomy: Autonomy = config_field('显式预授权的无人值守策略', default_factory=Autonomy)
     autotune: AutoTune = config_field('有界的后续运行策略选择', default_factory=AutoTune)
@@ -225,19 +227,22 @@ def parse_config(raw: dict[str, Any], base_dir: Path | None = None) -> Config:
                  and bool(re.fullmatch(r"tune-[0-9a-f]{12}", raw["tune_proposal_id"])),
                  "tune_proposal_id 必须是合法的提案标识")
     adapters: dict[str, AdapterConfig] = {}
+    adapter_warnings: list = []
     for name, opts in adapters_raw.items():
         _require(isinstance(opts, dict), f"适配器 {name} 配置必须是表")
         atype = opts.get("type")
         _require(isinstance(atype, str) and atype in KNOWN_ADAPTER_TYPES,
                  f"适配器 {name} 的 type 非法或缺失: {atype!r}（已知: {sorted(KNOWN_ADAPTER_TYPES)}）")
         options = {k: v for k, v in opts.items() if k != "type"}
-        if atype == "openai_compat":
-            _require(isinstance(options.get("base_url"), str) and options["base_url"],
-                     f"适配器 {name} 缺少 base_url")
-            _require(isinstance(options.get("model"), str) and options["model"],
-                     f"适配器 {name} 缺少 model")
-            _require(isinstance(options.get("api_key_env"), str) and options["api_key_env"],
-                     f"适配器 {name} 缺少 api_key_env（只存环境变量名，不存密钥）")
+        from .adapters import registry as _adapter_registry
+        from .adapters.spec import validate_options as _validate_adapter_options
+        spec = _adapter_registry.get(atype)
+        if spec is not None:
+            # 只校验，不改写 options：保持原始键集合，输入指纹与已有运行一致。
+            _, issues = _validate_adapter_options(spec, name, options)
+            errors = [str(i) for i in issues if i.level == "error"]
+            _require(not errors, f"适配器 {name} 参数非法: " + "；".join(errors))
+            adapter_warnings.extend(i for i in issues if i.level != "error")
         adapters[name] = AdapterConfig(name=name, type=atype, options=options)
 
     # 阶段
@@ -380,6 +385,7 @@ def parse_config(raw: dict[str, Any], base_dir: Path | None = None) -> Config:
         autonomy=autonomy,
         autotune=autotune,
         review_coverage=coverage,
+        adapter_warnings=adapter_warnings,
     )
 
 

@@ -11,9 +11,13 @@ ROOT=Path(__file__).resolve().parents[1]
 sys.path.insert(0,str(ROOT))
 from orchestrator.config import CONFIG_SECTIONS
 from orchestrator.schema import describe, render_table
+from orchestrator.adapters import registry
+from orchestrator.adapters.spec import render_adapter_tables
 
 START='<!-- CONFIG_SCHEMA:START -->'
 END='<!-- CONFIG_SCHEMA:END -->'
+ADAPTER_START='<!-- ADAPTER_SCHEMA:START -->'
+ADAPTER_END='<!-- ADAPTER_SCHEMA:END -->'
 PREFIX='# schema: '
 
 
@@ -39,14 +43,24 @@ def annotated_example(text):
     return result
 
 
+def _replace_block(text, start, end, body, *, required):
+    count=(text.count(start),text.count(end))
+    if count==(0,0) and not required:
+        return text
+    if count!=(1,1):
+        raise ValueError(f'README 必须含有唯一的 {start} 生成标记')
+    before,rest=text.split(start)
+    _,after=rest.split(end)
+    return before+start+'\n'+body+end+after
+
+
 def generated_files(root=ROOT):
     root=Path(root)
     path=root/'README.md';text=path.read_text(encoding='utf8')
-    if text.count(START)!=1 or text.count(END)!=1:
-        raise ValueError('README 必须含有唯一的配置表生成标记')
-    before,rest=text.split(START)
-    _,after=rest.split(END)
-    result={path:before+START+'\n'+render_table(CONFIG_SECTIONS)+END+after}
+    text=_replace_block(text,START,END,render_table(CONFIG_SECTIONS),required=True)
+    # 适配器表标记可选：没有标记的 README（如测试临时目录）不生成该表。
+    text=_replace_block(text,ADAPTER_START,ADAPTER_END,render_adapter_tables(registry.specs()),required=False)
+    result={path:text}
     result.update({p:annotated_example(p.read_text(encoding='utf8')) for p in sorted(root.glob('*.example.toml'))})
     return result
 

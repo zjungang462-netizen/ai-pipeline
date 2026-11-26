@@ -248,3 +248,22 @@ class DoubaoAdapter(CLIAdapter):
             result = self._unknown_version(proc, '豆包未返回唯一的成功终态')
             result.usage = usage
             return result
+
+
+from .spec import COMMON_CLI, AdapterSpec, Capabilities, OptionSpec, proxy_option  # noqa: E402
+from .verified_runtimes import VERIFIED_RUNTIME_CATALOG as _CATALOG  # noqa: E402
+
+SPEC = AdapterSpec(
+    type="cli_doubao",
+    factory=DoubaoAdapter,
+    options=COMMON_CLI + (
+        OptionSpec("binary", str, None, "已验证 Linux 程序的绝对路径", blank_none=True),
+        OptionSpec("image", str, None, "容器镜像", blank_none=True),
+        OptionSpec("machine_id", str, None, "machine-id 文件绝对路径", blank_none=True),
+        OptionSpec("profile", str, None, "Docker 卷名", blank_none=True),
+        proxy_option(),
+        OptionSpec("runtime_version", str, None, "已验证运行时版本", blank_none=True),
+    ),
+    capabilities=Capabilities(file_tools=True),
+    verified_versions=tuple(r.short_version or r.version for r in _CATALOG["cli_doubao"].values()),
+)

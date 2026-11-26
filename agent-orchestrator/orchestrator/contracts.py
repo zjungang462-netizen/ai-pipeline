@@ -10,7 +10,7 @@ from .schema import config_field
 from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 
 class ErrorKind(str, Enum):
@@ -126,6 +126,7 @@ class RunContext:
     max_repeated_reads: int = 4
     context_files: tuple[str, ...] = ()
     editable_files: tuple[str, ...] = ()
+    cancel_requested: Callable[[], bool] | None = None
 
 
 @dataclass

@@ -211,3 +211,20 @@ class GrokAdapter(CLIAdapter):
             result.parse_unknown = True
             result.stderr = (result.stderr + '\nGrok 未返回唯一的成功终态和文件回执').strip()
         return result
+
+
+from .spec import COMMON_CLI, AdapterSpec, Capabilities, OptionSpec, proxy_option  # noqa: E402
+from .verified_runtimes import VERIFIED_RUNTIME_CATALOG as _CATALOG  # noqa: E402
+
+SPEC = AdapterSpec(
+    type="cli_grok",
+    factory=GrokAdapter,
+    options=COMMON_CLI + (
+        OptionSpec("binary", str, None, "已验证 Linux 程序的绝对路径", blank_none=True),
+        OptionSpec("auth_file", str, None, "认证文件绝对路径", blank_none=True),
+        proxy_option(),
+        OptionSpec("runtime_version", str, None, "已验证运行时版本", blank_none=True),
+    ),
+    capabilities=Capabilities(file_tools=True),
+    verified_versions=tuple(r.short_version or r.version for r in _CATALOG["cli_grok"].values()),
+)

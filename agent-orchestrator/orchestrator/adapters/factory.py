@@ -3,29 +3,22 @@ from __future__ import annotations
 
 from ..config import AdapterConfig
 from .base import Adapter
-from .fake import FakeAdapter
-from .openai_compat import OpenAICompatAdapter
+from . import registry
+from .spec import validate_options
 
 
 def build_adapter(cfg: AdapterConfig, kind: str = "report") -> Adapter:
     t = cfg.type
-    o = cfg.options
-    if t == "fake":
-        return FakeAdapter(name=cfg.name, kind=o.get("kind"))
-    if t == "openai_compat":
-        return OpenAICompatAdapter(
-            name=cfg.name, base_url=o["base_url"], model=o["model"],
-            api_key_env=o["api_key_env"], kind=kind,
-            temperature=float(o.get("temperature", 0.2)),
-            max_tokens=o.get("max_tokens"),
-            timeout_s=int(o.get("timeout_s", 120)),
-            reasoning_effort=o.get('reasoning_effort'), thinking=o.get('thinking'),
-            review_json_mode=o.get('review_json_mode', False),
-        )
-    # CLI 适配器在第 3 阶段接入
-    if t.startswith("cli_"):
-        from . import cli_registry
-        return cli_registry.build(cfg, kind)
+    spec = registry.get(t)
+    if spec is not None:
+        # 按声明校验并填充默认值；未知键只在 parse_config/doctor 中告警，这里忽略。
+        options, issues = validate_options(spec, cfg.name, cfg.options)
+        errors = [i for i in issues if i.level == "error"]
+        if errors:
+            raise ValueError("；".join(str(i) for i in errors))
+        if spec.kind_aware:
+            options["kind"] = kind
+        return spec.factory(name=cfg.name, **options)
     raise ValueError(f"未知适配器类型: {t}")
 
 

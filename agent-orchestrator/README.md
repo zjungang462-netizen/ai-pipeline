@@ -83,7 +83,7 @@ Claude Code 2.1.325 / 2.1.328 可作为文件工具代理接入你现有的 Deep
 | `autotune 配置` | 在显式预授权范围内选择后续策略 |
 | `lessons-propose --state-dir 目录 [--output 文件]` | 扫描历史审查/测试失败，生成带哈希的高频经验提案 |
 | `lessons-approve --state-dir 目录 --proposal 文件` | 校验提案哈希并批准写入 `approved_lessons.json` |
-| `route-recommend --state-dir 目录 [--stage-kind 类型]` | 基于不可变 `metrics.json` 按阶段类型推荐模型与工具 |
+| `route-recommend --state-dir 目录 [--stage-kind 类型]` | 基于不可变 `metrics.json` 推荐模型与工具。编码阶段可传入 `--paired-results` 重算配对评测对照 |
 | `state-migrate --state-file 文件 [--apply]` | 契约化 schema 迁移（默认干跑，仅 `--apply` 备份后原子写入） |
 | `deploy 配置 --run-id ID --require-stage 阶段 -- 命令` | 受控部署执行器（默认干跑，`--apply` 校验审批哈希绑定） |
 | `worker-serve --worker-id ID --secret-env 变量` | 启动受控远程 Worker HMAC 服务端 |
@@ -180,6 +180,87 @@ CLI 子进程使用环境白名单；额外凭据变量须在 `extra_env` 显式
 
 Qwen 0.26.0 新调用不加载用户/项目自定义配置、hooks、技能、MCP 或历史会话；兼容连接由显式 `extra_env` 提供，模型可由配置覆盖。编码使用 auto-edit，报告/审查使用 plan；显式禁用 shell、网络、目标管理和子代理工具，报告另禁 edit，真实编码初始化清单只有 read_file/edit。此版本 safe mode 忽略 core-tools，因此不把该参数当作限制依据。任务测试仍由引擎独立执行。反重力使用自身 sandbox 和 plan/accept-edits 模式；其 init 仍列出广泛内置工具，不能声称是 OS 文件沙箱或文件工具白名单。
 
+### 适配器参数与能力
+
+以下两表由各适配器模块的 `SPEC` 声明生成（`scripts/generate_config_docs.py`）。配置解析、`doctor`、适配器构建和工作台模型覆盖使用同一份声明。类型或取值错误会报错；未知参数当前只警告，0.7.0 起改为报错。已验证版本仅供参考，未知版本仍由各适配器在调用模型前拦截。
+
+<!-- ADAPTER_SCHEMA:START -->
+| 适配器 | 参数 | 类型 | 默认值 | 工作台可覆盖 | 范围/说明 |
+|---|---|---|---|---|---|
+| `fake` | `kind` | `str` | — |  | 取值 report/code/review；固定产出类型；缺省按阶段名推断 |
+| `openai_compat` | `base_url` | `str` | 必填 |  | 不含凭据的 HTTP(S) 端点 |
+| `openai_compat` | `model` | `str` | 必填 | 是 | 模型标识 |
+| `openai_compat` | `api_key_env` | `str` | 必填 |  | 只填环境变量名；凭据环境变量名；只存变量名，不存密钥 |
+| `openai_compat` | `temperature` | `float` | `0.2` |  | >= 0；采样温度 |
+| `openai_compat` | `max_tokens` | `int` | — |  | > 0；单次输出 token 上限 |
+| `openai_compat` | `timeout_s` | `int` | `120` |  | > 0；单次请求超时（秒） |
+| `openai_compat` | `reasoning_effort` | `str` | — | 是 | 取值 none/low/medium/high/xhigh；思考强度；须由端点支持 |
+| `openai_compat` | `thinking` | `str` | — | 是 | 取值 enabled/disabled；思考开关；须由端点支持 |
+| `openai_compat` | `review_json_mode` | `bool` | `false` | 是 | 审查阶段约束输出为 JSON 对象 |
+| `cli_codex` | `exe` | `str` | — |  | 可执行文件绝对路径或 PATH 命令名 |
+| `cli_codex` | `extra_env` | `list` | — |  | 透传给工具的环境变量名 |
+| `cli_codex` | `timeout_s` | `int` | `300` |  | > 0；单次调用超时（秒） |
+| `cli_codex` | `model` | `str` | — | 是 | 模型标识；空表示工具默认 |
+| `cli_codex` | `isolate_config` | `bool` | `false` |  | 使用隔离的 Codex 配置目录 |
+| `cli_codex` | `reasoning_effort` | `str` | — | 是 | 取值 none/low/medium/high/xhigh；思考强度（仅列已验证取值） |
+| `cli_qwen` | `exe` | `str` | — |  | 可执行文件绝对路径或 PATH 命令名 |
+| `cli_qwen` | `extra_env` | `list` | — |  | 透传给工具的环境变量名 |
+| `cli_qwen` | `timeout_s` | `int` | `300` |  | > 0；单次调用超时（秒） |
+| `cli_qwen` | `model` | `str` | — | 是 | 模型标识；空表示工具默认 |
+| `cli_dsh` | `exe` | `str` | — |  | 可执行文件绝对路径或 PATH 命令名 |
+| `cli_dsh` | `extra_env` | `list` | — |  | 透传给工具的环境变量名 |
+| `cli_dsh` | `timeout_s` | `int` | `300` |  | > 0；单次调用超时（秒） |
+| `cli_dsh` | `permission_mode` | `str` | `"read-only"` |  | 取值 read-only/workspace-write；文件权限 |
+| `cli_dsh` | `proxy_url` | `str` | — |  | 不含凭据的 HTTP(S) 代理 |
+| `cli_agy` | `exe` | `str` | — |  | 可执行文件绝对路径或 PATH 命令名 |
+| `cli_agy` | `extra_env` | `list` | — |  | 透传给工具的环境变量名 |
+| `cli_agy` | `timeout_s` | `int` | `300` |  | > 0；单次调用超时（秒） |
+| `cli_agy` | `model` | `str` | — | 是 | 模型标识；空表示工具默认 |
+| `cli_agy` | `proxy_url` | `str` | — |  | 不含凭据的 HTTP(S) 代理 |
+| `cli_agy` | `allow_patch_probe` | `bool` | `false` |  | 允许探测同系列未登记补丁版本 |
+| `cli_qoder` | `exe` | `str` | — |  | 可执行文件绝对路径或 PATH 命令名 |
+| `cli_qoder` | `extra_env` | `list` | — |  | 透传给工具的环境变量名 |
+| `cli_qoder` | `timeout_s` | `int` | `300` |  | > 0；单次调用超时（秒） |
+| `cli_qoder` | `model` | `str` | — | 是 | 模型标识；空表示工具默认 |
+| `cli_qoder` | `reasoning_effort` | `str` | — | 是 | 取值 low/medium/high/xhigh/max；思考强度（仅列已验证取值） |
+| `cli_qoder` | `thinking` | `str` | — | 是 | 取值 auto/adaptive/disabled；无固定思考预算模式 |
+| `cli_doubao` | `exe` | `str` | — |  | 可执行文件绝对路径或 PATH 命令名 |
+| `cli_doubao` | `extra_env` | `list` | — |  | 透传给工具的环境变量名 |
+| `cli_doubao` | `timeout_s` | `int` | `300` |  | > 0；单次调用超时（秒） |
+| `cli_doubao` | `binary` | `str` | — |  | 已验证 Linux 程序的绝对路径 |
+| `cli_doubao` | `image` | `str` | — |  | 容器镜像 |
+| `cli_doubao` | `machine_id` | `str` | — |  | machine-id 文件绝对路径 |
+| `cli_doubao` | `profile` | `str` | — |  | Docker 卷名 |
+| `cli_doubao` | `proxy_url` | `str` | — |  | 不含凭据的 HTTP(S) 代理 |
+| `cli_doubao` | `runtime_version` | `str` | — |  | 已验证运行时版本 |
+| `cli_claude` | `exe` | `str` | — |  | 可执行文件绝对路径或 PATH 命令名 |
+| `cli_claude` | `extra_env` | `list` | — |  | 透传给工具的环境变量名 |
+| `cli_claude` | `timeout_s` | `int` | `300` |  | > 0；单次调用超时（秒） |
+| `cli_claude` | `model` | `str` | — | 是 | 模型标识；空表示工具默认 |
+| `cli_claude` | `reasoning_effort` | `str` | — | 是 | 取值 low/medium/high/xhigh/max；思考强度（仅列已验证取值） |
+| `cli_claude` | `inherit_connection` | `bool` | `true` |  | 继承 ~/.claude/settings.json 的连接与模型字段 |
+| `cli_grok` | `exe` | `str` | — |  | 可执行文件绝对路径或 PATH 命令名 |
+| `cli_grok` | `extra_env` | `list` | — |  | 透传给工具的环境变量名 |
+| `cli_grok` | `timeout_s` | `int` | `300` |  | > 0；单次调用超时（秒） |
+| `cli_grok` | `binary` | `str` | — |  | 已验证 Linux 程序的绝对路径 |
+| `cli_grok` | `auth_file` | `str` | — |  | 认证文件绝对路径 |
+| `cli_grok` | `proxy_url` | `str` | — |  | 不含凭据的 HTTP(S) 代理 |
+| `cli_grok` | `runtime_version` | `str` | — |  | 已验证运行时版本 |
+
+| 适配器 | 已验证版本 | 选模型 | 思考强度 | 思考模式 | 文件工具 |
+|---|---|---|---|---|---|
+| `fake` | — |  | — | — | 是 |
+| `openai_compat` | — | 是 | none/low/medium/high/xhigh | enabled/disabled |  |
+| `cli_codex` | 0.167.x, 0.169.x, 0.170.0 | 是 | none/low/medium/high/xhigh | — | 是 |
+| `cli_qwen` | 0.5.0, 0.26.0 | 是 | — | — | 是 |
+| `cli_dsh` | 0.2.2-rc.3 |  | — | — | 是 |
+| `cli_agy` | 1.5.9, 1.5.12, 1.5.13, 1.5.14 | 是 | — | — | 是 |
+| `cli_qoder` | 1.1.89 | 是 | low/medium/high/xhigh/max | auto/adaptive/disabled | 是 |
+| `cli_doubao` | 2.37.2 |  | — | — | 是 |
+| `cli_claude` | 2.1.325, 2.1.328 | 是 | low/medium/high/xhigh/max | — | 是 |
+| `cli_grok` | 1.0.89 |  | — | — | 是 |
+<!-- ADAPTER_SCHEMA:END -->
+
 ## 执行、恢复与审查
 
 - 阶段按配置串行执行。完成依赖输入指纹、产物内容、真实测试退出码和独立审查结论；恢复会核对证据，显式重跑会失效下游旧结果。
@@ -198,6 +279,10 @@ Qwen 0.26.0 新调用不加载用户/项目自定义配置、hooks、技能、MC
 工作台支持全历史关键词/项目/状态筛选、稳定分页、SSE 活动、审批、暂停/继续、取消和有限 API 双角色会诊。创建任务绑定所选配置和配置哈希；执行范围以配置为准。固定测试流程的完成只证明配置的命令通过。
 
 可保存常用配置与任务文字为模板，再核对并启动；配置变化时旧模板禁用。运行对比展示已报告/预留用量与时长差值，不能代替实现质量审查。失败看板逐页扫描历史，只按明确错误类别和停止事件聚合；多类别可以重叠，读取失败会单独提示。预算到 80% 时提示，不自动修改限额。
+
+在「看板与优化 → 双模型竞技场」发起任务后，可在「竞技场记录」中查看各候选的进度、差异和测试结果。关闭页面或重启工作台后可以重新打开记录。使用「取消运行」可停止候选，后台进程异常退出的记录会标记为已中断。
+
+竞技场的测试预设和改动范围可留空以对比候选。若项目配置了 `autonomy.allowed_files`，留空的改动范围沿用该清单。采纳要求候选生成成功、变更匹配允许文件并且封存提交通过所选测试。合入前工作区须干净且 HEAD 仍等于原基线。若合入已完成而回执未写入，从原分支重新提交同一采纳请求可以补齐回执。旧版结果均只供对比。
 
 只监听本机 loopback，写操作需要会话、同源和 CSRF 校验。控制指令入队后仍须等待执行收据；暂停在检查点生效，关闭页面或工作台不等于取消独立任务。数据库投影可重建，原状态与 attempt 证据为权威来源。
 

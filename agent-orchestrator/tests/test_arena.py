@@ -1,12 +1,15 @@
 """双模型并行 Best-of-N 竞技场：隔离 worktree 比拼、确定性测试验收与人工 ff-only 合并测试。"""
 from __future__ import annotations
 
+import json
 from pathlib import Path
 import subprocess
 import tempfile
 import unittest
+from unittest import mock
 
 from orchestrator.arena import apply_arena_winner, run_arena
+from orchestrator.state import atomic_write_json
 from orchestrator.config import load_config
 from orchestrator.contracts import Result
 
@@ -29,13 +32,15 @@ class TestArena(unittest.TestCase):
         _git(['config', 'user.name', 'Test User'], repo)
         _git(['config', 'user.email', 'test@local'], repo)
         (repo / 'calc.py').write_text('def add(a, b):\n    return a - b\n', encoding='utf-8')
+        (repo / '.gitignore').write_text('ignored-marker\n', encoding='utf-8')
         tests_dir = repo / 'tests'
         tests_dir.mkdir()
         (tests_dir / 'test_calc.py').write_text(
-            'import unittest\nfrom calc import add\n\n'
+            'import unittest\nfrom pathlib import Path\nfrom calc import add\n\n'
             'class T(unittest.TestCase):\n'
             '    def test_add(self):\n'
-            '        self.assertEqual(add(2, 3), 5)\n',
+            '        self.assertEqual(add(2, 3), 5)\n'
+            '        self.assertFalse(Path("ignored-marker").exists())\n',
             encoding='utf-8',
         )
         _git(['add', '-A'], repo)
@@ -76,6 +81,7 @@ class TestArena(unittest.TestCase):
 
             def run(self, prompt, workdir: Path, ctx):
                 if self.label == 'A':
+                    (workdir / 'ignored-marker').touch()
                     (workdir / 'calc.py').write_text('def add(a, b):\n    return a + b\n', encoding='utf-8')
                     return Result(ok=True, text='方案 A：修正为加法', usage={'tokens': 120})
                 (workdir / 'calc.py').write_text('def add(a, b):\n    return a * b\n', encoding='utf-8')
@@ -89,6 +95,7 @@ class TestArena(unittest.TestCase):
                 {'label': 'B', 'adapter_type': 'cli_agy', 'model': 'claude-sonnet-5-5-high'},
             ],
             test_preset='python_unittest',
+            allowed_files=['calc.py'],
             adapter_factory=lambda label, atype, model: _FakeCandidate(label, model),
         )
 
@@ -107,25 +114,70 @@ class TestArena(unittest.TestCase):
         self.assertNotEqual(by_label['B']['test_exit_code'], 0)
         self.assertIn('+    return a * b', by_label['B']['diff'])
 
-        # 工作区存在未提交改动时拒绝合并
+        arena_dir = root / 'state' / 'arenas' / res['arena_id']
+        self.assertFalse((arena_dir / 'test_A').exists())
+        self.assertTrue(by_label['A']['apply_eligible'])
+        self.assertFalse(by_label['B']['apply_eligible'])
+        winner_sha = by_label['A']['commit_sha']
+        digest = by_label['A']['test_evidence_sha256']
+
+        def apply(label='A', sha=winner_sha, proof=digest):
+            return apply_arena_winner(cfg, res['arena_id'], label, base_sha, sha, proof)
+
+        with self.assertRaisesRegex(RuntimeError, '未通过验收'):
+            apply('B', by_label['B']['commit_sha'])
+        with self.assertRaisesRegex(RuntimeError, '不一致'):
+            apply(sha=by_label['B']['commit_sha'])
+        with self.assertRaisesRegex(RuntimeError, '不一致'):
+            apply(proof='0' * 64)
+        proof_path = arena_dir / 'attempt_A' / 'test_evidence.json'
+        original = proof_path.read_bytes()
+        edited = json.loads(original)
+        edited['test_result']['output'] = 'changed'
+        atomic_write_json(proof_path, edited)
+        with self.assertRaisesRegex(RuntimeError, '验收证据.*不一致'):
+            apply()
+        proof_path.write_bytes(original)
+
+        # 基线已动或工作区有改动时，不启动合并。
+        wrong_head = _git(['commit-tree', 'HEAD^{tree}', '-p', base_sha, '-m', 'other'], repo)
+        branch = _git(['symbolic-ref', '--short', 'HEAD'], repo)
+        _git(['switch', '--detach', wrong_head], repo)
+        with self.assertRaisesRegex(RuntimeError, 'HEAD 已变化'):
+            apply()
+        _git(['switch', branch], repo)
         (repo / 'dirty.tmp').write_text('dirty', encoding='utf-8')
-        with self.assertRaises(RuntimeError):
-            apply_arena_winner(cfg, res['arena_id'], 'A', base_sha)
+        with self.assertRaisesRegex(RuntimeError, '未提交改动'):
+            apply()
         (repo / 'dirty.tmp').unlink()
 
-        # 人工明确选择方案 A 后，安全 ff-only 合并生效，并落盘审计状态禁止重复合并
-        applied = apply_arena_winner(cfg, res['arena_id'], 'A', base_sha)
-        self.assertTrue(applied['applied'])
-        self.assertEqual(applied['head_sha'], by_label['A']['commit_sha'])
-        self.assertIn('return a + b', (repo / 'calc.py').read_text(encoding='utf-8'))
+        # 在合入完成但最终回执未落盘处注入故障。重试应补写回执。
+        def fail_final_receipt(path, record):
+            if record.get('applied_label'):
+                raise OSError('receipt interrupted')
+            atomic_write_json(path, record)
 
-        import json as _json
-        saved_rec = _json.loads((root / 'state' / 'arenas' / res['arena_id'] / 'result.json').read_text(encoding='utf-8'))
-        self.assertEqual(saved_rec['applied_label'], 'A')
-        self.assertEqual(saved_rec['applied_commit_sha'], by_label['A']['commit_sha'])
-        self.assertTrue(saved_rec.get('applied_at'))
-        with self.assertRaises(RuntimeError):
-            apply_arena_winner(cfg, res['arena_id'], 'B', base_sha)
+        with mock.patch('orchestrator.arena.atomic_write_json', side_effect=fail_final_receipt):
+            with self.assertRaisesRegex(OSError, 'receipt interrupted'):
+                apply()
+        self.assertEqual(_git(['rev-parse', 'HEAD'], repo), winner_sha)
+        saved = json.loads((arena_dir / 'result.json').read_text(encoding='utf-8'))
+        self.assertEqual(saved['apply_intent']['candidate_sha'], winner_sha)
+        _git(['switch', '--detach', winner_sha], repo)
+        with self.assertRaisesRegex(RuntimeError, '原分支'):
+            apply()
+        _git(['switch', branch], repo)
+        applied = apply()
+        self.assertTrue(applied['recovered'])
+        self.assertEqual(applied['head_sha'], winner_sha)
+        self.assertIn('return a + b', (repo / 'calc.py').read_text(encoding='utf-8'))
+        saved = json.loads((arena_dir / 'result.json').read_text(encoding='utf-8'))
+        self.assertEqual(saved['applied_label'], 'A')
+        self.assertEqual(saved['applied_commit_sha'], winner_sha)
+        self.assertEqual(saved['applied_test_evidence_sha256'], digest)
+        self.assertNotIn('apply_intent', saved)
+        with self.assertRaisesRegex(RuntimeError, '禁止重复合并'):
+            apply()
 
     def test_run_test_cmd_resolves_cmd_wrapper_via_which_without_shell(self):
         from unittest import mock
@@ -195,6 +247,7 @@ class TestArena(unittest.TestCase):
 
             def run(self, prompt, workdir: Path, ctx):
                 if self.label == 'A':
+                    (workdir / 'calc.py').write_text('x = 3\n', encoding='utf-8')
                     return Result(
                         ok=False, exit_code=1, stderr='真实 CLI 鉴权失败详情',
                         error_kind=ErrorKind.AUTH, usage={'tokens': 88},
@@ -210,6 +263,7 @@ class TestArena(unittest.TestCase):
                 {'label': 'B', 'adapter_type': 'cli_agy', 'model': 'm-b'},
             ],
             test_preset='python_unittest',
+            allowed_files=['calc.py'],
             arena_id='arena-failtest',
             adapter_factory=lambda label, atype, model: _MixedCandidate(label),
         )
@@ -219,6 +273,9 @@ class TestArena(unittest.TestCase):
         self.assertIn('真实 CLI 鉴权失败详情', by_label['A']['error'])
         self.assertEqual(by_label['A']['tokens'], 88)
         self.assertIsNone(by_label['A']['test_exit_code'])
+        self.assertTrue(by_label['A']['commit_sha'])
+        with self.assertRaisesRegex(RuntimeError, '候选生成失败'):
+            apply_arena_winner(cfg, res['arena_id'], 'A', base_sha, by_label['A']['commit_sha'], '0' * 64)
         self.assertTrue(by_label['B']['ok'])
         self.assertTrue(by_label['B']['commit_sha'])
 
@@ -240,9 +297,53 @@ class TestArena(unittest.TestCase):
         self.assertTrue(lock.acquire())
         try:
             with self.assertRaises(RuntimeError):
-                apply_arena_winner(cfg, 'arena-failtest', 'B', base_sha)
+                apply_arena_winner(cfg, 'arena-failtest', 'B', base_sha, by_label['B']['commit_sha'], '0' * 64)
         finally:
             lock.release()
+
+    def test_comparison_without_test_or_with_out_of_scope_changes_cannot_apply(self):
+        from orchestrator.config import parse_config
+
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        root = Path(tmp.name)
+        repo = root / 'repo'
+        repo.mkdir()
+        _git(['init'], repo)
+        _git(['config', 'user.name', 'Test User'], repo)
+        _git(['config', 'user.email', 'test@local'], repo)
+        _git(['commit', '--allow-empty', '-m', 'initial'], repo)
+        cfg = parse_config({'task_workdir': 'repo', 'state_dir': 'state', 'stages': [
+            {'name': 't', 'kind': 'test', 'test_cmd': ['python', '-c', 'pass']},
+        ]}, base_dir=root)
+
+        class FakeCandidate:
+            def __init__(self, label):
+                self.label = label
+
+            def run(self, prompt, workdir, ctx):
+                name = '中文 空格.txt' if self.label == 'A' else 'outside.txt'
+                (workdir / name).write_text('content', encoding='utf-8')
+                return Result(ok=True)
+
+        options = dict(allowed_files=['中文 空格.txt'], adapter_factory=lambda label, *_: FakeCandidate(label))
+        candidates = [{'label': label, 'adapter_type': 'cli_agy'} for label in 'AB']
+        with mock.patch('orchestrator.arena.run_test_cmd', return_value={
+            'ok': True, 'exit_code': 0, 'cmd': ['python', '-m', 'unittest', 'discover', '-s', 'tests'],
+        }) as test_cmd:
+            record = run_arena(cfg, 'edit', candidates, **options)
+            test_cmd.assert_not_called()
+            self.assertEqual(record['candidates'][0]['apply_blocked'], '本轮未选择验收测试')
+            record_with_test = run_arena(cfg, 'edit', candidates, test_preset='python_unittest', **options)
+        self.assertEqual(record_with_test['candidates'][0]['changed_files'], ['中文 空格.txt'])
+        self.assertTrue(record_with_test['candidates'][0]['apply_eligible'])
+        self.assertEqual(record_with_test['candidates'][1]['test_exit_code'], 0)
+        for rec, idx, reason in [(record, 0, '未选择验收测试'), (record_with_test, 1, '超出允许')]:
+            candidate = rec['candidates'][idx]
+            with self.assertRaisesRegex(RuntimeError, reason):
+                apply_arena_winner(cfg, rec['arena_id'], candidate['label'], rec['base_sha'],
+                                   candidate['commit_sha'], candidate['test_evidence_sha256'] or '0' * 64)
+        self.assertEqual(_git(['rev-parse', 'HEAD'], repo), record['base_sha'])
 
     def test_run_test_cmd_multibyte_utf8_under_char_limit_is_not_marked_truncated(self):
         import sys

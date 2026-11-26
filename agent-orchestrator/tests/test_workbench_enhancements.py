@@ -186,6 +186,23 @@ prompt = "设计：{{task}}"
         self.assertEqual(status, 200)
         seed_id = proj_data['projects'][0]['id']
 
+        arena_endpoint = f'/api/projects/{seed_id}/arena'
+        choices = [{'label': label, 'adapter_type': 'cli_agy'} for label in ('A', 'B')]
+        with mock.patch('orchestrator.collaboration.arena_jobs.start_job',
+                        return_value={'arena_id': 'arena-test'}) as run:
+            status, data, _ = req('POST', arena_endpoint, {
+                'task': '修改文件', 'candidates': choices, 'allowed_files': ['中文 文件.py'],
+                'test_preset': 'python_unittest',
+            }, auth_headers)
+            self.assertEqual((status, data['arena_id']), (202, 'arena-test'))
+            self.assertEqual(run.call_args.args[4]['allowed_files'], ['中文 文件.py'])
+        approval = {'arena_id': 'arena-test', 'label': 'A', 'expected_base_sha': 'a' * 40,
+                    'expected_candidate_sha': 'b' * 40, 'expected_evidence_sha256': 'c' * 64}
+        with mock.patch('orchestrator.arena.apply_arena_winner', return_value={'applied': True}) as apply:
+            status, data, _ = req('POST', arena_endpoint + '/apply', approval, auth_headers)
+            self.assertEqual((status, data['applied']), (200, True))
+            self.assertEqual(apply.call_args.args[1:], tuple(approval.values()))
+
         # 2. 自优化：lessons 扫描 + approve
         status, lessons_data, _ = req('GET', f'/api/projects/{seed_id}/lessons?min_occurrences=2',
                                       headers={'Cookie': cookie})

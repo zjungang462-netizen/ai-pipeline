@@ -162,3 +162,18 @@ class AgyAdapter(CLIAdapter):
                 if isinstance(v, str) and v:
                     return v
         return None
+
+
+from .spec import COMMON_CLI, AdapterSpec, Capabilities, OptionSpec, model_option, proxy_option  # noqa: E402
+
+SPEC = AdapterSpec(
+    type="cli_agy",
+    factory=AgyAdapter,
+    options=COMMON_CLI + (
+        model_option(),
+        proxy_option(),
+        OptionSpec("allow_patch_probe", bool, False, "允许探测同系列未登记补丁版本"),
+    ),
+    capabilities=Capabilities(model_select=True, file_tools=True),
+    verified_versions=tuple(sorted(SUPPORTED_VERSIONS, key=lambda v: tuple(int(x) for x in v.split(".")))),
+)

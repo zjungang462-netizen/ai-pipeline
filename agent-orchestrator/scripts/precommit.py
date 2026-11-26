@@ -105,7 +105,12 @@ def main(argv=None):
     parser.add_argument('--checks-only', action='store_true', help='只做静态检查；不替代完整提交前门禁')
     parser.add_argument('--base-ref', help='CI 检查该提交以来已经提交的改动，补足干净检出场景')
     parser.add_argument('--output', help='quick 验收输出目录，须在项目外')
+    parser.add_argument('--workers', type=int, choices=range(1, 17), default=1, metavar='1..16',
+                        help='快速验收工作进程数')
+    parser.add_argument('--timing-baseline', type=Path, help='并行验收使用的历史 test-durations.json')
     args = parser.parse_args(argv)
+    if args.timing_baseline and args.workers < 2:
+        parser.error('--timing-baseline 需要至少两个工作进程')
     repo = Path(git(ROOT, 'rev-parse', '--show-toplevel').stdout.decode('utf8').strip())
     report = check_repository(repo)
     if args.base_ref:
@@ -131,8 +136,11 @@ def main(argv=None):
         return 0
     output = Path(args.output).absolute() if args.output else Path(tempfile.mkdtemp(prefix='orchestrator-precommit-'))
     print('快速验收证据：'+str(output), flush=True)
-    run = subprocess.run([sys.executable, str(ROOT/'scripts/verify_delivery.py'),
-                          '--quick', '--redact-logs', '--output', str(output)], cwd=ROOT)
+    command = [sys.executable, str(ROOT/'scripts/verify_delivery.py'), '--quick', '--redact-logs',
+               '--output', str(output), '--workers', str(args.workers)]
+    if args.timing_baseline:
+        command += ['--timing-baseline', str(args.timing_baseline.resolve())]
+    run = subprocess.run(command, cwd=ROOT)
     return run.returncode
 
 

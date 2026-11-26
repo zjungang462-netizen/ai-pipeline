@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import shutil
 import subprocess
 import sys
 import time
@@ -12,6 +13,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
 from orchestrator.adapters.factory import build_all
+from orchestrator.artifacts import head_sha
 from orchestrator.config import load_config, parse_config
 from orchestrator.engine import Engine
 from orchestrator.state import atomic_write_json, sha256_file
@@ -106,16 +108,27 @@ for bad_events in [[('r1', 100), ('r1', 200)], [('', 10)], [(123, 10)], [('r1',)
 }
 
 
+def acceptance_source(name):
+    return ('import sys\nsys.path.insert(0, ".")\n' + CASES[name][2]).encode('utf8')
+
+
 def run_case(root, name, adapters, roles, stage_timeout_s=120, max_tokens=50000, *,
-             unlimited_tokens=False, max_model_calls=None, max_unknown_calls=None):
-    files, task, assertions = CASES[name]
+             unlimited_tokens=False, max_model_calls=None, max_unknown_calls=None,
+             baseline_repo=None, expected_baseline=None, instance_factory=None, verify_versions=False,
+             run_id='maintenance'):
+    files, task, _assertions = CASES[name]
     case = root / name
     workspace = case / 'workspace'
-    workspace.mkdir(parents=True)
-    for path, body in files.items():
-        (workspace / path).write_text(body, encoding='utf8')
+    if baseline_repo is None:
+        workspace.mkdir(parents=True)
+        for path, body in files.items():
+            (workspace / path).write_text(body, encoding='utf8')
+    else:
+        shutil.copytree(baseline_repo, workspace)
+        if head_sha(workspace) != expected_baseline:
+            raise RuntimeError('评测工作区的基线提交不匹配')
     check = case / 'acceptance.py'
-    check.write_text('import sys\nsys.path.insert(0, ".")\n' + assertions, encoding='utf8')
+    check.write_bytes(acceptance_source(name))
     frozen = sha256_file(check)
     command = [sys.executable, '-I', '-B', '-X', 'utf8', str(check)]
 
@@ -127,16 +140,23 @@ def run_case(root, name, adapters, roles, stage_timeout_s=120, max_tokens=50000,
     before = check_exit('before.log')
     if before == 0:
         raise ValueError('初始保护断言未复现缺陷')
-    coding_prompt = '解决任务并按引擎指定的方式交付。\n{task}\n{upstream}\n{feedback}'
-    if roles['code'] == 'api':
+    coding_prompt = ('解决任务并按引擎指定的方式交付。\n{task}\n{upstream}\n{feedback}\n'
+                     '编码工作区已提供全部待修改源码，文件名为 ' + '、'.join(files) + '。'
+                     '保护验收脚本由编排器在工作区外执行。请根据任务约束实现，不要在工作区搜索或读取验收脚本。')
+    if adapters[roles['code']]['type'] == 'openai_compat':
         coding_prompt += ('\n每个文件单独一段。第一行写 # patch: 文件名，第二行写单行 JSON，'
                           '形如 {"edits":[{"old":"唯一匹配的原文","new":"替换后的文本"}]}。'
                           '换行在 JSON 字符串内编码为 \\n。')
+    if adapters[roles['review']]['type'].startswith('cli_'):
+        review_prompt = (ROOT / 'prompts' / 'cli_review.md').read_text(encoding='utf8')
+    else:
+        review_prompt = ('核对任务、改动与测试证据。整个响应仅包含一个含 verdict 和 issues 的 JSON 对象。'
+                         '通过时 issues 为空。失败项须包含 file、problem、expected。\n任务：{task}\n{upstream}\n{feedback}')
     stages = [
         dict(name='design', kind='report', prompt='根据任务给出三条实施步骤，保留所有公开函数签名。\n{task}\n{upstream}'),
         dict(name='coding', kind='code', prompt=coding_prompt),
         dict(name='testing', kind='test', test_cmd=command, timeout_s=20, feedback_to='coding', max_rounds=2),
-        dict(name='review', kind='review', prompt='核对任务、改动与测试证据。只返回 verdict/ issues 的 JSON 对象。\n{task}\n{upstream}',
+        dict(name='review', kind='review', prompt=review_prompt,
              feedback_to='coding', max_rounds=2),
     ]
     for stage in stages:
@@ -157,24 +177,34 @@ def run_case(root, name, adapters, roles, stage_timeout_s=120, max_tokens=50000,
                             autonomy=dict(enabled=True, allowed_files=list(files), repair_batch_size=2,
                                           max_repair_rounds=2, output_tokens=4096),
                             adapters=adapters, stages=stages), base_dir=case)
-    instances = build_all(cfg.adapters, {s.adapter: s.kind for s in cfg.stages if s.adapter})
-    preflights = {name: adapter.preflight() for name, adapter in instances.items()}
-    if not all(probe.ok for probe in preflights.values()):
+    if instance_factory is None:
+        instances = build_all(cfg.adapters, {s.adapter: s.kind for s in cfg.stages if s.adapter})
+    else:
+        instances = instance_factory(cfg)
+    preflights = {role: adapter.preflight() for role, adapter in instances.items()}
+    unavailable = {}
+    for role, probe in preflights.items():
+        version_check = getattr(instances[role], '_version_known', None)
+        if not probe.ok:
+            unavailable[role] = probe.detail
+        elif verify_versions and version_check is not None and not version_check():
+            unavailable[role] = '适配器版本未经验证'
+    evidence = dict(baseline_commit=expected_baseline, baseline_exit=before, protected_test_sha256=frozen,
+                    versions={role: probe.tool_version for role, probe in preflights.items()})
+    if unavailable:
         return dict(project=name, completed=False, reason='adapter_preflight', model_calls=0,
-                    unavailable={role: probe.detail for role, probe in preflights.items() if not probe.ok})
-    engine = Engine(cfg, instances, 'maintenance', task)
+                    unavailable=unavailable, protected_unchanged=sha256_file(check) == frozen, **evidence)
+    engine = Engine(cfg, instances, run_id, task)
     started = time.monotonic()
     statuses = engine.run()
     protected = sha256_file(check) == frozen
     after = check_exit('after.log') if protected else None
     protected = protected and sha256_file(check) == frozen
-    return dict(project=name, editable_files=list(files), baseline_exit=before,
-                acceptance_exit=after, protected_unchanged=protected, statuses=statuses,
+    return dict(project=name, editable_files=list(files), acceptance_exit=after, protected_unchanged=protected, statuses=statuses,
                 completed=all(statuses.get(stage['name']) == 'done' for stage in stages)
                 and after == 0 and protected, elapsed_s=round(time.monotonic() - started, 3),
-                versions={role: probe.tool_version for role, probe in preflights.items()},
-                usage=engine.state.usage_total, model_calls=sum(e['kind'] == 'model_call_started'
-                                                               for e in engine.state.events))
+                usage=engine.state.usage_total, backend_model=engine.state.stage_usage.get('coding', {}).get('backend_model'),
+                model_calls=sum(e['kind'] == 'model_call_started' for e in engine.state.events), **evidence)
 
 
 def main():

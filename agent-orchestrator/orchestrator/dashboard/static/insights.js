@@ -162,9 +162,13 @@ $('insights-open').onclick=()=>{
  if(runs.length>1)$('compare-right').value=runs[1].id;
  for(const id of ['lessons-project','route-project','arena-project']){
   const sel=$(id);if(!sel)continue;
-  sel.replaceChildren(...projects.filter(p=>!p.unavailable).map(p=>{const o=el('option','',p.name);o.value=p.id;return o;}));
+  const previous=sel.value;
+  const options=projects.filter(p=>!p.unavailable).map(p=>{const o=el('option','',p.name);o.value=p.id;return o;});
+  sel.replaceChildren(...options);
+  if(options.some(option=>option.value===previous))sel.value=previous;
  }
  $('insights-dialog').showModal();
+ if(!$('insights-pane-arena')?.classList.contains('hidden'))loadArenaJobs();
 };
 $('compare-run').onclick=async()=>{
  const params=new URLSearchParams({left:$('compare-left').value,right:$('compare-right').value});
@@ -198,6 +202,8 @@ if(typeof document.querySelectorAll==='function'){
    for(const name of ['usage','lessons','routing','arena']){
     const pane=$('insights-pane-'+name);if(pane)show(pane,name===target);
    }
+   if(target==='arena')loadArenaJobs();
+   else stopArenaView();
   };
  });
 }
@@ -572,52 +578,184 @@ function renderDiffLinesInto(box,text){
   box.append(el('div','diff-line '+cls,line||' '));
  }
 }
-if($('arena-run'))$('arena-run').onclick=async()=>{
+const arenaTerminal=new Set(['done','failed','cancelled','interrupted']);
+const arenaLabels={queued:'排队',running:'运行中',testing:'验收中',done:'完成',failed:'失败',cancelled:'已取消',interrupted:'已中断'};
+let arenaView=null;
+let arenaListRequest=0;
+
+function stopArenaView(){
+ arenaListRequest++;
+ if(!arenaView)return;
+ arenaView.stream?.close();
+ clearTimeout(arenaView.retry);
+ arenaView=null;
+}
+
+function arenaPath(project,job=''){
+ return `/projects/${encodeURIComponent(project)}/arena${job?'/'+encodeURIComponent(job):''}`;
+}
+
+async function loadArenaJobs(preferred){
+ stopArenaView();
+ const request=arenaListRequest;
  const pid=$('arena-project')?.value;
- const task=($('arena-task')?.value||'').trim();
- if(!pid){toast('请先选择 Git 项目');return;}
- if(!task){toast('请输入竞技场编码任务');return;}
- const btn=$('arena-run'),status=$('arena-status'),box=$('arena-results');
- btn.disabled=true;status.textContent='正在两个隔离 git worktree 中并行执行方案 A 与方案 B，请稍候…';show(status,true);box.replaceChildren();
+ const select=$('arena-history');
+ if(!select)return;
+ $('arena-results').replaceChildren();
+ show($('arena-status'),false);
+ show($('arena-cancel'),false);
+ const previous=select.value;
+ select.replaceChildren();
+ if(!pid)return;
  try{
-  const res=await api(`/projects/${encodeURIComponent(pid)}/arena`,{method:'POST',body:{
-   task,
-   test_preset:$('arena-test-preset')?.value||'',
-   candidates:[
-    {label:'A',adapter_type:$('arena-type-a')?.value||'cli_agy',model:($('arena-model-a')?.value||'').trim()},
-    {label:'B',adapter_type:$('arena-type-b')?.value||'cli_agy',model:($('arena-model-b')?.value||'').trim()},
-   ],
-  }});
-  status.textContent=`竞技场 ${res.arena_id} 完成 · 基线 ${(res.base_sha||'').slice(0,12)} · 请对比差异后人工决定是否采纳。`;
+  const {jobs}=await api(arenaPath(pid));
+  if(request!==arenaListRequest)return;
+  for(const job of jobs){
+   const option=el('option','',`${arenaLabels[job.status]||job.status} · ${job.task.slice(0,50)}`);
+   option.value=job.arena_id;
+   select.append(option);
+  }
+  if(!jobs.length){select.append(el('option','','暂无竞技场记录'));return;}
+  const desired=preferred||previous;
+  if(jobs.some(job=>job.arena_id===desired))select.value=desired;
+  watchArena(pid,select.value);
+ }catch(error){if(request===arenaListRequest)toast(error.message);}
+}
+
+function watchArena(pid,jobId){
+ stopArenaView();
+ if(!pid||!jobId)return;
+ arenaView={pid,jobId,path:arenaPath(pid,jobId),stream:null,retry:null,refreshing:false,pending:false};
+ loadArenaSnapshot(arenaView);
+}
+
+function retryArenaSnapshot(view){
+ clearTimeout(view.retry);
+ view.retry=setTimeout(()=>loadArenaSnapshot(view),1500);
+}
+
+async function loadArenaSnapshot(view){
+ if(!view||view!==arenaView)return;
+ if(view.refreshing){view.pending=true;return;}
+ view.refreshing=true;
+ try{
+  const job=await api(view.path);
+  if(view!==arenaView)return;
+  renderArenaJob(view,job);
+  if(arenaTerminal.has(job.status)){
+   view.stream?.close();
+   view.stream=null;
+   clearTimeout(view.retry);
+  }else if(!view.stream&&typeof EventSource==='function'){
+   const stream=new EventSource(`/api${view.path}/events?after=${job.cursor}`);
+   view.stream=stream;
+   stream.addEventListener('update',()=>loadArenaSnapshot(view));
+   stream.onerror=()=>{
+    if(view!==arenaView)return;
+    stream.close();
+    view.stream=null;
+    retryArenaSnapshot(view);
+   };
+  }else if(!view.stream){
+   retryArenaSnapshot(view);
+  }
+ }catch(error){
+  if(view!==arenaView)return;
+  $('arena-status').textContent=error.message;
+  show($('arena-status'),true);
+  if(!error.status||error.status>=500)retryArenaSnapshot(view);
+ }finally{
+  view.refreshing=false;
+  if(view.pending){view.pending=false;loadArenaSnapshot(view);}
+ }
+}
+
+function renderArenaJob(view,job){
+ const {pid}=view;
+ const box=$('arena-results'),status=$('arena-status'),cancel=$('arena-cancel');
+ const candidateStates=job.candidates.map(c=>`${c.label} ${arenaLabels[c.status]||c.status}`).join(' · ');
+ const headline=job.cancel_requested?'正在取消':arenaLabels[job.status]||job.status;
+ status.textContent=`${headline} · ${candidateStates} · 基线 ${job.base_sha.slice(0,12)}${job.error?' · '+job.error:''}`;
+ show(status,true);
+ show(cancel,!arenaTerminal.has(job.status));
+ cancel.disabled=job.cancel_requested;
+ const selected=$('arena-history')?.selectedOptions?.[0];
+ if(selected?.value===job.arena_id)selected.textContent=`${headline} · ${job.task.slice(0,50)}`;
+ box.replaceChildren();
+ if(!job.result)return;
+ const res=job.result,canApply=job.status==='done';
+ const statusByLabel=new Map(job.candidates.map(candidate=>[candidate.label,candidate.status]));
+ if(res.applied_label)status.textContent+=` · 已采纳方案 ${res.applied_label}`;
   for(const c of res.candidates||[]){
    const card=el('div','arena-card');
    const head=el('div','arena-card-head');
+   const candidateStatus=statusByLabel.get(c.label);
+   const candidateLabel=arenaLabels[candidateStatus]||(c.ok?'完成':'失败');
    const testBadge=c.test_exit_code===null?'未测':(c.test_exit_code===0?'测试通过':'测试失败('+c.test_exit_code+')');
    head.append(el('strong','',`方案 ${c.label} · ${ADAPTER_TYPE_LABELS[c.adapter_type]||c.adapter_type} / ${c.model||'默认'}`),
-               el('span','meta-chip',`${c.ok?'完成':'失败'} · ${testBadge} · ${c.duration_s}s · ${num(c.tokens||0)} tok`));
+               el('span','meta-chip',`${candidateLabel} · ${testBadge} · ${c.duration_s}s · ${num(c.tokens||0)} tok`));
    card.append(head);
-   if(c.error)card.append(el('p','form-note',`错误：${c.error}`));
+   if(c.error&&candidateStatus!=='cancelled')card.append(el('p','form-note',`错误：${c.error}`));
    if(c.changed_files?.length)card.append(el('p','form-note',`改动文件：${c.changed_files.join(', ')}`));
    const diffBox=el('div','diff-view arena-diff');
    if(c.diff)renderDiffLinesInto(diffBox,c.diff);
    else diffBox.append(el('div','diff-line diff-ctx','（无代码改动）'));
    card.append(diffBox);
-   if(c.commit_sha){
+   if(c.diff_truncated)card.append(el('p','form-note','差异预览已截断。'));
+   if(c.apply_eligible===true&&canApply&&!res.applied_label){
     const applyBtn=el('button','primary small arena-apply-btn',`采纳方案 ${c.label}（ff-only 合并）`);applyBtn.type='button';
     applyBtn.onclick=async()=>{
      applyBtn.disabled=true;
      try{
       const r=await api(`/projects/${encodeURIComponent(pid)}/arena/apply`,{method:'POST',body:{
        arena_id:res.arena_id,label:c.label,expected_base_sha:res.base_sha,
+       expected_candidate_sha:c.commit_sha,expected_evidence_sha256:c.test_evidence_sha256,
       }});
       if(typeof box.querySelectorAll==='function')box.querySelectorAll('.arena-apply-btn').forEach(b=>{b.disabled=true;});
       applyBtn.textContent=`已采纳方案 ${c.label} ✓`;
       toast(`已采纳方案 ${c.label}，工作区已安全快进至 ${(r.head_sha||'').slice(0,12)}。`);
+      loadArenaSnapshot(view);
      }catch(err){applyBtn.disabled=false;toast(err.message);}
     };
     card.append(applyBtn);
+   }else if(c.apply_blocked&&candidateStatus!=='cancelled'){
+    card.append(el('p','form-note',`仅供对比 · ${c.apply_blocked}`));
    }
    box.append(card);
   }
- }catch(error){status.textContent='竞技场执行失败：'+error.message;toast(error.message);}finally{btn.disabled=false;}
+}
+
+if($('arena-project'))$('arena-project').onchange=()=>loadArenaJobs();
+if($('arena-history'))$('arena-history').onchange=()=>watchArena($('arena-project').value,$('arena-history').value);
+if($('arena-cancel'))$('arena-cancel').onclick=async()=>{
+ const view=arenaView;
+ if(!view)return;
+ const button=$('arena-cancel');
+ button.disabled=true;
+ try{
+  await api(`${view.path}/cancel`,{method:'POST',body:{}});
+  loadArenaSnapshot(view);
+ }catch(error){if(view===arenaView){button.disabled=false;toast(error.message);}}
+};
+$('insights-dialog')?.addEventListener?.('close',stopArenaView);
+if($('arena-run'))$('arena-run').onclick=async()=>{
+ const pid=$('arena-project')?.value;
+ const task=($('arena-task')?.value||'').trim();
+ if(!pid){toast('请先选择 Git 项目');return;}
+ if(!task){toast('请输入竞技场编码任务');return;}
+ const button=$('arena-run');
+ const allowedFiles=($('arena-allowed-files')?.value||'').split(/\r?\n/).map(line=>line.trim()).filter(Boolean);
+ button.disabled=true;
+ try{
+  const job=await api(arenaPath(pid),{method:'POST',body:{
+   task,
+   test_preset:$('arena-test-preset')?.value||'',
+   ...(allowedFiles.length?{allowed_files:allowedFiles}:{}),
+   candidates:['a','b'].map(label=>({label:label.toUpperCase(),
+    adapter_type:$('arena-type-'+label)?.value||'cli_agy',model:($('arena-model-'+label)?.value||'').trim()})),
+  }});
+  if(pid===$('arena-project').value&&$('insights-dialog').open&&!$('insights-pane-arena').classList.contains('hidden')){
+   await loadArenaJobs(job.arena_id);
+  }
+ }catch(error){toast(error.message);}finally{button.disabled=false;}
 };

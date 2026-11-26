@@ -93,3 +93,17 @@ class DshAdapter(CLIAdapter):
         return Result(ok=True, exit_code=0, channel=self.channel,
                       stdout=stdout, stderr=stderr, text=text[:MAX_TEXT],
                       tool_version=self._version,usage=usage)
+
+
+from .spec import COMMON_CLI, AdapterSpec, Capabilities, OptionSpec, proxy_option  # noqa: E402
+
+SPEC = AdapterSpec(
+    type="cli_dsh",
+    factory=DshAdapter,
+    options=COMMON_CLI + (
+        OptionSpec("permission_mode", str, "read-only", "文件权限", choices=("read-only", "workspace-write")),
+        proxy_option(),
+    ),
+    capabilities=Capabilities(file_tools=True),
+    verified_versions=(SUPPORTED_VERSION,),
+)

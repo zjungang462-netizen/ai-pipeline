@@ -117,8 +117,8 @@ def _no_hooks_dir() -> str:
 
 
 def _git(args: list[str], cwd: Path, check: bool = True,
-         timeout: int = 120, *, stdin: str | None = None,
-         git: GitContext | None = None) -> subprocess.CompletedProcess:
+         timeout: int = 120, *, stdin: bytes | None = None,
+         binary: bool = False, git: GitContext | None = None) -> subprocess.CompletedProcess:
     """git 子进程：env 白名单（不透传 API Key）+ 超时 + 禁用 hook。"""
     from .safety import build_subprocess_env
     exe = resolve_git(git) or "git"
@@ -127,13 +127,17 @@ def _git(args: list[str], cwd: Path, check: bool = True,
         proc = subprocess.run(
             cmd, cwd=str(cwd), env=build_subprocess_env(),
             input=stdin,
-            capture_output=True, text=True, encoding="utf-8", errors="replace",
+            capture_output=True, text=not binary,
+            encoding=None if binary else "utf-8", errors=None if binary else "replace",
             timeout=timeout,
         )
     except subprocess.TimeoutExpired as e:
         raise GitError(f"git {' '.join(args)} 超时（{timeout}s）") from e
     if check and proc.returncode != 0:
-        raise GitError(f"git {' '.join(args)} 失败: {proc.stderr.strip() or proc.stdout.strip()}")
+        output = proc.stderr.strip() or proc.stdout.strip()
+        if isinstance(output, bytes):
+            output = output.decode("utf-8", errors="replace")
+        raise GitError(f"git {' '.join(args)} 失败: {output}")
     return proc
 
 
@@ -171,7 +175,7 @@ def ensure_repo(workdir: Path, exclude: Path | None = None, *, git: GitContext |
             if existing:
                 has_head = _git(["rev-parse", "--verify", "HEAD"], workdir, check=False, git=git).returncode == 0
             if not has_head:
-                _git(["commit", "-q", "--allow-empty", "-m", "baseline"], workdir, git=git)
+                _git(["commit", "-q", "--no-gpg-sign", "--allow-empty", "-m", "baseline"], workdir, git=git)
 
 
 def head_sha(workdir: Path, *, git: GitContext | None = None) -> str:
@@ -286,16 +290,21 @@ def commit_files(workdir: Path, files: list[str], message: str, *, git: GitConte
     """
     if not files:
         return None
-    bad = unsafe_rel_paths(files)
+    bad = unsafe_rel_paths(files) + [f for f in files if not f or '\0' in f or Path(f) == Path('.')]
     if bad:
-        raise GitError(f"拒绝提交越界或 .git 路径: {bad[:5]}")
-    _git(["add", "--", *files], workdir, git=git)
-    # 只检查清单内文件是否真的有暂存改动；索引里其它无关暂存不能让
-    # “声明文件无改动”也走到 commit（否则 git commit --only 会报错）。
-    staged = _git(["diff", "--cached", "--name-only", "--", *files], workdir, git=git).stdout.strip()
-    if not staged:
+        raise GitError(f"拒绝提交空路径、越界或 .git 路径: {bad[:5]}")
+    selected = {Path(f).as_posix() for f in files}
+    # NUL 分隔的字面路径清单避免 Windows 命令行长度限制及 Git 路径表达式展开。
+    pathspec = ('\0'.join(sorted(selected)) + '\0').encode('utf-8', errors='surrogateescape')
+    options = ["--pathspec-from-file=-", "--pathspec-file-nul"]
+    _git(["--literal-pathspecs", "add", *options], workdir, stdin=pathspec, binary=True, git=git)
+    # 整个索引的 NUL 路径在 Python 侧与清单取交集，不把无关暂存算成代码变更。
+    staged = _git(["diff", "--cached", "--no-renames", "--name-only", "-z"], workdir,
+                  binary=True, git=git).stdout
+    if set(staged.split(b'\0')).isdisjoint(pathspec[:-1].split(b'\0')):
         return None
-    _git(["commit", "-q", "--only", "-m", message, "--", *files], workdir, git=git)
+    _git(["--literal-pathspecs", "commit", "-q", "--no-gpg-sign", "--only", "-m", message, *options],
+         workdir, stdin=pathspec, binary=True, git=git)
     return head_sha(workdir, git=git)
 
 

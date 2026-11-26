@@ -1,4 +1,7 @@
-"""本次运行的模型与思考选项；仅复制配置，不接受浏览器传来的路径、命令或凭据。"""
+"""本次运行的模型与思考选项；仅复制配置，不接受浏览器传来的路径、命令或凭据。
+
+哪些适配器可覆盖、可选哪些思考强度/模式，均读取各适配器的 SPEC 能力声明。
+"""
 from __future__ import annotations
 
 import json
@@ -6,17 +9,25 @@ import re
 import tomllib
 from pathlib import Path
 
+from ..adapters import registry
 from ..config import load_config, parse_config
 from .config_copy import dump_config
 
-MODEL_TYPES = {'openai_compat', 'cli_codex', 'cli_qwen', 'cli_agy', 'cli_qoder', 'cli_claude'}
-EFFORTS = ('none', 'low', 'medium', 'high', 'xhigh')
+MODEL_TYPES = frozenset(t for t, s in registry.specs().items() if s.capabilities.model_select)
+# 兼容旧引用：openai_compat 的思考强度取值。
+EFFORTS = registry.get('openai_compat').capabilities.reasoning_effort
+_OVERRIDE_KEYS = {'model', 'reasoning_effort', 'thinking', 'review_json_mode'}
+
+
+def _caps(adapter_type):
+    return registry.get(adapter_type).capabilities
 
 
 def describe_models(cfg):
     result=[]
     for name, adapter in cfg.adapters.items():
         if adapter.type not in MODEL_TYPES: continue
+        caps=_caps(adapter.type)
         options=adapter.options
         effective_model=options.get('model') or ''
         effective_effort=options.get('reasoning_effort') or ''
@@ -33,8 +44,8 @@ def describe_models(cfg):
                            backend_endpoint=endpoint,
                            thinking=options.get('thinking') or '',
                            review_json_mode=options.get('review_json_mode', False),
-                           supports_effort=adapter.type in ('openai_compat','cli_codex','cli_qoder','cli_claude'),
-                           supports_thinking=adapter.type in ('openai_compat','cli_qoder')))
+                           supports_effort=bool(caps.reasoning_effort),
+                           supports_thinking=bool(caps.thinking)))
     return result
 
 
@@ -49,12 +60,13 @@ def validate_options(cfg, options):
     for name, values in models.items():
         adapter=cfg.adapters.get(name)
         if not adapter or adapter.type not in MODEL_TYPES:raise ValueError('该适配器不支持工作台模型覆盖')
-        if not isinstance(values,dict) or set(values)-{'model','reasoning_effort','thinking','review_json_mode'}:
+        if not isinstance(values,dict) or set(values)-_OVERRIDE_KEYS:
             raise ValueError('仅可覆盖模型及受支持的思考选项')
+        caps=_caps(adapter.type)
         row={}
         for key,value in values.items():
             if key=='review_json_mode':
-                if adapter.type!='openai_compat' or type(value) is not bool:
+                if not caps.review_json_mode or type(value) is not bool:
                     raise ValueError('结构化审查模式仅支持兼容 API 的布尔选项')
                 row[key]=value;continue
             if not isinstance(value,str):raise ValueError('模型选项必须为字符串')
@@ -62,11 +74,9 @@ def validate_options(cfg, options):
                 if len(value)>160 or not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9._:/-]{0,159}(?:\[(?:1M|200K)\])?',value):
                     raise ValueError('模型名称必须为 1..160 字符的模型标识')
             elif key=='reasoning_effort':
-                allowed=('low','medium','high','xhigh','max') if adapter.type in ('cli_qoder','cli_claude') else EFFORTS
-                if adapter.type not in ('openai_compat','cli_codex','cli_qoder','cli_claude') or value not in allowed:
+                if value not in caps.reasoning_effort:
                     raise ValueError('该工具不支持此思考强度')
-            elif (adapter.type=='cli_qoder' and value not in ('auto','adaptive','disabled')) or (
-                    adapter.type!='cli_qoder' and (adapter.type!='openai_compat' or value not in ('enabled','disabled'))):
+            elif value not in caps.thinking:
                 raise ValueError('thinking 必须为工具支持的模式')
             row[key]=value
         if row:clean[name]=row

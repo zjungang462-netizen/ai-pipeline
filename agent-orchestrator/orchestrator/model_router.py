@@ -45,7 +45,8 @@ def recommend_adapters(
                 data = json.loads(metrics_path.read_text(encoding='utf-8'))
             except (OSError, ValueError):
                 continue
-            if not isinstance(data, dict) or not isinstance(data.get('stages'), dict):
+            if (not isinstance(data, dict) or data.get('status') not in ('done', 'failed')
+                    or not isinstance(data.get('stages'), dict)):
                 continue
             scanned_metrics += 1
             run_done = data.get('status') == 'done'
@@ -66,24 +67,28 @@ def recommend_adapters(
                     continue
                 tool = str(info.get('tool') or 'unknown')
                 used = stage_usage.get(stage_name) if isinstance(stage_usage.get(stage_name), dict) else {}
+                if type(used.get('model_calls')) is int and used['model_calls'] <= 0:
+                    continue
                 model = str(used.get('backend_model') or info.get('model') or 'default')
                 key = (kind, tool, model)
                 bucket = buckets.setdefault(key, {
                     'stage_kind': kind,
                     'tool': tool,
                     'model': model,
-                    'runs': 0,
+                    'runs': set(),
+                    'done_runs': set(),
+                    'stage_samples': 0,
                     'stage_done': 0,
-                    'run_done': 0,
                     'durations': [],
                     'known_tokens': [],
                     'unknown_calls': 0,
                 })
-                bucket['runs'] += 1
+                bucket['runs'].add(run_dir.name)
+                bucket['stage_samples'] += 1
                 if info.get('status') == 'done':
                     bucket['stage_done'] += 1
                 if run_done:
-                    bucket['run_done'] += 1
+                    bucket['done_runs'].add(run_dir.name)
                 dur = used.get('duration_s')
                 if isinstance(dur, (int, float)) and not isinstance(dur, bool) and math.isfinite(dur) and dur >= 0:
                     bucket['durations'].append(float(dur))
@@ -97,9 +102,9 @@ def recommend_adapters(
 
     by_kind: dict[str, list[dict[str, Any]]] = {}
     for bucket in buckets.values():
-        runs = bucket['runs']
-        stage_pass_rate = round(bucket['stage_done'] / runs, 4)
-        run_pass_rate = round(bucket['run_done'] / runs, 4)
+        runs = len(bucket['runs'])
+        stage_pass_rate = round(bucket['stage_done'] / bucket['stage_samples'], 4)
+        run_pass_rate = round(len(bucket['done_runs']) / runs, 4)
         median_dur = round(statistics.median(bucket['durations']), 3) if bucket['durations'] else None
         median_tok = int(statistics.median(bucket['known_tokens'])) if bucket['known_tokens'] else None
         eligible = runs >= min_runs
@@ -108,6 +113,7 @@ def recommend_adapters(
             'tool': bucket['tool'],
             'model': bucket['model'],
             'runs': runs,
+            'stage_samples': bucket['stage_samples'],
             'eligible': eligible,
             'status': 'ranked' if eligible else 'insufficient_data',
             'run_pass_rate': run_pass_rate,

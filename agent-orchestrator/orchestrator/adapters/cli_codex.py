@@ -212,3 +212,20 @@ class CodexAdapter(CLIAdapter):
         return Result(ok=True, exit_code=0, channel=self.channel,
                       stdout=stdout, stderr=stderr, text=text,
                       tool_version=self._version, usage=usage)
+
+
+from .spec import COMMON_CLI, AdapterSpec, Capabilities, OptionSpec, effort_option, model_option  # noqa: E402
+
+_CODEX_EFFORTS = ("none", "low", "medium", "high", "xhigh")
+
+SPEC = AdapterSpec(
+    type="cli_codex",
+    factory=CodexAdapter,
+    options=COMMON_CLI + (
+        model_option(),
+        OptionSpec("isolate_config", bool, False, "使用隔离的 Codex 配置目录"),
+        effort_option(_CODEX_EFFORTS),
+    ),
+    capabilities=Capabilities(model_select=True, reasoning_effort=_CODEX_EFFORTS, file_tools=True),
+    verified_versions=tuple(sorted({p.split()[-1] + "x" for p in KNOWN_VERSION_PREFIXES})) + ("0.170.0",),
+)

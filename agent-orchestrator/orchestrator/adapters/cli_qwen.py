@@ -137,3 +137,14 @@ class QwenAdapter(CLIAdapter):
                 if isinstance(v, str) and v:
                     return v
         return None
+
+
+from .spec import COMMON_CLI, AdapterSpec, Capabilities, model_option  # noqa: E402
+
+SPEC = AdapterSpec(
+    type="cli_qwen",
+    factory=QwenAdapter,
+    options=COMMON_CLI + (model_option(),),
+    capabilities=Capabilities(model_select=True, file_tools=True),
+    verified_versions=("0.5.0",) + tuple(sorted(RESULT_STREAMS["cli_qwen"].accepted_versions)),
+)

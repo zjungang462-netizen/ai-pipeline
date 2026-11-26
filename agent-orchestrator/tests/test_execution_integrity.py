@@ -340,6 +340,35 @@ class GitIntegrity(unittest.TestCase):
             staged = artifacts._git(["diff", "--cached", "--name-only"], repo).stdout
             self.assertIn("unrelated.txt", staged)
 
+    def test_git_baseline_handles_long_file_lists_and_signing(self):
+        with tempfile.TemporaryDirectory() as directory:
+            repo = Path(directory) / "repo"
+            repo.mkdir()
+            artifacts._git(["init", "-q"], repo)
+            artifacts._git(["config", "user.name", "Fixture"], repo)
+            artifacts._git(["config", "user.email", "fixture@local"], repo)
+            artifacts._git(["config", "commit.gpgsign", "true"], repo)
+            artifacts._git(["config", "gpg.program", "missing-pipeline-fixture-signer"], repo)
+            files = [f"{i:04d} {('x' * 66)}.txt" for i in range(600)] + ["中文 空格 [样例].py"]
+            self.assertGreater(len(subprocess.list2cmdline(files)), 32767)
+            for name in files:
+                (repo / name).write_text("fixture", encoding="utf-8")
+            artifacts.ensure_repo(repo)
+            names = artifacts._git(["ls-tree", "-r", "--name-only", "-z", "HEAD"], repo).stdout
+            self.assertEqual(set(names.split("\0")) - {""}, set(files))
+            self.assertNotIn("gpgsig", artifacts._git(["cat-file", "-p", "HEAD"], repo).stdout)
+
+    def test_git_empty_baseline_does_not_use_repository_signer(self):
+        with tempfile.TemporaryDirectory() as directory:
+            repo = Path(directory)
+            artifacts._git(["init", "-q"], repo)
+            artifacts._git(["config", "user.name", "Fixture"], repo)
+            artifacts._git(["config", "user.email", "fixture@local"], repo)
+            artifacts._git(["config", "commit.gpgsign", "true"], repo)
+            artifacts._git(["config", "gpg.program", "missing-pipeline-fixture-signer"], repo)
+            artifacts.ensure_repo(repo)
+            self.assertEqual(artifacts._git(["log", "-1", "--format=%s"], repo).stdout.strip(), "baseline")
+
     def test_worktree_failure_never_falls_back_to_user_workspace(self):
         with tempfile.TemporaryDirectory() as directory:
             cfg = parse_config({"task_workdir": "ws", "state_dir": ".s", "stages": [

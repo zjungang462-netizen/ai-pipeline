@@ -33,7 +33,7 @@ QUICK_TESTS = ('test_stage1.TestConfig', 'test_stage1.TestState',
                'test_model_settings', 'test_qoder_1189','test_claude_cli',
                'test_state_backup', 'test_state_migration', 'test_policy_tuning', 'test_cli_current', 'test_docker_base',
                'test_grok_container', 'test_doubao_container', 'test_streaming_discussion', 'test_notifications',
-               'test_deploy', 'test_remote_worker', 'test_cli_extensions', 'test_self_optimization', 'test_workbench_enhancements', 'test_arena',
+               'test_deploy', 'test_remote_worker', 'test_cli_extensions', 'test_self_optimization', 'test_workbench_enhancements', 'test_arena', 'test_arena_jobs', 'test_route_shadow',
                'test_failure_evidence.FailureEvidence.test_unreadable_directory_is_recorded_and_other_roots_continue')
 
 
@@ -54,6 +54,36 @@ def group_tests_by_module(ids):
         module = identifier.split('.', 1)[0]
         groups.setdefault(module, []).append(identifier)
     return sorted(groups.items(), key=lambda item: (-len(item[1]), item[0]))
+
+
+def schedule_shards(grouped, timing_rows, workers):
+    """按历史耗时均衡分片，保留完整测试模块并减少 Windows 子进程启动次数。"""
+    import statistics
+
+    timings = {row['test']: row['duration_s'] for row in timing_rows}
+    if not timings or not grouped:
+        return grouped
+    fallback = statistics.median(timings.values())
+    module_costs = [(sum(timings.get(name, fallback) for name in names), names) for _, names in grouped]
+    module_costs.sort(key=lambda module: -module[0])
+    shards = [[] for _ in range(min(workers, len(module_costs)))]
+    totals = [0.0] * len(shards)
+    for duration, names in module_costs:
+        index = min(range(len(shards)), key=lambda i: (totals[i], len(shards[i])))
+        shards[index].extend(names)
+        totals[index] += duration
+    return [(f'shard-{index + 1:02d}', names) for index, names in enumerate(shards)]
+
+
+def load_test_timings(path):
+    rows = json.loads(path.read_text(encoding='utf-8'))
+    if not isinstance(rows, list) or any(
+        not isinstance(row, dict) or not isinstance(row.get('test'), str)
+        or type(row.get('duration_s')) not in (int, float) or not math.isfinite(row['duration_s'])
+        or row['duration_s'] < 0 for row in rows
+    ):
+        raise ValueError('耗时文件应为验收生成的 test-durations.json')
+    return rows
 
 
 def _run_suite_in_process(suite, log_path, evidence_dir, *, redact_logs=False):
@@ -290,6 +320,7 @@ def main(argv=None):
     mode.add_argument('--suite', choices=('fast','slow','full'), default='full', help='显式测试分层；默认 full')
     parser.add_argument('--workers', type=int, default=1,
                         help='按测试模块并发执行的工作进程数（1..16），默认 1；Windows 受进程安全扫描竞争影响建议保持 1')
+    parser.add_argument('--timing-baseline', type=Path, help='并行时按上次验收的 test-durations.json 排程')
     parser.add_argument('--slow-threshold', type=float, default=2, help='慢用例记录阈值，秒')
     parser.add_argument('--redact-logs', action='store_true', help='对回归日志与 CLI 冒烟日志脱敏')
     parser.add_argument('--allow-linux-windows-skips', action='store_true',
@@ -305,6 +336,14 @@ def main(argv=None):
         parser.error('--output 为必填参数')
     if args.workers < 1 or args.workers > 16:
         parser.error('--workers 必须在 1 到 16 之间')
+    timing_rows = []
+    if args.timing_baseline:
+        if args.workers < 2:
+            parser.error('--timing-baseline 需要至少两个工作进程')
+        try:
+            timing_rows = load_test_timings(args.timing_baseline)
+        except (OSError, ValueError) as error:
+            parser.error(str(error))
     if not math.isfinite(args.slow_threshold) or args.slow_threshold<=0:
         parser.error('--slow-threshold 必须为正数')
     selected_mode='fast' if args.quick else args.suite
@@ -330,7 +369,7 @@ def main(argv=None):
     evidence_dir=output/'failure-evidence'
     if args.workers > 1:
         run_data=_run_parallel_workers(
-            group_tests_by_module(ids), output, output/log_name, evidence_dir,
+            schedule_shards(group_tests_by_module(ids), timing_rows, args.workers), output, output/log_name, evidence_dir,
             args.workers, redact_logs=args.redact_logs,
         )
     else:
@@ -344,6 +383,7 @@ def main(argv=None):
     (output/'slow-tests.json').write_text(json.dumps({'threshold_s':args.slow_threshold,'tests':slow},indent=2),encoding='utf8')
     proof={'mode':'quick' if args.quick else selected_mode, 'suite':selected_mode, 'workers':args.workers,
            'tests_collected':collected, 'log_file':log_name, 'slow_test_count':len(slow),
+           'scheduling': 'duration_balanced_shards' if timing_rows else 'module_test_count',
            'tests_run':run_data['tests_run'],'failures':run_data['failures'],
            'errors':run_data['errors'],'skipped':run_data['skipped'],
            'source_unchanged':before==after,'duration_s':round(time.monotonic()-started,3),

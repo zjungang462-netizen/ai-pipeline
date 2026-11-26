@@ -457,6 +457,8 @@ class CLITrace:
 
     def tick(self):
         with self.lock:
+            if self.ctx.cancel_requested and self.ctx.cancel_requested():
+                self.reason = self.reason or 'cancelled'
             self._check_token_budget()
             if time.time()-self.last_output>self.ctx.idle_timeout_s:self.reason=self.reason or 'idle_timeout'
             if self.dirty or time.monotonic()-self.last_save>=2:self._save(force=not self.dirty)

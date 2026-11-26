@@ -242,33 +242,49 @@ class Handler(BaseHTTPRequestHandler):
                     return self.respond(project_manager.remove_managed_project(
                         service, project_id, delete_config_file=raw_del
                     ))
-                if action == 'arena' and method == 'POST':
-                    self.idem()
-                    from ..arena import run_arena
+                if action == 'arena':
+                    from ..collaboration import arena_jobs
                     entry = store.project(project_id)
                     cfg = service.config(entry['config'])
-                    return self.respond(run_arena(
-                        cfg,
-                        body.get('task', ''),
-                        body.get('candidates', []),
-                        test_preset=str(body.get('test_preset') or ''),
-                    ))
+                    if method == 'GET':
+                        return self.respond(service.redact({'jobs': arena_jobs.list_jobs(cfg, project_id)}))
+                    if method == 'POST':
+                        with service.operations:
+                            job = arena_jobs.start_job(cfg, entry['config'], project_id, self.idem(), body)
+                        return self.respond(service.redact(job), 202)
+            if len(parts) in (5, 6) and parts[:2] == ['api', 'projects'] and parts[3] == 'arena' and parts[4] != 'apply':
+                from ..collaboration import arena_jobs
+                project_id, job_id = parts[2], parts[4]
+                cfg = service.config(store.project(project_id)['config'])
+                if len(parts) == 5 and method == 'GET':
+                    return self.respond(service.redact(arena_jobs.get_job(cfg, project_id, job_id)))
+                if len(parts) == 6 and parts[5] == 'cancel' and method == 'POST':
+                    self.idem()
+                    return self.respond(service.redact(arena_jobs.cancel_job(cfg, project_id, job_id)), 202)
+                if len(parts) == 6 and parts[5] == 'events' and method == 'GET':
+                    events = lambda cursor: arena_jobs.read_events(cfg, project_id, job_id, cursor)
+                    return self.arena_stream(events, query)
             if len(parts) == 5 and parts[:2] == ['api', 'projects'] and parts[3:] == ['arena', 'apply'] and method == 'POST':
                 self.idem()
                 from ..arena import apply_arena_winner
-                from ..collaboration import project_manager
+                from ..collaboration import arena_jobs, project_manager
                 project_id = parts[2]
                 entry = store.project(project_id)
                 cfg = service.config(entry['config'])
+                job_id = str(body.get('arena_id') or '')
                 try:
                     with service.operations:
                         if project_manager.has_active_project_work(service, project_id):
                             raise Conflict('该项目尚有运行中的任务或会诊，请先停止后再合入竞技场方案')
+                        if arena_jobs.is_job_id(job_id) and arena_jobs.get_job(cfg, project_id, job_id)['status'] != 'done':
+                            raise Conflict('只能采纳已完成的竞技场任务')
                         return self.respond(apply_arena_winner(
                             cfg,
-                            str(body.get('arena_id') or ''),
+                            job_id,
                             str(body.get('label') or ''),
                             str(body.get('expected_base_sha') or ''),
+                            str(body.get('expected_candidate_sha') or ''),
+                            str(body.get('expected_evidence_sha256') or ''),
                         ))
                 except RuntimeError as error:
                     raise Conflict(str(error)) from error
@@ -367,6 +383,36 @@ class Handler(BaseHTTPRequestHandler):
         if not 8 <= len(value) <= 160:
             raise ValueError('缺少合法幂等标识')
         return value
+
+    def arena_stream(self, events, query):
+        cursor = max(0, int(self.headers.get('Last-Event-ID') or query.get('after', ['0'])[0]))
+        rows, terminal = events(cursor)
+        if not self.app.streams.acquire(blocking=False):
+            return self.respond({'error': '实时连接数量已到上限'}, 429)
+        try:
+            self.send_response(200)
+            self.headers_common()
+            self.send_header('Content-Type', 'text/event-stream; charset=utf-8')
+            self.send_header('Connection', 'close')
+            self.end_headers()
+            self.close_connection = True
+            heartbeat = time.monotonic()
+            while not self.app.closed.is_set():
+                for event in rows:
+                    cursor = event['cursor']
+                    data = json.dumps(event, ensure_ascii=False)
+                    self.wfile.write(f'id: {cursor}\nevent: update\ndata: {data}\n\n'.encode('utf8'))
+                if rows or time.monotonic() - heartbeat >= 12:
+                    self.wfile.write(b': heartbeat\n\n')
+                    self.wfile.flush()
+                    heartbeat = time.monotonic()
+                if terminal or self.app.closed.wait(.5):
+                    break
+                rows, terminal = events(cursor)
+        except (OSError, ValueError, KeyError):
+            pass
+        finally:
+            self.app.streams.release()
 
     def stream(self, run, query):
         if not self.app.streams.acquire(blocking=False):

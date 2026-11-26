@@ -82,6 +82,12 @@ def has_active_project_work(service, project_id: str) -> bool:
     from ..state import _pid_alive
     from .projection import directory, read_json
 
+    from .arena_jobs import has_active_job
+
+    entry = service.store.project(project_id)
+    if has_active_job(service.config(entry['config']), project_id):
+        return True
+
     prefix = project_id + ':'
     for run_key, proc in list(getattr(service, 'active', {}).items()):
         if proc is not None and proc.poll() is None and run_key.startswith(prefix):

@@ -129,3 +129,23 @@ class QoderAdapter(CLIAdapter):
                 if type(value) not in (int,float) or not math.isfinite(value) or value<0:raise ValueError('非法credits')
                 measured['qoder_credits']=value
         return measured
+
+
+from .spec import COMMON_CLI, AdapterSpec, Capabilities, OptionSpec, effort_option, model_option  # noqa: E402
+
+_QODER_EFFORTS = ("low", "medium", "high", "xhigh", "max")
+_QODER_THINKING = ("auto", "adaptive", "disabled")
+
+SPEC = AdapterSpec(
+    type="cli_qoder",
+    factory=QoderAdapter,
+    options=COMMON_CLI + (
+        model_option(),
+        effort_option(_QODER_EFFORTS),
+        OptionSpec("thinking", str, None, "无固定思考预算模式", choices=_QODER_THINKING,
+                   blank_none=True, overridable=True),
+    ),
+    capabilities=Capabilities(model_select=True, reasoning_effort=_QODER_EFFORTS, thinking=_QODER_THINKING,
+                              file_tools=True, usage_reporting="unknown"),
+    verified_versions=(SUPPORTED_VERSION,),
+)

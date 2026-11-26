@@ -135,3 +135,20 @@ class ClaudeAdapter(CLIAdapter):
                 return Result(ok=False,exit_code=proc.returncode,stdout=stdout,stderr=stderr,
                               channel=self.channel,tool_version=self._version,error_kind=ErrorKind.AUTH,usage={'usage_unknown':True})
             result=self._unknown_version(proc,'Claude Code终态协议不匹配');result.usage={'usage_unknown':True};return result
+
+
+from .spec import COMMON_CLI, AdapterSpec, Capabilities, OptionSpec, effort_option, model_option  # noqa: E402
+
+_CLAUDE_EFFORTS = ("low", "medium", "high", "xhigh", "max")
+
+SPEC = AdapterSpec(
+    type="cli_claude",
+    factory=ClaudeAdapter,
+    options=COMMON_CLI + (
+        model_option(),
+        effort_option(_CLAUDE_EFFORTS),
+        OptionSpec("inherit_connection", bool, True, "继承 ~/.claude/settings.json 的连接与模型字段"),
+    ),
+    capabilities=Capabilities(model_select=True, reasoning_effort=_CLAUDE_EFFORTS, file_tools=True),
+    verified_versions=tuple(sorted(SUPPORTED_VERSIONS)),
+)

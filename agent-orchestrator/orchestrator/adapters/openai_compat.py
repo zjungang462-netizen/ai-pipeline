@@ -399,3 +399,28 @@ class OpenAICompatAdapter(Adapter):
             content = content.replace(old, new, 1)
         dest.write_bytes(content.encode("utf-8"))
         return dest
+
+
+from .spec import AdapterSpec, Capabilities, OptionSpec, check_http_url  # noqa: E402
+
+_EFFORTS = ("none", "low", "medium", "high", "xhigh")
+_THINKING = ("enabled", "disabled")
+
+SPEC = AdapterSpec(
+    type="openai_compat",
+    factory=OpenAICompatAdapter,
+    kind_aware=True,
+    options=(
+        OptionSpec("base_url", str, doc="不含凭据的 HTTP(S) 端点", nonempty=True, check=check_http_url),
+        OptionSpec("model", str, doc="模型标识", nonempty=True, overridable=True),
+        OptionSpec("api_key_env", str, doc="凭据环境变量名；只存变量名，不存密钥", nonempty=True, secret_ref=True),
+        OptionSpec("temperature", float, 0.2, "采样温度", min=0),
+        OptionSpec("max_tokens", int, None, "单次输出 token 上限", positive=True),
+        OptionSpec("timeout_s", int, 120, "单次请求超时（秒）", positive=True),
+        OptionSpec("reasoning_effort", str, None, "思考强度；须由端点支持", choices=_EFFORTS, overridable=True),
+        OptionSpec("thinking", str, None, "思考开关；须由端点支持", choices=_THINKING, overridable=True),
+        OptionSpec("review_json_mode", bool, False, "审查阶段约束输出为 JSON 对象", overridable=True),
+    ),
+    capabilities=Capabilities(model_select=True, reasoning_effort=_EFFORTS, thinking=_THINKING,
+                              review_json_mode=True, streaming=True),
+)

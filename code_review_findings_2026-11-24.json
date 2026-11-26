@@ -1,0 +1,230 @@
+[
+  {
+    "id": "CR-01",
+    "priority": "P1",
+    "title": "Windows 非 Git 工作区基线提交因 argv 过长失败",
+    "type": "bug",
+    "status": "reproduced",
+    "confidence": "high",
+    "locations": [
+      "orchestrator/artifacts.py:281-299",
+      "orchestrator/artifacts.py:166-174",
+      "orchestrator/collaboration/config_copy.py:73-76"
+    ],
+    "trigger": "首次初始化含大量文件的非 Git 工作区，或派生大型快照；git add/diff/commit 的路径参数超过 Windows 32767 字符命令行限制",
+    "impact": "code 阶段在 prepare 阶段失败；Linux/macOS 存在 E2BIG 风险",
+    "recommendation": "使用 git --pathspec-from-file --pathspec-file-nul 或受控的 add -A；补 Windows 多文件回归测试"
+  },
+  {
+    "id": "CR-02",
+    "priority": "P1",
+    "title": "引擎 Git 提交未禁用 commit.gpgsign",
+    "type": "bug",
+    "status": "reproduced",
+    "confidence": "high",
+    "locations": [
+      "orchestrator/artifacts.py:119-136",
+      "orchestrator/arena.py:127"
+    ],
+    "trigger": "用户全局/仓库配置 commit.gpgsign=true，且签名程序或 agent 不可用",
+    "impact": "baseline、code 阶段提交、worktree 合并全部失败或挂起",
+    "recommendation": "在引擎提交前缀统一加 -c commit.gpgsign=false；与 arena 行为保持一致"
+  },
+  {
+    "id": "CR-03",
+    "priority": "P2",
+    "title": "adapter options 缺少 schema，未知键和错误类型不报错",
+    "type": "bug",
+    "status": "reproduced",
+    "confidence": "high",
+    "locations": [
+      "orchestrator/config.py:230-241",
+      "orchestrator/adapters/factory.py:13-24",
+      "orchestrator/doctor.py:100-111"
+    ],
+    "trigger": "拼错 max_tokens，或 temperature/max_tokens/timeout_s 传错类型，或 base_url 使用 file://、带凭据 URL",
+    "impact": "用户配置的 adapter 上限被静默忽略，错误值可能到运行期才失败；配置入口校验不一致",
+    "recommendation": "按 adapter type 建立 options schema，统一 parse_config/doctor/model_settings/工作台校验"
+  },
+  {
+    "id": "CR-04",
+    "priority": "P2",
+    "title": "测试/部署超时进程树清理不是强保证",
+    "type": "bug",
+    "status": "static",
+    "confidence": "high",
+    "locations": [
+      "orchestrator/testrun.py:82-103",
+      "orchestrator/deploy.py:129-154",
+      "orchestrator/supervisor.py:220-235"
+    ],
+    "trigger": "测试或部署命令启动守护进程/子进程后超时，taskkill 失败或 POSIX killpg 权限错误",
+    "impact": "后代进程继续持有端口/文件/工作区，后续阶段失败且需人工清理",
+    "recommendation": "复用 process_tree Job Object，统一 start_new_session/killpg；超时后校验进程树为空并记录 orphaned_pids"
+  },
+  {
+    "id": "CR-05",
+    "priority": "P2",
+    "title": "StageLock.stale_s 未使用，PID 复用导致永久锁",
+    "type": "robustness",
+    "status": "static",
+    "confidence": "high",
+    "locations": [
+      "orchestrator/state_io.py:111-132",
+      "orchestrator/maintenance.py:102"
+    ],
+    "trigger": "持锁进程死亡后 PID 被无关存活进程复用；或 maintenance 只看到锁文件存在",
+    "impact": "阶段/运行永久 lock_busy，清理被阻塞，只能手工删锁",
+    "recommendation": "锁记录进程启动时间/token，按 stale_s 与 PID 身份共同判断；maintenance 探测 PID 而不是只看文件"
+  },
+  {
+    "id": "CR-06",
+    "priority": "P3",
+    "title": "Service.active/active_topics 只增不减",
+    "type": "resource-leak",
+    "status": "static",
+    "confidence": "high",
+    "locations": [
+      "orchestrator/collaboration/service.py:289-307",
+      "orchestrator/collaboration/service.py:459-481"
+    ],
+    "trigger": "工作台长期运行并完成多个运行/讨论",
+    "impact": "Popen 对象及引用缓慢累积，内存/句柄增长",
+    "recommendation": "完成时 pop，健康检查/后台同步周期清理，使用有界映射"
+  },
+  {
+    "id": "CR-07",
+    "priority": "P3",
+    "title": "上游报告和 prompt 文件先全量读入再截断",
+    "type": "resource",
+    "status": "static",
+    "confidence": "high",
+    "locations": [
+      "orchestrator/prompt_context.py:30-32",
+      "orchestrator/prompt_context.py:54-60"
+    ],
+    "trigger": "CLI/模型生成超大 design.md/review.md 或 prompt 文件",
+    "impact": "内存峰值、prompt 组装变慢，严重时 OOM",
+    "recommendation": "read(limit+1)，prompt 文件设硬上限并报配置错误"
+  },
+  {
+    "id": "CR-08",
+    "priority": "P3",
+    "title": "openai_compat 非流式响应读取无上限",
+    "type": "resource",
+    "status": "static",
+    "confidence": "high",
+    "locations": [
+      "orchestrator/adapters/openai_compat.py:173-178"
+    ],
+    "trigger": "端点/代理返回超大 JSON 响应",
+    "impact": "单次调用内存耗尽；错误 body 写入 trace",
+    "recommendation": "resp.read(MAX+1)，超限返回 PARSE_FAILED，并限制 trace body"
+  },
+  {
+    "id": "CR-09",
+    "priority": "P3",
+    "title": "畸形 state 未校验单个 stage 值，列表接口可能 500",
+    "type": "robustness",
+    "status": "static",
+    "confidence": "high",
+    "locations": [
+      "orchestrator/collaboration/projection.py:64-76",
+      "orchestrator/collaboration/projection.py:113",
+      "orchestrator/collaboration/projection.py:148",
+      "orchestrator/collaboration/run_listing.py:155"
+    ],
+    "trigger": "JSON 合法但 stages 的值为字符串/数组等非 dict",
+    "impact": "一个坏 run 导致 /api/runs 整页 500，房间快照失败",
+    "recommendation": "递归校验每个 stage 字段；SummaryCache/run_listing 捕获 AttributeError/TypeError 并降级 unknown"
+  },
+  {
+    "id": "CR-10",
+    "priority": "P3",
+    "title": "workspace_sync 回滚可能二次失败并掩盖原错误",
+    "type": "robustness",
+    "status": "static",
+    "confidence": "high",
+    "locations": [
+      "orchestrator/adapters/workspace_sync.py:82-89"
+    ],
+    "trigger": "远程文件回写过程中 replacer 失败，回滚再次失败或 original 缺少新文件 key",
+    "impact": "工作区半更新，调用方看到错误的异常",
+    "recommendation": "记录不存在标记，best-effort 回滚并聚合异常；优先 temp+批量原子替换"
+  },
+  {
+    "id": "CR-11",
+    "priority": "P3",
+    "title": "Windows 设备名可作为项目标识",
+    "type": "bug",
+    "status": "static",
+    "confidence": "high",
+    "locations": [
+      "orchestrator/collaboration/project_manager.py:16",
+      "orchestrator/collaboration/project_manager.py:235",
+      "orchestrator/collaboration/project_manager.py:276-277"
+    ],
+    "trigger": "项目名使用 CON/PRN/NUL/COM1/LPT1 等 Windows 保留名",
+    "impact": "managed_projects 下配置/状态路径创建失败或出现特殊文件",
+    "recommendation": "复用 safety 保留名判断并拒绝 Windows 设备名/结尾点空格"
+  },
+  {
+    "id": "CR-12",
+    "priority": "P3",
+    "title": "config_copy.derive 复用已存在的派生工作区",
+    "type": "bug",
+    "status": "static",
+    "confidence": "medium",
+    "locations": [
+      "orchestrator/collaboration/config_copy.py:55-76"
+    ],
+    "trigger": "同一确定性 run_id 的派生任务在上次解压后失败并重试",
+    "impact": "派生源码带入父 commit 中不存在的旧文件，破坏可复现性；重复扫描开销",
+    "recommendation": "临时目录解压校验后原子 rename，或只清理自有目录；跳过 ensure_repo 后的重复 commit_files"
+  },
+  {
+    "id": "CR-13",
+    "priority": "P3",
+    "title": "Service.snapshot 对 job.max_duration_s=null 无防御",
+    "type": "robustness",
+    "status": "static",
+    "confidence": "medium",
+    "locations": [
+      "orchestrator/collaboration/service.py:151",
+      "orchestrator/collaboration/service.py:181"
+    ],
+    "trigger": "legacy/外部导入 job.json 的 started_at/max_duration_s 为 null 或缺失",
+    "impact": "房间快照 TypeError，接口 500",
+    "recommendation": "统一数值归一化，None 视为 0/not_recorded，并纳入 state shape 校验"
+  },
+  {
+    "id": "CR-14",
+    "priority": "P3",
+    "title": "preflight_cli 版本探测继承完整环境，潜在泄露 API Key",
+    "type": "security",
+    "status": "latent",
+    "confidence": "high",
+    "locations": [
+      "orchestrator/safety.py:221-244",
+      "orchestrator/safety.py:180-194"
+    ],
+    "trigger": "新增 CLI adapter 未覆盖 preflight，或直接调用 preflight_cli",
+    "impact": "版本探测/第三方 CLI 可读取全部 API key/token，违反环境白名单约束",
+    "recommendation": "传入 build_subprocess_env()；删除未使用路径或补回归测试"
+  },
+  {
+    "id": "CR-15",
+    "priority": "P3",
+    "title": "远程 Worker 幂等缓存仅记 job_id，重试永久 409",
+    "type": "protocol",
+    "status": "protocol",
+    "confidence": "high",
+    "locations": [
+      "orchestrator/remote_worker.py:260-273",
+      "orchestrator/remote_worker.py:85-130"
+    ],
+    "trigger": "executor 抛 ValueError/KeyError/TypeError，或首次执行成功但回执丢失后重试",
+    "impact": "客户端无法拿到结果，任务不可恢复，只能重启 Worker/换 job_id",
+    "recommendation": "按 job_id 缓存完整 receipt/错误，重复请求返回同一结果；只在有结果后标记已处理；加 TTL"
+  }
+]

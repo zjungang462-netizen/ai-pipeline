@@ -3,14 +3,13 @@ from __future__ import annotations
 
 import copy
 import difflib
-import math
 import os
 import re
 import shutil
 import tomllib
 from pathlib import Path
-from urllib.parse import urlsplit
 
+from .adapters import registry as adapter_registry
 from .adapters.factory import build_adapter
 from .config import ConfigError, config_key_sets, parse_config
 
@@ -92,35 +91,29 @@ def diagnose(path: str | Path) -> dict:
         return bool(shutil.which(command))
 
     used = {s.adapter for s in cfg.stages if s.kind != 'test'}
+    for issue in cfg.adapter_warnings:
+        add(issue.level, issue.path, issue.message, issue.hint)
     for name, adapter_cfg in cfg.adapters.items():
         label = f'adapters.{name}'
         try:
             adapter = build_adapter(adapter_cfg)
             opts = adapter_cfg.options
-            if adapter_cfg.type == 'openai_compat':
-                endpoint = urlsplit(opts['base_url'])
-                if endpoint.scheme not in ('http', 'https') or not endpoint.hostname or endpoint.username or endpoint.password:
-                    add('error', label+'.base_url', '需要不含凭据的 HTTP(S) 端点')
-                if not os.environ.get(opts['api_key_env']):
-                    add('error' if name in used else 'warning', label+'.api_key_env',
+            # 参数类型、范围与端点格式已由 parse_config 按 SPEC 校验；这里只做环境相关检查。
+            spec = adapter_registry.get(adapter_cfg.type)
+            for option in spec.options:
+                if option.secret_ref and not os.environ.get(opts.get(option.key) or ''):
+                    add('error' if name in used else 'warning', label+'.'+option.key,
                         '凭据环境变量未设置', '设置配置指定的环境变量；不要将凭据写入 TOML')
-                for key in ('temperature', 'max_tokens', 'timeout_s'):
-                    value = opts.get(key)
-                    if value is not None and (type(value) not in (int, float) or not math.isfinite(value)
-                                              or value < 0 or (key != 'temperature' and value == 0)):
-                        add('error', label+'.'+key, '需要有效的非负数（token/超时必须为正数）')
-            elif adapter_cfg.type.startswith('cli_'):
+            if spec.verified_versions:
+                add('ok', label+'.verified_versions', '已验证版本：' + '、'.join(spec.verified_versions),
+                    '未列出的版本由适配器在调用模型前拦截')
+            if adapter_cfg.type.startswith('cli_'):
                 from .safety import resolve_exe
                 exe = opts.get('exe')
                 if exe and not command_exists(exe, cfg.base_dir):
                     add('error', label+'.exe', '显式配置的可执行文件不存在或不可执行', '使用可执行文件绝对路径或 PATH 命令名')
                 elif not resolve_exe(adapter.exe_name, exe):
                     add('error' if name in used else 'warning', label+'.exe', '本机未找到 CLI 工具', '安装工具或配置 exe 绝对路径')
-                extra_env = opts.get('extra_env', [])
-                if not isinstance(extra_env, list) or not all(isinstance(v, str) and v for v in extra_env):
-                    add('error', label+'.extra_env', '需要环境变量名字符串数组')
-                if getattr(adapter, 'timeout_s', 0) <= 0:
-                    add('error', label+'.timeout_s', '超时必须为正数')
                 if adapter_cfg.type in ('cli_grok', 'cli_doubao'):
                     from .adapters.verified_runtimes import get_verified_runtime
                     from .state import sha256_file

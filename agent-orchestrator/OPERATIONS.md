@@ -93,6 +93,33 @@ Qwen、Qoder、Claude 共用已验证版本的流式终态表；反重力、Code
 
 每次运行独立解析配置中的 Git 路径。初始化、提交、恢复和证据校验共用这一路径；需要推断根提交时仅在本轮执行中缓存。工作台查看差异、会诊或创建后续任务时使用相应任务配置的 Git 路径。
 
+## 使用历史耗时分配快速回归
+
+有同一平台的验收记录时，可以将完整模块按耗时分配给少数工作进程，减少重复启动 Python 和空等慢模块的时间。传入上次验收的 `test-durations.json`，输出目录使用一个新路径。
+
+```powershell
+python scripts/precommit.py --workers 3 --timing-baseline D:/validation/previous/test-durations.json --output D:/validation/quick-new
+```
+
+## 同任务配对评测
+
+```powershell
+python scripts/paired_benchmark.py --output D:/benchmarks/paired-offline-new
+python scripts/paired_benchmark.py --output D:/benchmarks/paired-live-new --live-config D:/benchmarks/pair.toml --candidate editor_a --candidate editor_b
+```
+
+离线评测使用两个脚本候选和 `invoice`、`reservations`、`ledger` 三个固定任务。每个候选每任务重复三次，同一配对使用相同的 Git 基线、保护测试和预算，并交替调整候选执行顺序。`results.json` 记录指纹、逐次结果和阻塞原因，`report.md` 展示完成率、保护测试通过率、耗时和用量。
+
+真实配置须登记两个不同名称的编码适配器，并用 `report` 与 `review` 阶段选定公共设计和审查角色。每个样本默认预算为 50,000 本地计量 tokens、8 次模型调用、3 次未知用量调用及 360 秒。可用 `--max-tokens` 为整轮评测统一设定 token 上限。可添加 `--routing-state D:/path/to/state` 对照历史编码路由排序，双方须有可匹配的历史样本。输出目录须为仓库外的新目录。
+
+## 重算编码路由对照
+
+已有真实配对评测结果时，可以用当前项目的终态历史重新核对排序。历史门槛按不同运行计数，同一运行使用同一候选的多个编码阶段只增加阶段样本数。命令输出历史覆盖缺口、按逐样本收据重算的通过率，以及输入结果文件的 SHA-256。
+
+```powershell
+python -m orchestrator.cli route-recommend --state-dir D:/project/state --stage-kind code --min-runs 2 --paired-results D:/benchmarks/pair/results.json
+```
+
 ## 自身维护基准
 
 ```powershell
