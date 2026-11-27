@@ -10,3 +10,9 @@ class Phase5UI(unittest.TestCase):
         run=subprocess.run(['node',str(script)],capture_output=True,text=True,encoding='utf8',timeout=30)
         self.assertEqual(run.returncode,0,run.stdout+'\n'+run.stderr)
         self.assertIn('INSIGHTS_UI_OK',run.stdout)
+
+    def test_i18n_contract(self):
+        script=Path(__file__).parent/'js/i18n.cjs'
+        run=subprocess.run(['node',str(script)],capture_output=True,text=True,encoding='utf8',timeout=30)
+        self.assertEqual(run.returncode,0,run.stdout+'\n'+run.stderr)
+        self.assertIn('I18N_CONTRACT_OK',run.stdout)

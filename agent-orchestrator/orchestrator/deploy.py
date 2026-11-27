@@ -11,7 +11,7 @@ from pathlib import Path
 
 from .cli_telemetry import StreamRedactor
 from .contracts import StageStatus
-from .safety import build_subprocess_env
+from .safety import build_subprocess_env, environment_secrets
 from .state import RunState, atomic_write_json, sha256_text
 
 
@@ -98,11 +98,7 @@ def execute_deploy(
     gate = verify_deploy_gate(state, required_stages, approval, dry_run=dry_run)
     argv = list(spec.dry_run_command if (dry_run and spec.dry_run_command) else spec.command)
     env = build_subprocess_env(extra_allow=list(spec.allow_env))
-    secrets = [
-        value for key, value in (*env.items(), *os.environ.items())
-        if isinstance(value, str) and len(value) >= 8
-        and any(label in key.upper() for label in ('API_KEY', 'AUTH_TOKEN', 'ACCESS_TOKEN', 'SECRET', 'PASSWORD'))
-    ]
+    secrets = environment_secrets()
     redactor = StreamRedactor(secrets)
     safe_argv = [redactor.feed(arg, final=True) for arg in argv]
     if dry_run and not spec.dry_run_command:

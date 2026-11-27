@@ -22,6 +22,19 @@ python -m orchestrator.workbench_service run --config workbench.example.toml --d
 
 连续健康检查失败会记 unhealthy，保留仍存活的网页进程供排查，不因未知状态启动第二个实例。正常退出不重启。停止时在守护目录创建名为 `stop` 的文件；只终止守护器自己创建的网页子进程，独立任务进程保持。再次启动前确认旧进程退出并移除 stop。超限、blocked、unhealthy 均须查看 service.json 与 events.jsonl，不自动重置预算、重建任务或清除失败结论。
 
+## 容器化零密钥工作台
+
+从仓库根目录构建并启动赛事离线演练。镜像包含 Python 3.11 与 Git，以非 root 用户运行；容器入口显式监听 `0.0.0.0:8766`，并使用 `--origin http://localhost:8766` 固定同源校验，宿主发布端口仍只绑定回环地址。
+
+```powershell
+docker build -t ai-pipeline:local .
+docker run --rm -p 127.0.0.1:8766:8766 ai-pipeline:local
+```
+
+打开容器日志打印的 `http://localhost:8766/?lang=en#token=...`。该令牌等同于本次工作台会话入口，不要转发或提交。不要改成 `-p 8766:8766` 暴露到局域网或公网；远端使用优先通过 SSH 隧道。容器不挂载数据卷时，任务状态与工作区随容器删除；需要保留时另行规划专属卷和备份，不要把凭据、模型登录态或现有 `.workbench` 数据库复制进镜像。
+
+直接运行 `dashboard` 时默认仍只绑定 `127.0.0.1`。`--host` 仅用于明确需要改变监听地址的场景；非回环监听必须同时用 `--origin` 指定外部访问地址，Host 与 Origin 仍严格匹配，不会放宽同源、CSRF 或人工审批校验。构建上下文由根目录 `.dockerignore` 排除本地状态、数据库、日志、凭据文件和依赖目录。
+
 ## 在 Docker 中使用 Grok
 
 ```toml
@@ -95,11 +108,14 @@ Qwen、Qoder、Claude 共用已验证版本的流式终态表；反重力、Code
 
 ## 使用历史耗时分配快速回归
 
-有同一平台的验收记录时，可以将完整模块按耗时分配给少数工作进程，减少重复启动 Python 和空等慢模块的时间。传入上次验收的 `test-durations.json`，输出目录使用一个新路径。
+有同一平台的验收记录时，可以将完整模块按耗时分配给少数工作进程，减少重复启动 Python 和空等慢模块的时间。传入上次验收的 `test-durations.json`，或直接使用仓库内的紧凑模块耗时基线；输出目录使用一个新路径。
 
 ```powershell
-python scripts/precommit.py --workers 3 --timing-baseline D:/validation/previous/test-durations.json --output D:/validation/quick-new
+python scripts/precommit.py --workers 3 --timing-baseline tests/fixtures/verification-module-timings.json --output D:/validation/quick-new
+python scripts/verify_delivery.py --suite full --workers 8 --timing-baseline tests/fixtures/verification-module-timings.json --output D:/validation/full-new
 ```
+
+两种文件都只影响排程，不降低测试范围或通过标准。新增/更名模块没有历史耗时时使用中位数回退；基线必须是非空模块名到有限非负秒数的映射，或验收生成的逐用例耗时列表。
 
 ## 同任务配对评测
 

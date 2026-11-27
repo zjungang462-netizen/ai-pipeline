@@ -17,6 +17,8 @@ from collections.abc import Callable
 from pathlib import Path
 
 from ..contracts import ErrorKind, PreflightReport, Result, RunContext
+from ..safety import open_same_origin as _open_request
+from .spec import is_insecure_api_url
 from .base import Adapter
 
 
@@ -96,11 +98,15 @@ class OpenAICompatAdapter(Adapter):
                  max_tokens: int | None = None, timeout_s: int = 120,
                  reasoning_effort: str | None = None, thinking: str | None = None,
                  review_json_mode: bool = False, stream_tokens: bool = False,
-                 on_token: Callable[[str], None] | None = None):
+                 on_token: Callable[[str], None] | None = None,
+                 allow_insecure_http: bool = False):
         self.name = name
         self.base_url = base_url.rstrip("/")
         self.model = model
         self.api_key_env = api_key_env
+        if type(allow_insecure_http) is not bool:
+            raise ValueError('allow_insecure_http 必须为布尔值')
+        self.allow_insecure_http = allow_insecure_http
         self.kind = kind
         self.temperature = temperature
         self.max_tokens = max_tokens
@@ -121,6 +127,10 @@ class OpenAICompatAdapter(Adapter):
         return os.environ.get(self.api_key_env)
 
     def preflight(self) -> PreflightReport:
+        if is_insecure_api_url(self.base_url, self.allow_insecure_http):
+            return PreflightReport(
+                adapter=self.name, ok=False,
+                detail='非回环 API 端点必须使用 HTTPS；确需明文时显式设置 allow_insecure_http=true')
         key = self._key()
         if not key:
             return PreflightReport(
@@ -132,6 +142,10 @@ class OpenAICompatAdapter(Adapter):
             detail=f"已读取 {self.api_key_env}，端点 {self.base_url}")
 
     def run(self, prompt: str, workdir: Path, ctx: RunContext) -> Result:
+        if is_insecure_api_url(self.base_url, self.allow_insecure_http):
+            return Result(ok=False, exit_code=0, error_kind=ErrorKind.REJECTED,
+                          channel=self.channel,
+                          stderr='非回环 API 端点必须使用 HTTPS；确需明文时显式设置 allow_insecure_http=true')
         key = self._key()
         if not key:
             return Result(ok=False, exit_code=-1, error_kind=ErrorKind.AUTH,
@@ -170,16 +184,19 @@ class OpenAICompatAdapter(Adapter):
         streamed_data: dict | None = None
         body = ""
         try:
-            with urllib.request.urlopen(req, timeout=min(self.timeout_s, ctx.timeout_s)) as resp:
+            with _open_request(req, timeout=min(self.timeout_s, ctx.timeout_s)) as resp:
                 if self.stream_tokens:
                     streamed_data = parse_sse_stream(resp, on_token=self.on_token)
                     body = json.dumps(streamed_data, ensure_ascii=False)
                 else:
-                    body = resp.read().decode("utf-8")
+                    raw = resp.read(MAX_SSE_BYTES + 1)
+                    if len(raw) > MAX_SSE_BYTES:
+                        raise ValueError(f"API 响应超出最大字节上限 ({MAX_SSE_BYTES})")
+                    body = raw.decode("utf-8")
         except ValueError as e:
             return Result(ok=False, exit_code=0, error_kind=ErrorKind.PARSE_FAILED,
                           channel=self.channel, stdout=body, parse_unknown=True,
-                          stderr=f"流式响应解析失败: {e}",
+                          stderr=f"响应解析失败: {e}",
                           usage={'usage_unknown': True, 'duration_s': time.monotonic() - t0})
         except urllib.error.HTTPError as e:
             # 错误分类（评审 M6）：401/403→AUTH，429/5xx→RATE_LIMIT（可退避），其余 CRASH
@@ -420,6 +437,7 @@ SPEC = AdapterSpec(
         OptionSpec("reasoning_effort", str, None, "思考强度；须由端点支持", choices=_EFFORTS, overridable=True),
         OptionSpec("thinking", str, None, "思考开关；须由端点支持", choices=_THINKING, overridable=True),
         OptionSpec("review_json_mode", bool, False, "审查阶段约束输出为 JSON 对象", overridable=True),
+        OptionSpec("allow_insecure_http", bool, False, "允许非回环 HTTP 明文传输 API 凭据（仅限受信网络）"),
     ),
     capabilities=Capabilities(model_select=True, reasoning_effort=_EFFORTS, thinking=_THINKING,
                               review_json_mode=True, streaming=True),

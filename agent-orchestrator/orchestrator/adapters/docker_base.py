@@ -52,12 +52,12 @@ def validate_image_ref(image: str, label: str) -> None:
         raise ValueError(f'{label} image 必须是已验证探针镜像名')
 
 
-def base_run_args(*, host: str = DOCKER_HOST) -> list[str]:
-    """只读根文件系统、非 root、全量降权的最小容器执行参数。"""
+def base_run_args(*, host: str = DOCKER_HOST, user: str = '65534:65534') -> list[str]:
+    """只读根文件系统、默认非 root、全量降权的最小容器执行参数。"""
     return [
         '--host', host, 'run', '--rm', '--pull=never', '--platform', 'linux/amd64',
         '--read-only', '--cap-drop', 'ALL', '--security-opt', 'no-new-privileges',
-        '--user', '65534:65534',
+        '--user', user,
     ]
 
 

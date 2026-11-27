@@ -1,7 +1,11 @@
 """分层必须完整且互斥，避免 quick/full 重复执行或遗漏新增测试。"""
+import json
+from pathlib import Path
+import tempfile
 import unittest
 
-from scripts.verify_delivery import collect_tests, group_tests_by_module, schedule_shards, test_ids
+from scripts.verify_delivery import (collect_tests, group_tests_by_module, load_test_timings,
+                                     schedule_shards, test_ids)
 
 
 class TestLayers(unittest.TestCase):
@@ -32,3 +36,26 @@ class TestLayers(unittest.TestCase):
         shards = schedule_shards(grouped, timings, 2)
         self.assertEqual(shards, [('shard-01', ['heavy.one']), ('shard-02', ['light.one', 'light.two', 'new.one'])])
         self.assertEqual(schedule_shards(grouped, [], 2), grouped)
+
+    def test_module_timings_balance_whole_modules_and_fill_missing_costs(self):
+        grouped = [('light', ['light.one']), ('heavy', ['heavy.one']), ('new', ['new.one'])]
+        self.assertEqual(schedule_shards(grouped, {'light': 1.0, 'heavy': 30.0}, 2),
+                         [('shard-01', ['heavy.one']), ('shard-02', ['new.one', 'light.one'])])
+
+    def test_checked_in_module_timing_baseline_loads(self):
+        baseline = Path(__file__).parent / 'fixtures' / 'verification-module-timings.json'
+        timings = load_test_timings(baseline)
+        self.assertGreater(len(timings), 80)
+        self.assertTrue(all(isinstance(duration, (int, float)) and duration >= 0
+                            for duration in timings.values()))
+
+    def test_module_timing_loader_rejects_invalid_mappings(self):
+        invalid = ({}, {'module': -1}, {'module': '1'}, {'module': True},
+                   {'module': float('nan')}, {'module': float('inf')}, {'': 1})
+        with tempfile.TemporaryDirectory() as directory:
+            baseline = Path(directory) / 'timings.json'
+            for value in invalid:
+                with self.subTest(value=value):
+                    baseline.write_text(json.dumps(value), encoding='utf-8')
+                    with self.assertRaises(ValueError):
+                        load_test_timings(baseline)

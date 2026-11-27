@@ -6,9 +6,15 @@
 """
 from __future__ import annotations
 
+import functools
 import os
+import re
 import shutil
+import threading
+import urllib.error
+import urllib.request
 from pathlib import Path, PureWindowsPath
+from urllib.parse import urlsplit
 
 from .contracts import PreflightReport
 
@@ -176,6 +182,55 @@ _BASE_ENV_KEYS = ("PATH", "PATHEXT", "HOME", "USERPROFILE", "LANG", "LC_ALL",
                   "SYSTEMROOT", "WINDIR", "TEMP", "TMP", "APPDATA", "LOCALAPPDATA",
                   "PROGRAMFILES", "PROGRAMDATA", "COMSPEC", "NUMBER_OF_PROCESSORS")
 
+SECRET_ENV_RE = re.compile(
+    r'api.?key|auth.?token|access.?token|password|passwd|passphrase'
+    r'|secret|credential|token(?:_|$)|_key(?:_id)?$|(?:access|secret).?key|webhook', re.I)
+MIN_SECRET_BYTES = 4
+
+
+@functools.lru_cache(maxsize=512)
+def _is_secret_env_name(name: str) -> bool:
+    """名称→判定是纯函数；有界缓存避免每个响应重复跑正则。"""
+    return bool(SECRET_ENV_RE.search(name))
+
+
+def is_secret_env_name(name: str) -> bool:
+    return _is_secret_env_name(str(name or ''))
+
+
+# 环境变量快照缓存：每次调用仍完整读取 os.environ 作为键，任何增删改都会立刻命中新键，
+# 不会出现 TTL 期间漏掉新密钥的问题。缓存只保留最近一次结果。
+_ENV_SECRETS_LOCK = threading.Lock()
+_ENV_SECRETS_CACHE: tuple[tuple[tuple[str, str], ...], tuple[str, ...], int, tuple[str, ...]] | None = None
+
+
+def environment_secrets(extra_names=(), *, min_bytes: int = MIN_SECRET_BYTES) -> list[str]:
+    global _ENV_SECRETS_CACHE
+    explicit = {str(name) for name in (extra_names or ())}
+    explicit_key = tuple(sorted(explicit))
+    for _ in range(3):
+        try:
+            snapshot = tuple(os.environ.items())
+            break
+        except RuntimeError:
+            # 另一线程正在改 os.environ；重试取一致快照，绝不返回过期密钥列表。
+            continue
+    else:
+        snapshot = tuple(os.environ.items())
+    with _ENV_SECRETS_LOCK:
+        cached = _ENV_SECRETS_CACHE
+    if (cached is not None and cached[0] == snapshot
+            and cached[1] == explicit_key and cached[2] == min_bytes):
+        return list(cached[3])
+    values = tuple(
+        value for name, value in snapshot
+        if isinstance(value, str) and len(value.encode('utf8')) >= min_bytes
+        and (is_secret_env_name(name) or name in explicit)
+    )
+    with _ENV_SECRETS_LOCK:
+        _ENV_SECRETS_CACHE = (snapshot, explicit_key, min_bytes, values)
+    return list(values)
+
 
 def build_subprocess_env(extra_allow: list[str] | None = None) -> dict[str, str]:
     """白名单 env（评审 M4）：默认不透传任何 *_API_KEY / *_TOKEN。
@@ -192,6 +247,38 @@ def build_subprocess_env(extra_allow: list[str] | None = None) -> dict[str, str]
         if val is not None:
             env[key] = val
     return env
+
+
+def adapter_env_allow(adapters):
+    """仅收集适配器显式声明的凭据与连接环境变量名。"""
+    names = []
+    for adapter in adapters.values():
+        if adapter.type == 'openai_compat':
+            names.append(adapter.options['api_key_env'])
+        names.extend(adapter.options.get('extra_env') or ())
+    return list(dict.fromkeys(names))
+
+
+def _request_origin(url):
+    parsed = urlsplit(url)
+    scheme = parsed.scheme.lower()
+    default_port = 443 if scheme == 'https' else 80 if scheme == 'http' else None
+    port = parsed.port if parsed.port is not None else default_port
+    return scheme, (parsed.hostname or '').lower(), port
+
+
+class _SameOriginRedirectHandler(urllib.request.HTTPRedirectHandler):
+    """拒绝跨源重定向，避免认证头或签名载荷被转发。"""
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        if _request_origin(req.full_url) != _request_origin(newurl):
+            raise urllib.error.HTTPError(
+                req.full_url, code, 'Cross-origin redirect rejected', headers, fp)
+        return super().redirect_request(req, fp, code, msg, headers, newurl)
+
+
+def open_same_origin(request, timeout):
+    return urllib.request.build_opener(_SameOriginRedirectHandler()).open(request, timeout=timeout)
 
 
 def resolve_exe(name: str, configured: str | None = None) -> str | None:
@@ -211,7 +298,6 @@ def resolve_exe(name: str, configured: str | None = None) -> str | None:
     appdata = os.environ.get("APPDATA")
     if appdata:
         for cand in (Path(appdata) / "npm" / f"{name}.cmd",
-                     Path(appdata) / "npm" / f"{name}.ps1",
                      Path(appdata) / "npm" / name):
             if cand.is_file():
                 return str(cand)

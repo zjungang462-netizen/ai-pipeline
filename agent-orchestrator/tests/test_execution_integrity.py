@@ -117,7 +117,7 @@ class ExecutionIntegrity(unittest.TestCase):
         def response(*args, **kwargs):
             return io.BytesIO(json.dumps({"choices": [{"message": {"content": "body"}}]}).encode())
         with mock.patch.dict("os.environ", {"REVIEW_TEST_KEY": "dummy"}), \
-                mock.patch("urllib.request.urlopen", side_effect=response) as http, \
+                mock.patch("orchestrator.adapters.openai_compat._open_request", side_effect=response) as http, \
                 mock.patch("orchestrator.engine.artifacts.git_available", return_value=False):
             Engine(cfg, build_all(cfg.adapters, {}), "r", "task").run()
             cfg.adapters["api"].options["model"] = "v2"

@@ -18,6 +18,7 @@ import urllib.request
 from urllib.parse import urlsplit
 
 from .cli_telemetry import StreamRedactor
+from .safety import environment_secrets, open_same_origin
 
 DEFAULT_NOTIFY_EVENTS = ('done', 'failed', 'awaiting_approval', 'waiting_owner', 'waiting_external')
 SUPPORTED_FORMATS = ('generic', 'feishu', 'dingtalk', 'slack')
@@ -123,12 +124,7 @@ class WebhookNotifier:
         self._secrets = tuple(secrets)
 
     def _scrub(self, text: str, extra_secrets: tuple[str, ...] = ()) -> str:
-        env_secrets = [
-            value for key, value in os.environ.items()
-            if isinstance(value, str) and len(value) >= 8
-            and any(label in key.upper() for label in ('API_KEY', 'AUTH_TOKEN', 'ACCESS_TOKEN', 'SECRET', 'WEBHOOK'))
-        ]
-        redactor = StreamRedactor((*self._secrets, *extra_secrets, *env_secrets))
+        redactor = StreamRedactor((*self._secrets, *extra_secrets, *environment_secrets()))
         return redactor.feed(text, final=True)
 
     def notify(
@@ -172,7 +168,7 @@ class WebhookNotifier:
                     headers['X-Pipeline-Signature-256'] = sign_payload(body, secret)
             req = urllib.request.Request(url, data=body, headers=headers, method='POST')
             try:
-                with urllib.request.urlopen(req, timeout=target.timeout_s) as resp:
+                with open_same_origin(req, timeout=target.timeout_s) as resp:
                     code = getattr(resp, 'status', 200)
                     receipts.append(NotificationReceipt(target.name, 200 <= code < 300, status_code=code))
             except urllib.error.HTTPError as error:

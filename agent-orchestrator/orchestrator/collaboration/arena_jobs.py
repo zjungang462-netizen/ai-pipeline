@@ -13,7 +13,7 @@ import time
 
 from ..arena import arena_baseline, run_arena, validate_arena_request
 from ..config import load_config
-from ..safety import build_subprocess_env
+from ..safety import adapter_env_allow, build_subprocess_env
 from ..state_io import StageLock, atomic_write_json
 from .storage import Conflict
 
@@ -143,7 +143,7 @@ def cancel_job(cfg, project_id, job_id):
 
 
 def _launch(path, cfg):
-    allow = [a.options['api_key_env'] for a in cfg.adapters.values() if a.type == 'openai_compat']
+    allow = adapter_env_allow(cfg.adapters)
     with (path / 'worker.log').open('ab') as log:
         proc = subprocess.Popen(
             [sys.executable, '-X', 'utf8', '-m', 'orchestrator.collaboration.arena_jobs', str(path)],

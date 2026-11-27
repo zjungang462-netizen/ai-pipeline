@@ -487,41 +487,41 @@ class GitHelpers(unittest.TestCase):
     def test_tree_hash_ignores_quotepath_and_includes_gitlink(self):
         with tempfile.TemporaryDirectory() as d:
             repo = Path(d)
-            subprocess.run(["git", "init", "-q"], cwd=repo, check=True)
-            subprocess.run(["git", "config", "user.email", "t@t"], cwd=repo, check=True)
-            subprocess.run(["git", "config", "user.name", "t"], cwd=repo, check=True)
+            subprocess.run(["git", "init", "-q"], cwd=repo, env=dict(os.environ), check=True)
+            subprocess.run(["git", "config", "user.email", "t@t"], cwd=repo, env=dict(os.environ), check=True)
+            subprocess.run(["git", "config", "user.name", "t"], cwd=repo, env=dict(os.environ), check=True)
             (repo / "中文文件.py").write_text("A = 1\n", encoding="utf8")
-            subprocess.run(["git", "add", "-A"], cwd=repo, check=True)
-            subprocess.run(["git", "commit", "-qm", "one"], cwd=repo, check=True)
+            subprocess.run(["git", "add", "-A"], cwd=repo, env=dict(os.environ), check=True)
+            subprocess.run(["git", "commit", "-qm", "one"], cwd=repo, env=dict(os.environ), check=True)
             sha = artifacts.head_sha(repo)
             first = artifacts.tree_content_hash(repo, sha)
-            subprocess.run(["git", "config", "core.quotePath", "false"], cwd=repo, check=True)
+            subprocess.run(["git", "config", "core.quotePath", "false"], cwd=repo, env=dict(os.environ), check=True)
             self.assertEqual(first, artifacts.tree_content_hash(repo, sha))
             subprocess.run(["git", "update-index", "--add", "--cacheinfo",
                             "160000,1111111111111111111111111111111111111111,submod"],
-                           cwd=repo, check=True)
-            tree_a = subprocess.run(["git", "write-tree"], cwd=repo, check=True,
+                           cwd=repo, env=dict(os.environ), check=True)
+            tree_a = subprocess.run(["git", "write-tree"], cwd=repo, env=dict(os.environ), check=True,
                                     capture_output=True, text=True).stdout.strip()
-            subprocess.run(["git", "rm", "-q", "--cached", "submod"], cwd=repo, check=True)
+            subprocess.run(["git", "rm", "-q", "--cached", "submod"], cwd=repo, env=dict(os.environ), check=True)
             subprocess.run(["git", "update-index", "--add", "--cacheinfo",
                             "160000,2222222222222222222222222222222222222222,submod"],
-                           cwd=repo, check=True)
-            tree_b = subprocess.run(["git", "write-tree"], cwd=repo, check=True,
+                           cwd=repo, env=dict(os.environ), check=True)
+            tree_b = subprocess.run(["git", "write-tree"], cwd=repo, env=dict(os.environ), check=True,
                                     capture_output=True, text=True).stdout.strip()
             self.assertNotEqual(tree_a, tree_b)
 
     def test_commit_files_returns_none_with_unrelated_staged_change(self):
         with tempfile.TemporaryDirectory() as d:
             repo = Path(d)
-            subprocess.run(["git", "init", "-q"], cwd=repo, check=True)
-            subprocess.run(["git", "config", "user.email", "t@t"], cwd=repo, check=True)
-            subprocess.run(["git", "config", "user.name", "t"], cwd=repo, check=True)
+            subprocess.run(["git", "init", "-q"], cwd=repo, env=dict(os.environ), check=True)
+            subprocess.run(["git", "config", "user.email", "t@t"], cwd=repo, env=dict(os.environ), check=True)
+            subprocess.run(["git", "config", "user.name", "t"], cwd=repo, env=dict(os.environ), check=True)
             (repo / "a.py").write_text("A = 1\n", encoding="utf8")
             (repo / "other.py").write_text("O = 1\n", encoding="utf8")
-            subprocess.run(["git", "add", "-A"], cwd=repo, check=True)
-            subprocess.run(["git", "commit", "-qm", "base"], cwd=repo, check=True)
+            subprocess.run(["git", "add", "-A"], cwd=repo, env=dict(os.environ), check=True)
+            subprocess.run(["git", "commit", "-qm", "base"], cwd=repo, env=dict(os.environ), check=True)
             (repo / "other.py").write_text("O = 2\n", encoding="utf8")
-            subprocess.run(["git", "add", "other.py"], cwd=repo, check=True)
+            subprocess.run(["git", "add", "other.py"], cwd=repo, env=dict(os.environ), check=True)
             self.assertIsNone(artifacts.commit_files(repo, ["a.py"], "noop"))
 
 

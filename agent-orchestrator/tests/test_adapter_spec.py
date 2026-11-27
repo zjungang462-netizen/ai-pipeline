@@ -104,6 +104,14 @@ class ValidateOptionsTests(unittest.TestCase):
                 self.assertIsNotNone(check_http_url(url))
                 self.assertIn('adapters.a.base_url', self.errors({**API, 'base_url': url}))
 
+    def test_non_loopback_http_requires_explicit_opt_in(self):
+        raw = {**API, 'base_url': 'http://api.example.com/v1'}
+        self.assertIn('allow_insecure_http', self.errors(raw)['adapters.a.base_url'])
+        self.assertEqual(self.errors({**raw, 'allow_insecure_http': True}), {})
+        for url in ('http://127.0.0.1:8080/v1', 'http://localhost:8080/v1', 'http://[::1]:8080/v1'):
+            with self.subTest(url=url):
+                self.assertEqual(self.errors({**API, 'base_url': url}), {})
+
     def test_unknown_key_warns_with_suggestion(self):
         _, issues = validate_options(self.spec, 'a', {**API, 'max_token': 100})
         self.assertEqual([(i.level, i.path) for i in issues], [('warning', 'adapters.a.max_token')])

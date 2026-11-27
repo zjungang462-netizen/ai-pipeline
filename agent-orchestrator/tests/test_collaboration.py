@@ -153,7 +153,7 @@ class Collaboration(unittest.TestCase):
         before = path.read_bytes()
         service = self.service()
         run = service.store.runs()[0]
-        with mock.patch('orchestrator.adapters.openai_compat.urllib.request.urlopen', side_effect=AssertionError('must not call')):
+        with mock.patch('orchestrator.adapters.openai_compat._open_request', side_effect=AssertionError('must not call')):
             for _ in range(3):
                 self.assertFalse(service.snapshot(run['id'])['managed'])
                 service.store.message(run['id'], '留言不执行 @developer', 'note-only-001')

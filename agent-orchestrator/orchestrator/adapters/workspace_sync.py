@@ -90,36 +90,47 @@ def apply_raw_updates(
     return list(updates)
 
 
+def _staging_chmod(path: Path, mode: int) -> None:
+    try:
+        path.chmod(mode)
+    except OSError:
+        if os.name != 'nt':
+            raise
+
+
 def materialize_staging(
     staging_dir: Path,
     files: dict[str, bytes],
     editable_files: tuple[str, ...],
-) -> None:
-    """在隔离临时目录物化声明文件；目录开放容器非 root 访问，只读上下文文件设 0444。"""
+) -> int | None:
+    """物化宿主私有暂存区；返回需要 DAC_OVERRIDE 的宿主 UID，否则返回 None。"""
     root = Path(staging_dir).resolve()
-    try:
-        root.chmod(0o777)
-    except OSError:
-        pass
+    _staging_chmod(root, 0o700)
     editable = set(editable_files)
     for name, data in files.items():
         target = relative_target(root, name)
         target.parent.mkdir(parents=True, exist_ok=True)
-        try:
-            current = target.parent
-            while current != root and root in current.parents:
-                current.chmod(0o777)
-                current = current.parent
-        except OSError:
-            pass
+        current = target.parent
+        while current != root and root in current.parents:
+            _staging_chmod(current, 0o700)
+            current = current.parent
         target.write_bytes(data)
-        try:
-            if name in editable:
-                target.chmod(0o666)
-            elif os.name != 'nt':
-                target.chmod(0o444)
-        except OSError:
-            pass
+        _staging_chmod(target, 0o600 if name in editable else 0o400)
+    if os.name == 'nt':
+        return None
+    euid = os.geteuid()
+    if euid == 65534:
+        return None
+    try:
+        for current, _, names in os.walk(root):
+            os.chown(current, 65534, 65534)
+            for name in names:
+                os.chown(Path(current) / name, 65534, 65534)
+    except OSError as error:
+        if euid == 0:
+            raise RuntimeError('无法将容器暂存区交给 nobody 用户；已停止执行') from error
+        return euid
+    return None
 
 
 def make_staging_removable(staging_dir: Path) -> None:

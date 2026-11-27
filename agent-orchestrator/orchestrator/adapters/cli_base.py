@@ -17,7 +17,7 @@ import time
 from pathlib import Path
 
 from ..contracts import ErrorKind, PreflightReport, Result, RunContext
-from ..safety import build_subprocess_env, preflight_cli, resolve_exe
+from ..safety import build_subprocess_env, environment_secrets, preflight_cli, resolve_exe
 from .base import Adapter
 from ..cli_telemetry import CLITrace, counter, partial_usage
 from ..output_tail import TextTail
@@ -272,10 +272,9 @@ class CLIAdapter(Adapter):
         allow = list(self.credential_env) + list(self.extra_env)
         env = build_subprocess_env(extra_allow=allow)
         env.update(env_overrides or {})
-        secrets = {v for k, v in env.items()
-                   if any(label in k.upper() for label in ('API_KEY', 'AUTH_TOKEN', 'ACCESS_TOKEN', 'CODEX_KEY'))}
+        secrets = set(environment_secrets())
         secrets.update(additional_secrets)
-        secrets = sorted((secret for secret in secrets if len(secret) >= 8), key=len, reverse=True)
+        secrets = sorted((secret for secret in secrets if len(secret) >= 4), key=len, reverse=True)
         trace=CLITrace(ctx,secrets,channel=self.channel)
         def scrub(value):
             value = _dec(value)

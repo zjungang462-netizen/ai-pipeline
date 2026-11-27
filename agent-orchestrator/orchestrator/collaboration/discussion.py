@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import re
 import time
 from pathlib import Path
@@ -27,6 +28,7 @@ _ROLE_GUIDANCE = {
     'skeptic': '你是红队质疑者：专门挑刺、反驳前面角色的盲区、幻觉假设与潜在回归风险，绝不附和客套。',
     'reviewer': '你是独立审查者：核查证据充分性、安全护栏、测试覆盖与结论是否经得起验证。',
 }
+_LOGGER = logging.getLogger(__name__)
 _MENTION_FILE_RE = re.compile(r'@([A-Za-z0-9_./\\-]+\.[A-Za-z0-9]{1,12})')
 _SENSITIVE_FILE_NAMES = frozenset((
     '.env', '.npmrc', '.pypirc', '.netrc', 'id_rsa', 'id_ed25519', 'id_ecdsa', 'id_dsa',
@@ -161,6 +163,16 @@ def settle_parent(run, topic, usage):
         state.save()
 
 
+def _persisted_analysis_usage(base: Path, run_id: str):
+    state = RunState(base / 'state', run_id)
+    try:
+        if not state.load():
+            return None
+    except (OSError, ValueError):
+        return None
+    return dict(state.usage_total)
+
+
 def _collect_human_interjections(
     store,
     run_id: str,
@@ -243,11 +255,9 @@ def _build_seat_adapter(
 ) -> AdapterConfig:
     if adapter_type == 'cli_agy':
         agy_base = agys[0] if agys else None
-        opts: dict = {}
-        if agy_base:
-            for k in ('exe', 'proxy_url', 'model', 'allow_patch_probe'):
-                if k in agy_base.options:
-                    opts[k] = agy_base.options[k]
+        if agy_base is None:
+            raise ValueError(f'席位 {role} 选择了 cli_agy，但项目配置中没有可用的 cli_agy 适配器')
+        opts: dict = dict(agy_base.options)
         # 严格强制只读 plan + sandbox，绝不允许圆桌讨论改写代码
         opts['mode'] = 'plan'
         opts['sandbox'] = True
@@ -286,7 +296,9 @@ def execute(store, topic_id, *, stream_tokens: bool = False):
     agys = [a for a in original.adapters.values() if a.type == 'cli_agy']
     rt = topic['snapshot'].get('roundtable') if isinstance(topic['snapshot'].get('roundtable'), dict) else {}
     role_adapters = rt.get('role_adapters') if isinstance(rt.get('role_adapters'), dict) else {}
-    if not apis and not agys and 'cli_agy' not in role_adapters.values():
+    requested = set(role_adapters.values())
+    if ((not apis and not agys) or ('cli_agy' in requested and not agys)
+            or ('openai_compat' in requested and not apis)):
         raise ValueError('会诊需要已配置的 openai_compat API 或 cli_agy 只读适配器')
     # 独立分析空间：对运行中/历史任务提问不会改变其不可变 metrics。
     base = Path(run['state_dir']) / 'discussions' / topic_id
@@ -296,6 +308,7 @@ def execute(store, topic_id, *, stream_tokens: bool = False):
         return
     reserved = False
     settled = False
+    engine = None
     try:
         if store.thread(topic_id)['status'] not in ('queued', 'running'):
             return
@@ -439,10 +452,21 @@ def execute(store, topic_id, *, stream_tokens: bool = False):
     except BaseException:
         if reserved and not settled:
             try:
-                settle_parent(run, topic, {'tokens': 0, 'reported_tokens': 0, 'reserved_tokens': 0,
-                                           'unknown_calls': 0, 'duration_s': 0.0})
-            except Exception:
-                pass
+                usage = engine.state.usage_total if engine is not None else _persisted_analysis_usage(base, topic_id)
+                if usage is None:
+                    _LOGGER.warning(
+                        '会诊 %s 异常后无法确认分析运行用量，父运行预留仍未结算',
+                        topic_id,
+                    )
+                else:
+                    settle_parent(run, topic, usage)
+                    settled = True
+            except Exception as error:
+                _LOGGER.warning(
+                    '会诊 %s 用量结算失败，父运行预留仍未结算：%s',
+                    topic_id,
+                    error,
+                )
         raise
     finally:
         lock.release()

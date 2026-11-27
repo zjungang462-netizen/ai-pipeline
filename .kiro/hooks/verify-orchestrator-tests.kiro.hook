@@ -1,17 +1,21 @@
 {
-  "name": "Verify Orchestrator Quick Acceptance",
+  "name": "Verify Offline Judge Demo",
   "version": "1.1.0",
-  "description": "Run the quick offline acceptance suite (about 35-70 seconds) when orchestrator Python, tests or dashboard static files change.",
+  "description": "Run the packaged offline demo through failure, repair and human approval in a temporary workspace.",
   "when": {
     "type": "fileEdited",
     "patterns": [
       "agent-orchestrator/orchestrator/**/*.py",
       "agent-orchestrator/orchestrator/dashboard/static/*",
-      "agent-orchestrator/tests/**/*.py"
+      "agent-orchestrator/tests/**/*.py",
+      "agent-orchestrator/tests/js/*.cjs",
+      "agent-orchestrator/scripts/verify_delivery.py",
+      "agent-orchestrator/*.example.toml",
+      "agent-orchestrator/scripts/verify_judge_demo.py"
     ]
   },
   "then": {
     "type": "runCommand",
-    "command": "python -X utf8 agent-orchestrator/scripts/verify_delivery.py --quick --redact-logs --output ci-evidence/kiro-quick"
+    "command": "python -X utf8 agent-orchestrator/scripts/verify_judge_demo.py"
   }
 }

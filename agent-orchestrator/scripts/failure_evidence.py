@@ -12,6 +12,8 @@ import unittest
 import uuid
 from pathlib import Path
 
+from orchestrator.safety import MIN_SECRET_BYTES, SECRET_ENV_RE, environment_secrets
+
 ENV_OUTPUT = 'ORCHESTRATOR_TEST_EVIDENCE'
 MAX_ENTRIES = 4000
 MAX_FILES = 80
@@ -23,11 +25,8 @@ LOG_NAMES = {'stdout.txt', 'stderr.txt', 'live-stdout.log', 'live-stderr.log',
              'worker.log', 'manager.log', 'test_output.txt', 'calls.txt'}
 SKIP_DIRS = {'.git', '.codex', 'worktree', 'workspace', 'recovery', '__pycache__',
              'node_modules', '.venv', '.test-failures'}
-# 敏感变量名：覆盖 token/passphrase/密钥类常见命名，大小写不敏感。
-# token 用 token(?:_|$) 而非裸 token，避免把 tokens/token_count 这类用量字段当凭据替换。
-SENSITIVE = re.compile(
-    r'api.?key|auth.?token|access.?token|password|passwd|passphrase'
-    r'|secret|credential|token(?:_|$)|_key(?:_id)?$|(?:access|secret).?key', re.I)
+# 敏感变量名与运行日志、API 脱敏共用同一识别规则。
+SENSITIVE = SECRET_ENV_RE
 # 可识别令牌前缀：长度下限取得保守，避免把普通文本误替换成 [REDACTED]。
 TOKEN = re.compile(
     r'\b(?:sk-[A-Za-z0-9_-]{16,}'
@@ -40,15 +39,8 @@ TOKEN = re.compile(
     r'|xox[bp]-[A-Za-z0-9-]{10,}'
     r'|AIza[0-9A-Za-z_-]{30,})\b')
 URL_AUTH = re.compile(r'(https?://)[^\s/:]+:[^\s/@]+@')
-# 凭据值下限（UTF-8 字节）：原实现 >=8 会把 6 字符一类短密码漏进诊断包，故降到 4；
-# 不再降到非空，是因为 1-3 字节值常见于配置开关/编号，全局子串替换会毁坏诊断正文。
+# 凭据值下限（UTF-8 字节）：1-3 字节值常见于配置开关/编号，不做全局子串替换。
 # 按字节而非字符计数，多字节的短凭据（如 2 个 CJK 字符）也能被覆盖。
-MIN_SECRET_BYTES = 4
-
-
-def environment_secrets():
-    return [v for k, v in os.environ.items()
-            if SENSITIVE.search(k) and isinstance(v,str) and len(v.encode('utf8'))>=MIN_SECRET_BYTES]
 
 
 class Scrubber:

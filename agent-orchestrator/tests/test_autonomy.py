@@ -143,7 +143,7 @@ class Check(unittest.TestCase):
         ctx=RunContext('t','r','review',self.ws,self.root/'run',kind='review',output_tokens=128)
         for reason,expected in [('stop',True),('length',False)]:
             body=io.BytesIO(json.dumps({'choices':[{'message':{'content':'{"verdict":"pass","issues":[]}'},'finish_reason':reason}],'usage':{'total_tokens':10}}).encode())
-            with mock.patch.dict('os.environ',{'AUTONOMY_TEST_KEY':'dummy'}),mock.patch('urllib.request.urlopen',return_value=body):
+            with mock.patch.dict('os.environ',{'AUTONOMY_TEST_KEY':'dummy'}),mock.patch('orchestrator.adapters.openai_compat._open_request',return_value=body):
                 result=ad.run('p',self.ws,ctx)
             self.assertEqual(result.ok,expected)
             if expected:self.assertTrue(result.verdict_file.is_file())

@@ -18,6 +18,7 @@ class Phase5HTTP(unittest.TestCase):
         self.root=Path(temp.name);self.config=self.root/'c.toml'
         self.config.write_text('task_workdir="ws"\nstate_dir="state"\n[run_budget]\nmax_tokens=100\nmax_duration_s=60\n[[stages]]\nname="testing"\nkind="test"\ntest_cmd=["python","-c","pass"]\n',encoding='utf8')
         self.server=create_server(self.root/'db.sqlite3',[self.config],0)
+        self.assertEqual(self.server.server_address[0], '127.0.0.1')
         thread=threading.Thread(target=self.server.serve_forever,daemon=True);thread.start()
         def close():
             self.server.application.closed.set();self.server.shutdown();self.server.server_close();thread.join(5)
@@ -77,3 +78,49 @@ class Phase5HTTP(unittest.TestCase):
         status,data,headers=self.request('/insights.js')
         self.assertEqual(status,200);self.assertIn('Content-Security-Policy',headers)
         self.assertIn(b'compareText',data)
+
+    def test_explicit_wildcard_bind_uses_configured_origin_and_host_checks(self):
+        server=create_server(self.root/'wildcard.sqlite3',[self.config],0,host='0.0.0.0',
+                             origin='http://workbench.test:8766')
+        self.assertEqual(server.server_address[0], '0.0.0.0')
+        self.assertEqual(server.application.origin, 'http://workbench.test:8766')
+        thread=threading.Thread(target=server.serve_forever,daemon=True);thread.start()
+        self.addCleanup(lambda: (server.application.closed.set(),server.shutdown(),
+                                 server.server_close(),thread.join(5)))
+        def request(path, body=None, headers=None):
+            connection=http.client.HTTPConnection('127.0.0.1',server.server_port,timeout=5)
+            request_headers={'Host':server.application.origin.split('://',1)[1]}
+            if body is not None:
+                request_headers.update({'Content-Type':'application/json','Origin':server.application.origin})
+            request_headers.update(headers or {})
+            try:
+                connection.request('POST' if body is not None else 'GET',path,
+                                   json.dumps(body) if body is not None else None,request_headers)
+                response=connection.getresponse();raw=response.read()
+                return response.status,json.loads(raw)
+            finally:connection.close()
+        self.assertEqual(request('/api/health')[0],200)
+        self.assertEqual(request('/api/health',headers={'Host':'untrusted.invalid'})[0],403)
+        self.assertEqual(request('/api/session',{'token':server.application.bootstrap},
+                                 {'Origin':'https://untrusted.invalid'})[0],403)
+        self.assertEqual(request('/api/session',{'token':server.application.bootstrap})[0],200)
+
+    def test_container_entry_starts_dashboard_and_excludes_local_state(self):
+        root=Path(__file__).resolve().parents[2]
+        dockerfile=(root/'Dockerfile').read_text(encoding='utf8')
+        command=next(line for line in dockerfile.splitlines() if line.startswith('CMD '))
+        argv=json.loads(command[4:])
+        self.assertIn('dashboard',argv)
+        self.assertEqual(argv[argv.index('--host')+1],'0.0.0.0')
+        self.assertEqual(argv[argv.index('--origin')+1],'http://localhost:8766')
+        self.assertEqual(argv[argv.index('--config')+1],'kiroween-demo.example.toml')
+        self.assertIn('USER workbench',dockerfile)
+        ignored=(root/'.dockerignore').read_text(encoding='utf8').splitlines()
+        for pattern in ('**/.workbench','**/.env','**/*.sqlite3','**/__pycache__'):
+            self.assertIn(pattern,ignored)
+
+    def test_i18n_static_is_served_as_executable_javascript(self):
+        status,data,headers=self.request('/i18n.js')
+        self.assertEqual(status,200)
+        self.assertEqual(headers['Content-Type'],'text/javascript; charset=utf-8')
+        self.assertIn(b'WorkbenchI18n',data)

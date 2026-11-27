@@ -2,26 +2,43 @@
 const fs=require('node:fs'),path=require('node:path'),vm=require('node:vm'),assert=require('node:assert/strict');
 const dir=path.resolve(__dirname,'../../orchestrator/dashboard/static');
 const html=fs.readFileSync(path.join(dir,'index.html'),'utf8');
+const i18nSource=fs.readFileSync(path.join(dir,'i18n.js'),'utf8');
 const ids=[...html.matchAll(/\bid="([^"]+)"/g)].map(m=>m[1]);
+const descendants=node=>node.children.flatMap(child=>[child,...descendants(child)]);
+const datasetKey=name=>name.replace(/^data-/,'').replace(/-([a-z])/g,(_,letter)=>letter.toUpperCase());
+function matches(node,selector){
+ const tag=selector.match(/^([a-z]+)/)?.[1],attrs=[...selector.matchAll(/\[([^\]=]+)(?:="([^"]*)")?\]/g)],classes=[...selector.matchAll(/\.([\w-]+)/g)].map(match=>match[1]);
+ return (!tag||node.tag===tag)&&attrs.every(([,name,value])=>Object.prototype.hasOwnProperty.call(node.dataset,datasetKey(name))&&(value===undefined||node.dataset[datasetKey(name)]===value))&&classes.every(name=>node.classes.has(name)||String(node.className||'').split(/\s+/).includes(name));
+}
 class Element{
- constructor(){this.children=[];this._text='';this.value='';this.disabled=false;this.style={};this.dataset={};this.classList={toggle(){}};}
+ constructor(tag='div'){this.tag=tag;this.children=[];this._text='';this.value='';this.disabled=false;this.open=false;this.style={};this.dataset={};this.attributes={};this.className='';this.classes=new Set();this.listeners={};this.classList={toggle:(name,value)=>{const next=value===undefined?!this.classes.has(name):!!value;next?this.classes.add(name):this.classes.delete(name);return next;},contains:name=>this.classes.has(name)};}
  set textContent(v){this._text=String(v??'');this.children=[];}get textContent(){return this._text+this.children.map(n=>n.textContent||'').join('');}
- querySelectorAll(){return this.children.flatMap(node=>[...(node.dataset?.adapter?[node]:[]),...(node.querySelectorAll?node.querySelectorAll():[])]);}
+ getAttribute(name){return this.attributes[name]??this[name]??null;}setAttribute(name,value){this.attributes[name]=String(value);}removeAttribute(name){delete this.attributes[name];}
+ querySelectorAll(selector='*'){return descendants(this).filter(node=>matches(node,selector));}
+ addEventListener(type,fn){(this.listeners[type]??=[]).push(fn);}
  append(...nodes){this.children.push(...nodes);}replaceChildren(...nodes){this._text='';this.children=[...nodes];}showModal(){this.open=true;}close(){this.open=false;}
 }
 (async()=>{
  const nodes=new Map(ids.map(id=>[id,new Element()]));
+ const listeners={},title=new Element('title');title.textContent='流水线 · 协作工作台';
+ const allNodes=()=>[...new Set([...nodes.values(),...nodes.values().flatMap(descendants)])];
+ const document={documentElement:new Element('html'),getElementById:id=>nodes.get(id),createElement:tag=>new Element(tag),querySelector:selector=>selector==='title'?title:null,
+  querySelectorAll:selector=>allNodes().filter(node=>matches(node,selector)),addEventListener(type,fn){(listeners[type]??=[]).push(fn);},dispatchEvent(event){for(const fn of listeners[event.type]||[])fn(event);return true;}};
+ class CustomEvent{constructor(type,options={}){this.type=type;this.detail=options.detail;}}
+ const stored=new Map([['wb_lang','zh-CN']]),localStorage={getItem:key=>stored.get(key)??null,setItem:(key,value)=>stored.set(key,String(value))};
  const requests=[],messages=[];let page=0,resolveTemplates;
- const context=vm.createContext({document:{getElementById:id=>nodes.get(id),createElement:()=>new Element()},URLSearchParams,Map,Set,console,
+ const context=vm.createContext({document,location:{search:''},CustomEvent,localStorage,URLSearchParams,Map,Set,console,
   api:async(url,options)=>{requests.push({url,options});
    if(url==='/templates'&&!options)return new Promise(resolve=>{resolveTemplates=resolve;});
    if(url==='/templates')return {saved:true};
    if(url.startsWith('/compare'))return {same_config:false,left:{lifecycle:'failed'},right:{lifecycle:'done'},delta:{tokens:10,reported_tokens:null,reserved_tokens:0,duration_s:2}};
    if(url.startsWith('/failures')){page++;return {failures:[{id:'r1',run_id:'run1',categories:['timeout']}],errors:[],has_more:page===1,next_after:page===1?'cursor-1':null};}
+   if(url.includes('/lessons?'))return {proposal:{scanned_runs:4,items:[{occurrences:2,source:'tests/test_retry.py',checklist:'检查 retry.py 边界'}]},approved:{items:[]}};
    if(url.includes('/route-recommend'))return {recommendations:{code:{recommended:{tool:'cli_agy',model:'gemini-4-neon-high'}}}};
    if(url.startsWith('/models/catalog'))return {adapters:{}};
    throw Error('unexpected '+url);},toast:message=>messages.push(message),select(){},renderTaskScope(){}});
  vm.runInContext(`const $=id=>document.getElementById(id);function el(tag,cls,text){const n=document.createElement(tag);if(text!==undefined)n.textContent=text;return n;}function show(){};const num=n=>String(n);const labels={done:'完成',failed:'失败'};let parent=null,taskProjectsFresh=true;const projects=[{id:'p',config_hash:'hash',models:[{name:'api',type:'openai_compat',model:'fixture-model',supports_effort:true,supports_thinking:true}]}],runs=[{id:'a',run_id:'a'},{id:'b',run_id:'b'}];`,context);
+ vm.runInContext(i18nSource,context);
  vm.runInContext(fs.readFileSync(path.join(dir,'insights.js'),'utf8'),context);
  vm.runInContext(`renderBudgetAlerts({budget_alerts:[{dimension:'tokens',ratio:.85}],budget:{unlimited_tokens:true,max_model_calls:6,max_unknown_calls:3}})`,context);
  assert.ok(nodes.get('budget-alert').textContent.includes('85%'));
@@ -66,7 +83,7 @@ class Element{
  const connections=[],streams=[];
  class Source{constructor(){this.listeners={};streams.push(this);}addEventListener(name,fn){this.listeners[name]=fn;}}
  const replay=vm.createContext({EventSource:Source,Map,Math,JSON,Number,encodeURIComponent,setTimeout:()=>1,setConnection:(ok,text)=>connections.push(text),renderFeed(){},api(){},feedNearEnd:()=>true,trimEvents(){},updateFeedNavigation(){}});
- vm.runInContext("let stream=null,current={id:'old'},events=new Map(),reloadTimer=null,selectGeneration=0,latestFeedCursor=0,historyViewing=false,firstCursor=0;const pendingFeedEvents=new Map();",replay);
+ vm.runInContext("let stream=null,current={id:'old'},events=new Map(),reloadTimer=null,selectGeneration=0,latestFeedCursor=0,historyViewing=false,feedFollowing=true,firstCursor=0;const pendingFeedEvents=new Map();",replay);
  vm.runInContext(open,replay);
  vm.runInContext("openStream('old',0);current={id:'new'};openStream('new',4)",replay);
  streams[0].onerror();assert.equal(connections.length,0);
@@ -120,5 +137,29 @@ class Element{
  vm.runInContext("pmDraftStages=[{name:'coding',kind:'code',adapter_type:'cli_agy',model:'m1'},{name:'review',kind:'review',adapter_type:'openai_compat',model:'m2',feedback_to:'coding'}];renderProjectStageEditor();",context);
  vm.runInContext("pmDraftStages.reverse();renderProjectStageEditor();",context);
  assert.equal(vm.runInContext("pmDraftStages[0].feedback_to",context),'','review moved to index 0 must clear stale feedback_to');
+ // 竞技场守卫：仅开发项目可启动，模拟、固定测试和分析项目均不发请求。
+ vm.runInContext("projects.push({id:'sim',name:'kiroween-demo.example',execution_scope:{mode:'simulation'}})",context);
+ nodes.get('arena-project').value='sim';assert.equal(vm.runInContext('renderArenaScope()',context),true);assert.equal(nodes.get('arena-run').disabled,true);
+ nodes.get('arena-task').value='演示';const arenaRequests=()=>requests.filter(r=>String(r.url).includes('/arena')).length;const beforeArena=arenaRequests();await nodes.get('arena-run').onclick();
+ assert.equal(arenaRequests(),beforeArena);assert.ok(messages.includes('离线演练、固定测试或分析流程不会启动本机真实 CLI；请使用代码开发项目。'));
+ vm.runInContext("projects.at(-1).execution_scope.mode='fixed_tests'",context);assert.equal(vm.runInContext('renderArenaScope()',context),true);await nodes.get('arena-run').onclick();assert.equal(arenaRequests(),beforeArena);
+ vm.runInContext("projects.at(-1).execution_scope.mode='analysis'",context);assert.equal(vm.runInContext('renderArenaScope()',context),true);await nodes.get('arena-run').onclick();assert.equal(arenaRequests(),beforeArena);
+ vm.runInContext("projects.at(-1).execution_scope.mode='development'",context);assert.equal(vm.runInContext('renderArenaScope()',context),false);assert.equal(nodes.get('arena-run').disabled,false);
+ nodes.get('task-input').value='保留用户任务';
+ const modelValues=vm.runInContext('JSON.stringify(modelSettingsValues())',context);
+ vm.runInContext("WorkbenchI18n.setLanguage('en')",context);
+ assert.equal(vm.runInContext('WorkbenchI18n.language',context),'en');
+ assert.equal(nodes.get('task-input').value,'保留用户任务');
+ assert.equal(nodes.get('arena-task').value,'演示');
+ assert.equal(vm.runInContext('JSON.stringify(modelSettingsValues())',context),modelValues);
+ vm.runInContext("renderBudgetAlerts({budget_alerts:[{dimension:'tokens',ratio:.85}],budget:{unlimited_tokens:true,max_model_calls:6,max_unknown_calls:3}})",context);
+ assert.ok(nodes.get('budget-alert').textContent.includes('Token allowance used 85%'));
+ assert.ok(nodes.get('active-models').textContent.includes('Model call limit 6'));
+ assert.ok(nodes.get('model-settings').textContent.includes('Antigravity CLI'));
+ vm.runInContext("projects.at(-1).execution_scope.mode='simulation'",context);assert.equal(vm.runInContext('renderArenaScope()',context),true);await nodes.get('arena-run').onclick();
+ assert.ok(messages.at(-1).includes('Offline demos, fixed-test workflows, and analysis workflows do not launch real local CLIs'));
+ vm.runInContext("projects.at(-1).execution_scope.mode='fixed_tests'",context);assert.equal(vm.runInContext('renderArenaScope()',context),true);await nodes.get('arena-run').onclick();
+ vm.runInContext("projects.at(-1).execution_scope.mode='analysis'",context);assert.equal(vm.runInContext('renderArenaScope()',context),true);await nodes.get('arena-run').onclick();
+ assert.equal(arenaRequests(),beforeArena);
  console.log('INSIGHTS_UI_OK');
 })().catch(error=>{console.error(error);process.exitCode=1;});

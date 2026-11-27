@@ -1,6 +1,7 @@
 # Kiroween 2026 Zero-Key End-to-End Showcase Pipeline
 # Demonstrates multi-agent stages (requirements -> design -> coding -> real test -> review + human approval)
-# using the built-in offline FakeAdapter and real Python test execution — no API keys or local CLIs required.
+# OFFLINE SCRIPTED DEMO, not model output: intentional failure -> real feedback -> repair.
+# Uses FakeAdapter and fixed Python assertions — no API keys or model CLIs required.
 
 # schema: root.task_workdir：任务工作目录，相对配置文件目录解析
 task_workdir = ".workbench/kiroween-demo-workspace"
@@ -11,19 +12,39 @@ state_dir = ".workbench/kiroween-demo-state"
 # schema: run_budget.max_tokens：运行累计 token 上限；unlimited_tokens=true 时不设置
 max_tokens = 20000
 # schema: run_budget.max_duration_s：运行累计秒数上限；无人值守时必须为正数
-max_duration_s = 3600
+max_duration_s = 240
+
+[autonomy]
+# schema: autonomy.enabled：显式开启无人值守
+enabled = true
+# schema: autonomy.allowed_files：允许修改的相对文件路径白名单
+allowed_files = ["coding_output.py"]
+# schema: autonomy.baseline_paths：首次初始化加入基线的相对路径
+baseline_paths = ["coding_output.py"]
+# schema: autonomy.max_repair_rounds：整个反馈链的最大修复轮数
+max_repair_rounds = 2
+# schema: autonomy.max_stagnant_rounds：连续无进展的最大轮数
+max_stagnant_rounds = 2
+# schema: autonomy.repair_batch_size：单轮最多修改文件数
+repair_batch_size = 1
 
 [adapters.architect]
 type = "fake"
 kind = "report"
+scenario = "normalize_repair"
+delay_s = 0.75
 
 [adapters.coder]
 type = "fake"
 kind = "code"
+scenario = "normalize_repair"
+delay_s = 0.75
 
 [adapters.reviewer]
 type = "fake"
-kind = "report"
+kind = "review"
+scenario = "normalize_repair"
+delay_s = 0.75
 
 [[stages]]
 # schema: stages.name：唯一阶段名；字母数字、下划线、点或横线，禁止父目录段
@@ -35,7 +56,7 @@ adapter = "architect"
 # schema: stages.timeout_s：单次执行超时，秒
 timeout_s = 30
 # schema: stages.prompt：非 test 阶段必填；提示词文件或内联文本
-prompt = "Analyze requirements and produce a structured specification artifact."
+prompt = "OFFLINE SCRIPTED DEMO: specify normalize(value), lowercase whitespace-separated words joined by hyphens; empty input returns empty. Only coding_output.py may change. {task}"
 
 [[stages]]
 # schema: stages.name：唯一阶段名；字母数字、下划线、点或横线，禁止父目录段
@@ -47,7 +68,7 @@ adapter = "architect"
 # schema: stages.timeout_s：单次执行超时，秒
 timeout_s = 30
 # schema: stages.prompt：非 test 阶段必填；提示词文件或内联文本
-prompt = "Design module boundaries, state contracts, and verification criteria."
+prompt = "OFFLINE SCRIPTED DEMO: design normalize(value) using lower, whitespace split, and hyphen join. Explain fixed tests, bounded repair, scripted AST review and human approval. {upstream}"
 
 [[stages]]
 # schema: stages.name：唯一阶段名；字母数字、下划线、点或横线，禁止父目录段
@@ -59,7 +80,11 @@ adapter = "coder"
 # schema: stages.timeout_s：单次执行超时，秒
 timeout_s = 30
 # schema: stages.prompt：非 test 阶段必填；提示词文件或内联文本
-prompt = "Generate implementation module and stage artifact for repository commit."
+prompt = "OFFLINE SCRIPTED DEMO: write only coding_output.py with normalize(value). First attempt intentionally returns input; repair after real test feedback. Never modify tests or configuration. {task}\n{upstream}\n{feedback}"
+# schema: stages.max_attempts：本轮适配器调用尝试次数上限
+max_attempts = 1
+# schema: stages.context_files：显式上下文相对文件路径列表
+context_files = ["coding_output.py"]
 
 [[stages]]
 # schema: stages.name：唯一阶段名；字母数字、下划线、点或横线，禁止父目录段
@@ -69,16 +94,26 @@ kind = "test"
 # schema: stages.timeout_s：单次执行超时，秒
 timeout_s = 30
 # schema: stages.test_cmd：test 必填的非空 argv 数组，其它类型禁止设置
-test_cmd = ["python", "-X", "utf8", "-c", "import os; assert os.path.exists('coding_output.py'); print('Real test execution passed: coding_output.py verified')"]
+test_cmd = ["python", "-X", "utf8", "-B", "-c", "from coding_output import normalize; assert normalize(' A  B ') == 'a-b'; assert normalize('') == ''; assert normalize(' X\\tY\\nZ ') == 'x-y-z'; assert normalize('MiXeD CaSe') == 'mixed-case'; print('Real normalize assertions passed')"]
+# schema: stages.feedback_to：review/test 反馈目标，必须是之前的阶段
+feedback_to = "coding"
+# schema: stages.max_rounds：反馈轮次上限，含首轮
+max_rounds = 2
 
 [[stages]]
 # schema: stages.name：唯一阶段名；字母数字、下划线、点或横线，禁止父目录段
 name = "acceptance"
 # schema: stages.kind：code/report/review/test；verify 是 test 的兼容别名
-kind = "test"
+kind = "review"
+# schema: stages.adapter：非 test 阶段必填，引用具名适配器
+adapter = "reviewer"
 # schema: stages.approval：成功产物是否等待人工审批
 approval = true
 # schema: stages.timeout_s：单次执行超时，秒
 timeout_s = 20
-# schema: stages.test_cmd：test 必填的非空 argv 数组，其它类型禁止设置
-test_cmd = ["python", "-X", "utf8", "-c", "print('Ready for human approval gate in Web Workbench')"]
+# schema: stages.prompt：非 test 阶段必填；提示词文件或内联文本
+prompt = "OFFLINE SCRIPTED DEMO: independently inspect coding_output.py without executing it. Emit a scripted review report and review_verdict.json based on the AST, not coder claims. {upstream}"
+# schema: stages.feedback_to：review/test 反馈目标，必须是之前的阶段
+feedback_to = "coding"
+# schema: stages.max_rounds：反馈轮次上限，含首轮
+max_rounds = 2

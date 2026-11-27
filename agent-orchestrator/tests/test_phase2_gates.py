@@ -4,7 +4,9 @@ import io
 import json
 import os
 import subprocess
+import sys
 import tempfile
+import textwrap
 import time
 import unittest
 from pathlib import Path
@@ -13,6 +15,7 @@ from unittest import mock
 from scripts.failure_evidence import RedactedLog, capture
 from scripts.precommit import check_repository, credential_findings
 from scripts import verify_delivery
+from orchestrator.config import load_config
 from orchestrator.maintenance import prune_evidence
 
 
@@ -73,7 +76,7 @@ class Gates(unittest.TestCase):
         self.assertEqual(manual.read_text(encoding='utf8'),'keep')
 
     def git(self,*args):
-        return subprocess.run(['git','-C',str(self.root),*args],check=True,capture_output=True)
+        return subprocess.run(['git','-C',str(self.root),*args],env=dict(os.environ),check=True,capture_output=True)
 
     def repo(self):
         self.git('init','-q');self.git('config','user.name','test')
@@ -174,6 +177,126 @@ test_cmd=["python"]
         self.assertEqual(proof['tests_run'],1)
         self.assertEqual(len(proof['failures']),1)
         self.assertNotIn(token,json.dumps(proof))
+
+    def test_verification_smoke_uses_isolated_workspace_and_state(self):
+        source=Path(__file__).resolve().parents[1]/'workbench.example.toml'
+        before=source.read_bytes()
+        output=(self.root/'proof').resolve()
+        config_path=verify_delivery.write_isolated_smoke_config(source,output)
+        original=load_config(source)
+        isolated=load_config(config_path)
+        self.assertEqual(isolated.task_workdir,output/'smoke-workspace')
+        self.assertEqual(isolated.state_dir,output/'smoke-state')
+        self.assertEqual([(s.name,s.kind,s.test_cmd,s.approval) for s in isolated.stages],
+                         [(s.name,s.kind,s.test_cmd,s.approval) for s in original.stages])
+        self.assertEqual(isolated.run_budget,original.run_budget)
+        self.assertEqual(source.read_bytes(),before)
+
+    def test_parallel_worker_malformed_output_is_reported_without_losing_valid_shard(self):
+        output=self.root/'parallel'
+        bad_modules=('bad-json','bad-shape','bad-duration','bad-skipped','bad-failure','bad-evidence')
+        def fake_run(command, *, cwd, env, timeout):
+            spec_path=Path(command[command.index('--worker-input')+1])
+            spec=json.loads(spec_path.read_text(encoding='utf8'))
+            out_path=Path(command[command.index('--worker-output')+1])
+            module=spec['module']
+            if module=='bad-json':
+                out_path.write_text('{broken',encoding='utf8')
+                return subprocess.CompletedProcess(command,0,'','')
+            payload={
+                'module':module,'tests_run':1,'durations':[],
+                'failures':[],'errors':[],'skipped':[],'failure_evidence':[],
+            }
+            if module=='bad-shape':payload.pop('module')
+            elif module=='bad-duration':payload['durations']=[{}]
+            elif module=='bad-skipped':payload['skipped']=[None]
+            elif module=='bad-failure':payload['failures']=[{'test':'bad.failure'}]
+            elif module=='bad-evidence':payload['failure_evidence']=[{'test':'bad.evidence','evidence':7}]
+            out_path.write_text(json.dumps(payload),encoding='utf8')
+            return subprocess.CompletedProcess(command,0,'','')
+        grouped=[(module,[module.replace('-','_')+'.one']) for module in (*bad_modules,'good')]
+        with mock.patch.object(verify_delivery,'_run_worker_command',side_effect=fake_run):
+            merged=verify_delivery._run_parallel_workers(
+                grouped,output,output/'combined.log',output/'evidence',2)
+        self.assertEqual(merged['tests_run'],1)
+        self.assertEqual(merged['failures'],[])
+        self.assertEqual(len(merged['errors']),len(bad_modules))
+        errors={item['test']:item['traceback'] for item in merged['errors']}
+        self.assertEqual(set(errors),{module+'.<worker>' for module in bad_modules})
+        self.assertIn('JSONDecodeError',errors['bad-json.<worker>'])
+        self.assertIn('worker 输出结构无效',errors['bad-shape.<worker>'])
+        self.assertIn('worker 耗时记录无效',errors['bad-duration.<worker>'])
+        self.assertIn('worker 跳过记录无效',errors['bad-skipped.<worker>'])
+        self.assertIn('worker 失败或错误记录无效',errors['bad-failure.<worker>'])
+        self.assertIn('worker 失败证据记录无效',errors['bad-evidence.<worker>'])
+
+    def test_parallel_worker_timeout_terminates_process_and_records_failure(self):
+        output=self.root/'timeout'
+        command=[sys.executable,'worker.py']
+        proc=mock.Mock(pid=4321,returncode=-9)
+        proc.communicate.side_effect=[subprocess.TimeoutExpired(command,0.01),('','')]
+        proc.poll.return_value=-9
+        with mock.patch.object(verify_delivery.subprocess,'Popen',return_value=proc), \
+                mock.patch.object(verify_delivery,'_terminate_worker_process') as terminate:
+            merged=verify_delivery._run_parallel_workers(
+                [('hung',['hung.test'])],output,output/'combined.log',output/'evidence',1,
+                worker_timeout=0.01)
+        terminate.assert_called_once()
+        self.assertEqual(merged['tests_run'],0)
+        self.assertEqual(len(merged['errors']),1)
+        self.assertEqual(merged['errors'][0]['test'],'hung.<worker>')
+        self.assertIn('worker 超时',merged['errors'][0]['traceback'])
+        self.assertIn('0.01',merged['errors'][0]['traceback'])
+
+    def test_parallel_suite_deadline_does_not_start_queued_workers(self):
+        output=self.root/'deadline'
+        with mock.patch.object(verify_delivery,'_run_worker_command') as run:
+            merged=verify_delivery._run_parallel_workers(
+                [('queued',['queued.test'])],output,output/'combined.log',output/'evidence',1,
+                deadline=time.monotonic()-1)
+        run.assert_not_called()
+        self.assertEqual(merged['tests_run'],0)
+        self.assertEqual(merged['errors'][0]['test'],'queued.<worker>')
+        self.assertIn('总时限',merged['errors'][0]['traceback'])
+
+    def test_empty_git_config_env_is_preserved_after_patch_restore(self):
+        # 隔离 Windows 环境写回：空值是合法的 Git 配置重置，不能删除整组变量。
+        env=dict(os.environ)
+        env.update({'GIT_CONFIG_COUNT':'2',
+                    'GIT_CONFIG_KEY_0':'http.extraHeader','GIT_CONFIG_VALUE_0':'',
+                    'GIT_CONFIG_KEY_1':'core.autocrlf','GIT_CONFIG_VALUE_1':'false'})
+        code=textwrap.dedent(r'''
+            import os
+            import sys
+            from pathlib import Path
+            from unittest import mock
+
+            sys.path.insert(0, str(Path.cwd() / 'tests'))
+            from test_phase2_gates import Gates
+            from scripts import verify_delivery
+
+            before=dict(os.environ)
+            with mock.patch.dict(os.environ, {'DELIVERY_TEST_MARKER':'temporary'}):
+                pass
+            assert dict(os.environ) == before
+            with mock.patch.object(verify_delivery, '_worker_main', return_value=0):
+                assert verify_delivery.main(['--worker-input','unused']) == 0
+            assert dict(os.environ) == before
+
+            case=Gates()
+            case.setUp()
+            try:
+                case.git('init','-q')
+                assert case.git('config','--get','http.extraHeader').stdout == b'\n'
+                assert case.git('config','--get','core.autocrlf').stdout == b'false\n'
+                assert dict(os.environ) == before
+            finally:
+                case.doCleanups()
+        ''')
+        result=subprocess.run([sys.executable,'-X','utf8','-c',code],
+                              cwd=Path(__file__).resolve().parents[1],env=env,
+                              capture_output=True,text=True,encoding='utf8',timeout=60)
+        self.assertEqual(result.returncode,0,result.stdout+result.stderr)
 
 
 if __name__=='__main__':unittest.main()

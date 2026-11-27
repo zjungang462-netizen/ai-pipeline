@@ -64,6 +64,8 @@ class DockerBase(unittest.TestCase):
         self.assertIn('--platform', args)
         self.assertIn('linux/amd64', args)
         self.assertIn('65534:65534', args)
+        custom_user_args = base_run_args(user='1234:5678')
+        self.assertEqual(custom_user_args[custom_user_args.index('--user') + 1], '1234:5678')
         self.assertEqual(proxy_env_args(None), [])
         self.assertEqual(
             proxy_env_args('http://proxy:7897', include_no_proxy=True),

@@ -5,6 +5,7 @@
 from __future__ import annotations
 
 import difflib
+import ipaddress
 import math
 from dataclasses import dataclass
 from typing import Any, Callable
@@ -102,6 +103,36 @@ def check_http_url(value: str) -> str | None:
     return None
 
 
+def is_loopback_host(hostname: str | None) -> bool:
+    if not hostname:
+        return False
+    normalized = hostname.lower().rstrip('.')
+    if normalized == 'localhost':
+        return True
+    try:
+        return ipaddress.ip_address(normalized).is_loopback
+    except ValueError:
+        return False
+
+
+def is_insecure_api_url(value: str, allow_insecure_http: bool = False) -> bool:
+    try:
+        parts = urlsplit(str(value or '').strip())
+    except ValueError:
+        return False
+    return (parts.scheme.lower() == 'http' and bool(parts.hostname)
+            and not is_loopback_host(parts.hostname) and not allow_insecure_http)
+
+
+def check_api_url(value: str) -> str | None:
+    problem = check_http_url(value)
+    if problem:
+        return problem
+    if is_insecure_api_url(value):
+        return '非回环 API 端点必须使用 HTTPS；确需明文时设置 allow_insecure_http=true'
+    return None
+
+
 # CLI 适配器共用参数；默认值与 CLIAdapter.__init__ 一致（由契约测试保证）。
 COMMON_CLI: tuple[OptionSpec, ...] = (
     OptionSpec('exe', str, None, '可执行文件绝对路径或 PATH 命令名', blank_none=True),
@@ -189,6 +220,10 @@ def validate_options(spec: AdapterSpec, name: str, raw: dict, *,
             issues.append(Issue('error', f'{prefix}.{o.key}', problem))
         else:
             out[o.key] = value
+    if spec.type == 'openai_compat' and out.get('base_url') and not out.get('allow_insecure_http'):
+        problem = check_api_url(out['base_url'])
+        if problem:
+            issues.append(Issue('error', f'{prefix}.base_url', problem))
     return out, issues
 
 

@@ -20,6 +20,7 @@ from orchestrator.engine import Engine,BudgetExceeded
 from orchestrator import artifacts,recovery
 from orchestrator.cli_accounting import recover_pending_usage
 from orchestrator.state import sha256_file
+from cmd_shim import write_cmd_shim
 from scripts.failure_evidence import EvidenceTestCase
 
 
@@ -44,7 +45,7 @@ class CLIReliability(EvidenceTestCase):
         fixture=Path(__file__).parent/'fixtures/cli_fault_fixture.py'
         if os.name=='nt':
             executable=self.root/'fake-agy.cmd'
-            executable.write_text('@echo off\r\n"'+sys.executable+'" -u "'+str(fixture)+'" %*\r\n',encoding='utf8')
+            write_cmd_shim(executable,sys.executable,'-u',str(fixture),'%*')
         else:
             executable=self.root/'fake-agy'
             executable.write_text('#!'+sys.executable+'\nexec(compile(open('+repr(str(fixture))+',encoding="utf8").read(),'+repr(str(fixture))+',"exec"))\n',encoding='utf8')
@@ -171,6 +172,7 @@ class CLIReliability(EvidenceTestCase):
         ctx=self.ctx()
         # 覆盖进程启动和首条完整响应的等待，不能把活动必须可见偷换成 2.5 秒启动 SLA。
         ctx.timeout_s=20
+        self.evidence_metadata['test_timeout_s']=ctx.timeout_s+5
         env['CLI_FIXTURE_API_KEY']='sk-' 'live-test-private-key-1234567890'
         self.register_evidence_secrets(env['CLI_FIXTURE_API_KEY'])
         result=[]
@@ -179,15 +181,25 @@ class CLIReliability(EvidenceTestCase):
         thread=threading.Thread(target=run)
         thread.start()
         try:
-            deadline=time.monotonic()+10
+            deadline=time.monotonic()+ctx.timeout_s+5
             progress=None
+            observed=False
             while time.monotonic()<deadline:
+                ready=(data/'ready').is_file()
                 try:
                     progress=json.loads((ctx.attempt_dir/'cli-progress.json').read_text(encoding='utf8'))
-                    if progress['usage']['known_tokens']==30:break
-                except (OSError,ValueError):pass
+                except (OSError,ValueError):
+                    progress=None
+                if ready and progress and progress['usage']['known_tokens']==30:
+                    observed=True
+                    break
                 time.sleep(.03)
-            self.assertIsNotNone(progress)
+            if not observed:
+                log_path=ctx.attempt_dir/'live-stdout.log'
+                log_tail=log_path.read_text(encoding='utf8')[-1000:] if log_path.is_file() else '<missing>'
+                log_tail=log_tail.replace(env['CLI_FIXTURE_API_KEY'],'[REDACTED]')
+                self.fail(f'live CLI observation timed out: alive={thread.is_alive()}, '
+                          f'ready={ready}, progress={progress}, stdout_tail={log_tail!r}')
             self.assertTrue(thread.is_alive(),'must inspect during execution')
             self.assertEqual(progress['usage']['known_tokens'],30)
             raw=(ctx.attempt_dir/'live-stdout.log').read_text(encoding='utf8')
@@ -195,7 +207,7 @@ class CLIReliability(EvidenceTestCase):
             self.assertNotIn(env['CLI_FIXTURE_API_KEY'],raw)
         finally:
             (data/'stream-inspected').write_text('inspected',encoding='utf8')
-            thread.join(timeout=25)
+            thread.join(timeout=ctx.timeout_s+10)
         self.assertFalse(thread.is_alive())
         self.assertTrue(result[0].usage['usage_unknown'])
         self.assertEqual(result[0].usage['known_tokens'],30)

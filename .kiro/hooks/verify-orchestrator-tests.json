@@ -1,0 +1,16 @@
+{
+  "version": "v1",
+  "hooks": [
+    {
+      "name": "Verify Offline Judge Demo",
+      "description": "Run the packaged offline demo through failure, repair and human approval in a temporary workspace.",
+      "trigger": "PostFileSave",
+      "matcher": "(?:^|[/\\\\])agent-orchestrator[/\\\\](?:(?:orchestrator|tests)[/\\\\].*\\.py|orchestrator[/\\\\]dashboard[/\\\\]static[/\\\\][^/\\\\]+|tests[/\\\\]js[/\\\\][^/\\\\]+\\.cjs|scripts[/\\\\]verify_(?:delivery|judge_demo)\\.py|[^/\\\\]+\\.example\\.toml)$",
+      "action": {
+        "type": "command",
+        "command": "python -X utf8 agent-orchestrator/scripts/verify_judge_demo.py"
+      },
+      "timeout": 180
+    }
+  ]
+}

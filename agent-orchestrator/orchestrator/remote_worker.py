@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import base64
 from collections.abc import Callable
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 import hashlib
 import hmac
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -17,6 +17,7 @@ import urllib.request
 from urllib.parse import urlsplit
 
 from .adapters.workspace_sync import apply_raw_updates, collect_source_files
+from .safety import open_same_origin
 
 _LOOPBACK_HOSTS = {'127.0.0.1', 'localhost', '::1'}
 _TERMINAL_STATUSES = {'done', 'failed', 'timeout', 'rejected'}
@@ -56,6 +57,13 @@ class RemoteJobReceipt:
     def __post_init__(self) -> None:
         if self.status not in _TERMINAL_STATUSES:
             raise ValueError(f'非法远程回执状态: {self.status}')
+
+
+@dataclass
+class _RemoteJobState:
+    fingerprint: str
+    finished: threading.Event = field(default_factory=threading.Event)
+    receipt: RemoteJobReceipt | None = None
 
 
 def validate_worker_url(url: str) -> str:
@@ -101,7 +109,7 @@ class RemoteWorkerClient:
     def health(self, timeout_s: float = 5.0) -> dict:
         req = urllib.request.Request(f'{self.endpoint}/health', method='GET')
         try:
-            with urllib.request.urlopen(req, timeout=timeout_s) as resp:
+            with open_same_origin(req, timeout=timeout_s) as resp:
                 return json.loads(resp.read().decode('utf-8'))
         except (urllib.error.URLError, TimeoutError, OSError, ValueError) as error:
             raise RemoteWorkerError(f'Worker 心跳探测失败: {error}') from None
@@ -126,7 +134,7 @@ class RemoteWorkerClient:
         }
         req = urllib.request.Request(f'{self.endpoint}/jobs', data=body, headers=headers, method='POST')
         try:
-            with urllib.request.urlopen(req, timeout=min(self.timeout_s, spec.timeout_s)) as resp:
+            with open_same_origin(req, timeout=min(self.timeout_s, spec.timeout_s)) as resp:
                 resp_body = resp.read(MAX_REQUEST_BYTES + 1)
                 if len(resp_body) > MAX_REQUEST_BYTES:
                     raise RemoteWorkerError('远程 Worker 回执体积超限')
@@ -188,7 +196,7 @@ class RemoteWorkerServer:
         self._executor = executor
         self.started_at = time.time()
         self._seen_lock = threading.Lock()
-        self._seen_jobs: dict[str, float] = {}
+        self._seen_jobs: dict[str, _RemoteJobState] = {}
         parent = self
 
         class Handler(BaseHTTPRequestHandler):
@@ -257,29 +265,74 @@ class RemoteWorkerServer:
                 except (ValueError, KeyError, TypeError) as error:
                     self._send_json(400, {'error': str(error)})
                     return
+                fingerprint = hashlib.sha256(raw).hexdigest()
+                owner = False
+                capacity_error = False
+                payload_mismatch = False
                 with parent._seen_lock:
-                    if spec.job_id in parent._seen_jobs:
-                        self._send_json(409, {'error': 'duplicate_job_id'})
-                        return
-                    if len(parent._seen_jobs) >= _MAX_SEEN_JOBS:
-                        oldest = next(iter(parent._seen_jobs))
-                        parent._seen_jobs.pop(oldest, None)
-                    parent._seen_jobs[spec.job_id] = time.time()
+                    state = parent._seen_jobs.get(spec.job_id)
+                    if state is not None and state.fingerprint != fingerprint:
+                        payload_mismatch = True
+                    elif state is None:
+                        if len(parent._seen_jobs) >= _MAX_SEEN_JOBS:
+                            oldest = next((key for key, value in parent._seen_jobs.items()
+                                           if value.receipt is not None), None)
+                            if oldest is None:
+                                capacity_error = True
+                            else:
+                                parent._seen_jobs.pop(oldest, None)
+                        if not capacity_error:
+                            state = _RemoteJobState(fingerprint)
+                            parent._seen_jobs[spec.job_id] = state
+                            owner = True
+                if payload_mismatch:
+                    self._send_json(409, {'error': 'job_id_payload_mismatch'})
+                    return
+                if capacity_error:
+                    self._send_json(503, {'error': 'job_cache_busy'})
+                    return
+                if not owner:
+                    state.finished.wait(timeout=max(1, spec.timeout_s) + 5)
+                    with parent._seen_lock:
+                        receipt = state.receipt
+                    if receipt is None:
+                        self._send_json(503, {'error': 'job_in_progress'})
+                    else:
+                        self._send_json(200, asdict(receipt), sign=True)
+                    return
                 try:
                     receipt = parent._executor(spec)
+                    if not isinstance(receipt, RemoteJobReceipt):
+                        raise TypeError('执行器必须返回 RemoteJobReceipt')
+                    if receipt.job_id != spec.job_id:
+                        raise ValueError('执行器回执 job_id 不匹配')
                 except (ValueError, KeyError, TypeError) as error:
-                    self._send_json(400, {'error': str(error)})
-                    return
+                    receipt = RemoteJobReceipt(spec.job_id, parent.worker_id, 'rejected', -1,
+                                               stderr=str(error))
+                except Exception as error:
+                    receipt = RemoteJobReceipt(spec.job_id, parent.worker_id, 'failed', -1,
+                                               stderr=f'{type(error).__name__}: {error}')
+                with parent._seen_lock:
+                    state.receipt = receipt
+                    state.finished.set()
                 self._send_json(200, asdict(receipt), sign=True)
 
         self.httpd = ThreadingHTTPServer((host, port), Handler)
         self.port = self.httpd.server_port
         self._thread = threading.Thread(target=self.httpd.serve_forever, daemon=True)
+        self._started = False
 
     def start(self) -> None:
         self._thread.start()
+        self._started = True
 
     def close(self) -> None:
-        self.httpd.shutdown()
-        self.httpd.server_close()
-        self._thread.join(3)
+        try:
+            if self._started:
+                self.httpd.shutdown()
+        finally:
+            try:
+                self.httpd.server_close()
+            finally:
+                if self._started:
+                    self._thread.join(3)

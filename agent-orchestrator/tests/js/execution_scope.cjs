@@ -1,6 +1,6 @@
 'use strict';
 const fs=require('node:fs'),path=require('node:path'),vm=require('node:vm'),assert=require('node:assert/strict');
-const root=path.resolve(__dirname,'../..'),html=fs.readFileSync(path.join(root,'orchestrator/dashboard/static/index.html'),'utf8'),source=fs.readFileSync(path.join(root,'orchestrator/dashboard/static/app.js'),'utf8');
+const root=path.resolve(__dirname,'../..'),html=fs.readFileSync(path.join(root,'orchestrator/dashboard/static/index.html'),'utf8'),source=fs.readFileSync(path.join(root,'orchestrator/dashboard/static/app.js'),'utf8'),i18nSource=fs.readFileSync(path.join(root,'orchestrator/dashboard/static/i18n.js'),'utf8');
 const ids=[...html.matchAll(/\bid="([^"]+)"/g)].map(m=>m[1]);
 class Element{
  constructor(){this.children=[];this._text='';this.value='';this.disabled=false;this.open=false;this.style={};this.dataset={};this.classes=new Set();this.classList={toggle:(n,v)=>{v=v===undefined?!this.classes.has(n):v;v?this.classes.add(n):this.classes.delete(n);},contains:n=>this.classes.has(n)};}
@@ -38,8 +38,16 @@ async function boot({legacy=false,changed=false,unavailable=false}={}){
 const submit=node=>({preventDefault(){},submitter:node});
 const posts=b=>b.state.requests.filter(r=>r.url==='/api/runs'&&r.options.method==='POST');
 (async()=>{
- // 状态筛选文案与生命周期一致；阶段完成文案单独使用“已完成”。
- assert.ok(html.includes('<option value="done">流程完成</option>'),'状态筛选的完成文案应与运行生命周期一致');
+ // 状态筛选保留中文默认文案，并通过真实 i18n 契约提供英文切换。
+ assert.ok(/<option\b(?=[^>]*\bvalue="done")(?=[^>]*\bdata-i18n="sidebar\.done")[^>]*>流程完成<\/option>/.test(html),'状态筛选应保留“流程完成”中文默认并标记 sidebar.done');
+ const i18nContext=vm.createContext({});
+ vm.runInContext(i18nSource,i18nContext);
+ const i18n=i18nContext.WorkbenchI18n;
+ assert.equal(i18n.t('sidebar.done','流程完成'),'流程完成');
+ i18n.setLanguage('en');
+ assert.equal(i18n.t('sidebar.done','流程完成'),'Completed');
+ i18n.setLanguage('zh-CN');
+ assert.equal(i18n.t('sidebar.done','流程完成'),'流程完成');
  let b=await boot();
  assert.ok(b.nodes.get('run-list').children.find(n=>n.dataset.runId).textContent.includes('流程完成'),'运行卡片使用生命周期文案');
  // 打开“新建任务”时重新拉取项目配置，并携带 config_hash。

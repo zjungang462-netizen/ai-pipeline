@@ -1,0 +1,284 @@
+{
+  "date": "2026-11-26",
+  "timezone": "Asia/Shanghai",
+  "commit": "0b3f30d7705e0694521b2224a4e46a1392b35909",
+  "runtime": {
+    "platform": "Windows",
+    "python": "3.11.9",
+    "git": "2.45.1.windows.1",
+    "node": "24.15.0"
+  },
+  "mode": "offline models; real CLI processes, Git, Python assertions and Edge UI",
+  "precommit": {
+    "ok": true,
+    "config_checks": 20,
+    "issues": []
+  },
+  "regression": {
+    "quick": {
+      "tests_collected": 259,
+      "tests_run": 259,
+      "duration_s": 150.281,
+      "exit_code": 1,
+      "source_unchanged": true,
+      "failed": [],
+      "errors": [
+        "test_phase2_operations.Operations.test_worktree_prune_only_invalid_registrations_under_state_root",
+        "test_phase2_gates.Gates.test_precommit_accepts_valid_config_and_does_not_read_ignored_config",
+        "test_phase2_gates.Gates.test_precommit_catches_staged_secret_even_when_worktree_is_clean",
+        "test_phase2_gates.Gates.test_precommit_catches_untracked_secret_url_and_private_key",
+        "test_phase2_gates.Gates.test_precommit_rejects_unknown_config_in_index_and_worktree",
+        "test_arena.TestArena.test_arena_failed_candidate_preserves_stderr_and_skips_base_tests_and_rejects_dup_id",
+        "test_arena.TestArena.test_comparison_without_test_or_with_out_of_scope_changes_cannot_apply",
+        "test_arena.TestArena.test_parallel_worktree_arena_diff_and_controlled_ff_apply"
+      ],
+      "skipped": 0,
+      "passed": 251
+    },
+    "full": {
+      "tests_collected": 812,
+      "tests_run": 812,
+      "duration_s": 1050.204,
+      "exit_code": 1,
+      "source_unchanged": true,
+      "failed": [
+        "test_execution_integrity.ExecutionIntegrity.test_real_two_processes_preserve_single_execution_and_usage"
+      ],
+      "errors": [
+        "test_arena.TestArena.test_arena_failed_candidate_preserves_stderr_and_skips_base_tests_and_rejects_dup_id",
+        "test_arena.TestArena.test_comparison_without_test_or_with_out_of_scope_changes_cannot_apply",
+        "test_arena.TestArena.test_parallel_worktree_arena_diff_and_controlled_ff_apply",
+        "test_fix_ninth.GitHelpers.test_commit_files_returns_none_with_unrelated_staged_change",
+        "test_fix_ninth.GitHelpers.test_tree_hash_ignores_quotepath_and_includes_gitlink",
+        "test_phase2_gates.Gates.test_precommit_accepts_valid_config_and_does_not_read_ignored_config",
+        "test_phase2_gates.Gates.test_precommit_catches_staged_secret_even_when_worktree_is_clean",
+        "test_phase2_gates.Gates.test_precommit_catches_untracked_secret_url_and_private_key",
+        "test_phase2_gates.Gates.test_precommit_rejects_unknown_config_in_index_and_worktree",
+        "test_phase2_operations.Operations.test_worktree_prune_only_invalid_registrations_under_state_root",
+        "test_release_builder.ReleaseBuilder.test_changed_source_during_verification_is_not_published",
+        "test_release_builder.ReleaseBuilder.test_dirty_tree_and_inside_repo_output_rejected",
+        "test_release_builder.ReleaseBuilder.test_second_verification_failure_never_creates_final_package",
+        "test_release_builder.ReleaseBuilder.test_two_verifications_bind_head_raw_bytes_manifest_and_changelog"
+      ],
+      "skipped": 0,
+      "passed": 797
+    }
+  },
+  "smoke_example_count": 10,
+  "cli_demo": [
+    {
+      "step": "version",
+      "code": 0,
+      "seconds": 0.66
+    },
+    {
+      "step": "doctor",
+      "code": 0,
+      "seconds": 0.59
+    },
+    {
+      "step": "run",
+      "code": 11,
+      "seconds": 2.36
+    },
+    {
+      "step": "status",
+      "code": 0,
+      "seconds": 0.38
+    },
+    {
+      "step": "approve",
+      "code": 0,
+      "seconds": 0.77
+    },
+    {
+      "step": "resume",
+      "code": 0,
+      "seconds": 0.52
+    }
+  ],
+  "empty_file_showcase_test": {
+    "step": "empty_file_with_showcase_test",
+    "code": 0,
+    "bytes": 0
+  },
+  "browser_demo_final_stages": {
+    "requirements": "done",
+    "design": "done",
+    "coding": "done",
+    "testing": "done",
+    "acceptance": "done"
+  },
+  "scripted_benchmark": [
+    {
+      "scenario": "first_pass",
+      "mode": "offline_scripted",
+      "expected_terminal": "done",
+      "completed": true,
+      "wall_time_s": 2.328,
+      "expectation_met": true,
+      "attempts": {
+        "design": 1,
+        "coding": 1,
+        "testing": 1,
+        "review": 1
+      },
+      "repair_events": [],
+      "protected_test_unchanged": true
+    },
+    {
+      "scenario": "test_repair",
+      "mode": "offline_scripted",
+      "expected_terminal": "done",
+      "completed": true,
+      "wall_time_s": 3.313,
+      "expectation_met": true,
+      "attempts": {
+        "design": 1,
+        "coding": 2,
+        "testing": 2,
+        "review": 1
+      },
+      "repair_events": [
+        "test_feedback"
+      ],
+      "protected_test_unchanged": true
+    },
+    {
+      "scenario": "review_repair",
+      "mode": "offline_scripted",
+      "expected_terminal": "done",
+      "completed": true,
+      "wall_time_s": 3.39,
+      "expectation_met": true,
+      "attempts": {
+        "design": 1,
+        "coding": 2,
+        "testing": 2,
+        "review": 2
+      },
+      "repair_events": [
+        "review_feedback"
+      ],
+      "protected_test_unchanged": true
+    },
+    {
+      "scenario": "interrupt_resume",
+      "mode": "offline_scripted",
+      "expected_terminal": "done",
+      "completed": true,
+      "wall_time_s": 2.438,
+      "expectation_met": true,
+      "attempts": {
+        "design": 1,
+        "coding": 2,
+        "testing": 1,
+        "review": 1
+      },
+      "repair_events": [],
+      "protected_test_unchanged": true
+    },
+    {
+      "scenario": "exhausted",
+      "mode": "offline_scripted",
+      "expected_terminal": "failed",
+      "completed": false,
+      "wall_time_s": 3.406,
+      "expectation_met": true,
+      "attempts": {
+        "design": 1,
+        "coding": 2,
+        "testing": 2,
+        "review": 2
+      },
+      "repair_events": [
+        "review_feedback"
+      ],
+      "protected_test_unchanged": true
+    }
+  ],
+  "kiro_hook_from_root": {
+    "discovered_items": 88,
+    "import_errors": 85,
+    "exit_code": 1
+  },
+  "local_followup": {
+    "git_init_before_after_environ_mock_restore": [
+      0,
+      128
+    ],
+    "git_stderr_kind": "missing config value GIT_CONFIG_VALUE_0",
+    "explicit_python_env_for_git_children_rerun": {
+      "tests": 15,
+      "failures": 0,
+      "errors": 0,
+      "skips": 0
+    },
+    "note": "Targeted diagnostic only. Timing overlaps other tasks."
+  },
+  "github_actions": {
+    "run_id": 45740253448,
+    "jobs": [
+      {
+        "name": "quick (3.11)",
+        "conclusion": "failure",
+        "failed_steps": [
+          "Quick offline acceptance"
+        ]
+      },
+      {
+        "name": "quick (3.13)",
+        "conclusion": "failure",
+        "failed_steps": [
+          "Quick offline acceptance"
+        ]
+      }
+    ]
+  },
+  "not_exercised": [
+    "live paid providers",
+    "Kiro IDE event dispatch",
+    "Linux runtime",
+    "Docker image build"
+  ],
+  "followup_2026_11_27": {
+    "judge_demo_runs": 3,
+    "seconds_to_approval": [
+      13.92,
+      15.95,
+      14.03
+    ],
+    "test_exit_codes": [
+      1,
+      0
+    ],
+    "coding_attempts": 2,
+    "test_feedback_events": 1,
+    "review_verdict": "pass",
+    "browser_final_stages": "done",
+    "quick_final": {
+      "tests_run": 76,
+      "duration_s": 110.969,
+      "exit_code": 0,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0,
+      "source_unchanged": true
+    },
+    "full_final": {
+      "tests_run": 841,
+      "duration_s": 748.171,
+      "exit_code": 0,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0,
+      "workers": 4
+    },
+    "package_zip_sha256": "ffe88e89fdaadf693d804fece51c5965b2d10a78945c58f74bc85b895a95ce50",
+    "package_zip": "D:/work/judge-ready-il8j6dba/verified-judge-package/ai-pipeline-judge-demo-2026-11-27.zip",
+    "package_reextract_demo": "passed",
+    "package_reextract_navigation": "passed",
+    "browser_english_demo": "passed",
+    "remaining_known_flake": "parallel full run can intermittently fail test_cli_reliability.CLIReliability.test_live_files_exist_before_cli_exit_and_never_contain_secret; serial targeted rerun passed"
+  }
+}

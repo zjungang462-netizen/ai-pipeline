@@ -12,7 +12,9 @@ from pathlib import Path
 
 
 class Conflict(ValueError):
-    pass
+    def __init__(self, message: str, run_id: str | None = None):
+        super().__init__(message)
+        self.run_id = run_id
 
 
 def encode(value):

@@ -27,12 +27,22 @@ def linked(path: Path) -> bool:
 
 
 def boundary(path: Path, root: Path) -> None:
-    """先检查绝对路径及每个祖先，避免 resolve() 隐藏 junction/symlink。"""
+    """先检查绝对路径及每个祖先，避免 resolve() 隐藏 junction/symlink。
+
+    每个祖先只做一次 lstat：原实现先 exists()（跟随链接）再 linked()（lstat），
+    两次 syscall。单独 lstat 对普通文件/目录行为不变，对“指向不存在目标的链接”
+    反而更严格（原 exists() 为 False 时会漏过），且不存在/无权限时同样跳过。
+    """
     path, root = path.absolute(), root.absolute()
     if path == root or not path.is_relative_to(root):
         raise ValueError('清理目标必须严格位于指定根目录内')
     for parent in (path, *path.parents):
-        if parent.exists() and linked(parent):
+        try:
+            is_link = linked(parent)
+        except OSError:
+            # 不存在或无法读取：与原实现 exists() 为 False 时一致，不拦截。
+            continue
+        if is_link:
             raise ValueError('清理路径含符号链接或 reparse point，保留')
 
 
@@ -195,8 +205,15 @@ def prune_evidence(root: Path, *, keep=(), older_than=DEFAULT_RETENTION_DAYS,
 
 
 def _git(repo, *args):
-    env = dict(os.environ, LC_ALL='C', LANG='C')
-    return subprocess.run(['git', '-C', str(repo), *args], env=env, capture_output=True,
+    """与引擎其他 git 调用一致：环境白名单、禁用仓库 hook、按注册表解析 git。
+
+    固定 C 语言环境，保证 prune 预览的英文输出可被解析。
+    """
+    from .artifacts import _no_hooks_dir, resolve_git
+    from .safety import build_subprocess_env
+    env = dict(build_subprocess_env(), LC_ALL='C', LANG='C')
+    cmd = [resolve_git() or 'git', '-c', f'core.hooksPath={_no_hooks_dir()}', '-C', str(repo), *args]
+    return subprocess.run(cmd, env=env, capture_output=True,
                           text=True, encoding='utf8', errors='replace', timeout=30, check=True)
 
 

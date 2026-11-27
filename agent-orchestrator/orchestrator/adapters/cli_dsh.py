@@ -71,10 +71,10 @@ class DshAdapter(CLIAdapter):
                           stdout=stdout, stderr=stderr, text=stdout[:MAX_TEXT],
                           tool_version=self._version, error_kind=kind,usage=usage)
         if not stdout.strip():
-            # 退出 0 但无输出 => 空跑，引擎拒绝判完成
-            return Result(ok=True, exit_code=0, channel=self.channel,
-                          stdout=stdout, stderr=stderr, text="",
-                          tool_version=self._version,usage=usage)
+            return Result(ok=False, exit_code=0, channel=self.channel,
+                          stdout=stdout, stderr=stderr or 'dsh 退出 0 但未返回协议输出', text="",
+                          tool_version=self._version,error_kind=ErrorKind.PARSE_FAILED,
+                          parse_unknown=True,usage=usage)
         if not self._version_known():
             result=self._unknown_version(proc,'未经验证的 dsh 版本')
             # 兼容旧纯文本执行器的诊断归档：进程正常退出可生成报告，

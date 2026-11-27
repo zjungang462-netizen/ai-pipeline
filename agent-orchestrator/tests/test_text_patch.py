@@ -65,7 +65,7 @@ class TextPatchProtocol(unittest.TestCase):
             body=io.BytesIO(json.dumps({'choices':[{'message':{'content':response}}],'usage':{'total_tokens':123}}).encode())
             adapter=OpenAICompatAdapter('api','https://example.invalid','model','TEXT_PATCH_TEST_KEY')
             context=RunContext('t','r','coding',root,root/'runs',kind='code')
-            with mock.patch.dict('os.environ',{'TEXT_PATCH_TEST_KEY':'dummy'}),mock.patch('urllib.request.urlopen',return_value=body):
+            with mock.patch.dict('os.environ',{'TEXT_PATCH_TEST_KEY':'dummy'}),mock.patch('orchestrator.adapters.openai_compat._open_request',return_value=body):
                 result=adapter.run('p',root,context)
             self.assertFalse(result.ok);self.assertEqual(result.usage['tokens'],123)
             self.assertEqual(target.read_text(encoding="utf-8"),'original');self.assertTrue(result.stdout)

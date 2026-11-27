@@ -12,10 +12,11 @@ import time
 from pathlib import Path
 
 from ..config import load_config
+from ..safety import environment_secrets
 from ..state import RunState, atomic_write_json
 from .storage import Store, Conflict, identifier
 from .projection import project, directory, lifecycle, artifact_list, read_json, stage_target, SummaryCache
-from .execution_scope import execution_scope
+from .execution_scope import execution_scope, is_verified_showcase
 from .read_cache import ReadCache, file_stamp
 from . import run_listing
 
@@ -59,10 +60,7 @@ class Service:
         return cached[1]
 
     def redact(self, value):
-        secrets = []
-        for key, secret in os.environ.items():
-            if len(secret) >= 8 and any(s in key.upper() for s in ('API_KEY', 'AUTH_TOKEN', 'ACCESS_TOKEN')):
-                secrets.append(secret)
+        secrets = environment_secrets()
         def scrub(item):
             if isinstance(item, str):
                 for secret in secrets:
@@ -87,6 +85,7 @@ class Service:
                 from .model_settings import describe_models
                 result.append({**entry, 'execution_scope': execution_scope(cfg),
                                'config_hash': cfg.source_hash, 'models': describe_models(cfg),
+                               'verified_showcase': is_verified_showcase(cfg),
                                'unlimited_tokens': cfg.run_budget.unlimited_tokens})
             except Exception as error:
                 result.append({**entry, 'execution_scope': None, 'config_hash': None,
@@ -260,10 +259,12 @@ class Service:
                 if job.get('execution_options') != overrides:
                     raise Conflict('同一创建标识不能更换模型或 token 选项')
             else:
-                if any(r['id'] != parent and self._summary_cache.read(r)[1] in
-                       ('pending', 'running', 'recovering', 'paused', 'waiting_approval',
-                        'waiting_external', 'waiting_owner') for r in self.store.project_runs(project_id)):
-                    raise Conflict('此项目已有未结束任务；请先处理或取消')
+                unfinished = ('pending', 'running', 'recovering', 'paused', 'waiting_approval',
+                              'waiting_external', 'waiting_owner')
+                blocking = next((r['id'] for r in self.store.project_runs(project_id)
+                                 if r['id'] != parent and self._summary_cache.read(r)[1] in unfinished), None)
+                if blocking:
+                    raise Conflict('此项目已有未结束任务；请先处理或取消', blocking)
                 if parent:
                     from .config_copy import derive
                     cfg = load_config(derive(original, run_id))
@@ -295,8 +296,8 @@ class Service:
             if lock and _pid_alive(lock.get('pid')):
                 return
             cfg = load_config(run['config'])
-            from ..safety import build_subprocess_env
-            allow = [a.options['api_key_env'] for a in cfg.adapters.values() if a.type == 'openai_compat']
+            from ..safety import adapter_env_allow, build_subprocess_env
+            allow = adapter_env_allow(cfg.adapters)
             if os.environ.get('PIPELINE_STREAM_DISCUSSION') == '1':
                 allow.append('PIPELINE_STREAM_DISCUSSION')
             with (directory(run) / 'manager.log').open('ab') as log:
@@ -430,6 +431,11 @@ class Service:
                 if av not in ('openai_compat', 'cli_agy'):
                     raise ValueError(f'角色 {r} 的讨论后端仅支持 openai_compat 或 cli_agy（只读）')
                 clean_adapters[r] = av
+        if 'cli_agy' in clean_adapters.values():
+            from ..config import load_config
+            cfg = load_config(run['config'])
+            if not any(adapter.type == 'cli_agy' for adapter in cfg.adapters.values()):
+                raise ValueError('项目未配置 cli_agy 适配器，不能选择该会诊后端')
         clean_files = []
         if context_files is not None:
             if not isinstance(context_files, list) or len(context_files) > 4:
@@ -462,8 +468,8 @@ class Service:
             thread = self.store.thread(topic)
             run = self.store.run(thread['run_id'])
             cfg = load_config(run['config'])
-            from ..safety import build_subprocess_env
-            allow = [a.options['api_key_env'] for a in cfg.adapters.values() if a.type == 'openai_compat']
+            from ..safety import adapter_env_allow, build_subprocess_env
+            allow = adapter_env_allow(cfg.adapters)
             if os.environ.get('PIPELINE_STREAM_DISCUSSION') == '1':
                 allow.append('PIPELINE_STREAM_DISCUSSION')
             base = Path(run['state_dir']) / 'discussions' / topic

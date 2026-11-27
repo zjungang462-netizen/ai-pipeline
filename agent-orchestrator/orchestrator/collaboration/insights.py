@@ -7,8 +7,9 @@ from .projection import directory, lifecycle
 from .storage import Conflict
 
 
-def run_summary(service, key):
-    run = service.store.run(key)
+def run_summary(service, key, *, run=None):
+    # 列表类接口已经查出了 runs 行时直接复用，避免逐行再开一次查询。
+    run = service.store.run(key) if run is None else dict(run)
     root = directory(run)
     state = read_object(root / 'state.json')
     if state.get('schema_version') == 3:
@@ -40,20 +41,22 @@ def failure_page(service, after=None, limit=50):
         raise ValueError('limit 必须在 1..100')
     if after is not None and (not isinstance(after, str) or len(after) > 512):
         raise ValueError('after 无效')
-    rows = service.store.sync_runs(after, limit + 1)
-    selected = rows[:limit]
-    counts, failures, errors = {}, [], []
-    for run in selected:
-        try:
-            summary = run_summary(service, run['id'])
-            categories = summary['failure_categories']
-            if summary['lifecycle'] not in ('failed', 'timeout', 'cancelled'): continue
-            categories = categories or ['unknown']
-            failures.append(dict(id=run['id'], run_id=run['run_id'], lifecycle=summary['lifecycle'], categories=categories))
-            for category in categories: counts[category] = counts.get(category, 0) + 1
-        except (OSError, ValueError, TypeError, AttributeError):
-            errors.append(dict(id=run['id'], reason='unreadable_metadata'))
-    more = len(rows) > limit
+    # 整页共用一个会话（HTTP 路径已有外层会话时自动复用），并直接传入已查出的行。
+    with service.store.session():
+        rows = service.store.sync_runs(after, limit + 1)
+        selected = rows[:limit]
+        counts, failures, errors = {}, [], []
+        for run in selected:
+            try:
+                summary = run_summary(service, run['id'], run=run)
+                categories = summary['failure_categories']
+                if summary['lifecycle'] not in ('failed', 'timeout', 'cancelled'): continue
+                categories = categories or ['unknown']
+                failures.append(dict(id=run['id'], run_id=run['run_id'], lifecycle=summary['lifecycle'], categories=categories))
+                for category in categories: counts[category] = counts.get(category, 0) + 1
+            except (OSError, ValueError, TypeError, AttributeError):
+                errors.append(dict(id=run['id'], reason='unreadable_metadata'))
+        more = len(rows) > limit
     return dict(failures=failures, counts=counts, scanned=len(selected), errors=errors,
                 has_more=more, next_after=selected[-1]['id'] if more else None,
                 scope='this_page_only')

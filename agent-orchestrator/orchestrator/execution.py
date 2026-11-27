@@ -405,8 +405,11 @@ class StageExecutor:
                     spec, result, attempt_dir, base_sha, worktree, git_ready=self._git_ready,
                     task=self.task, review_missing=self._review_missing.get(spec.name, []))
             except (StageArchiveError, artifacts.GitError) as e:
-                last_error = str(e)
-                self.state.log_event("attempt_fail", spec.name, n=n, error_kind="archive")
+                no_changes = str(e) == "代码未发生变化，无法视为一次修复"
+                last_error = (str(e) if no_changes else
+                              "代码产物归档失败；请检查 Git 工作区状态、分支是否分叉及本机 Git 配置。")
+                self.state.log_event("attempt_fail", spec.name, n=n, error_kind="archive",
+                                     reason=last_error, reason_code="no_changes" if no_changes else "archive_failed")
                 self.state.save()
                 if cli and spec.kind=='code':
                     if not self._finish_cli_worktree(spec,worktree,base_sha,n,attempt_dir,'archive_failed'):

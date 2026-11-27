@@ -15,8 +15,8 @@ from unittest import mock
 from orchestrator.cli import main
 from orchestrator.config import config_key_sets
 from orchestrator.doctor import diagnose
-from orchestrator.maintenance import (clean_state, evidence_plan, remove_checked,
-                                      tree_info, worktree_plan)
+from orchestrator.maintenance import (boundary, clean_state, evidence_plan,
+                                      remove_checked, tree_info, worktree_plan)
 from orchestrator.state import StageLock
 
 
@@ -228,6 +228,19 @@ test_cmd=["missing-command-xyznothing"]
         self.assertTrue(report['ok'],report)
         self.assertFalse(old.exists())
 
+    def test_boundary_rejects_link_to_missing_target(self):
+        target = self.base/'missing-target'
+        link = self.base/'broken-link'
+        if os.name == 'nt':
+            subprocess.run(['cmd','/c','mklink','/J',str(link),str(target)],
+                           check=True,capture_output=True)
+        else:
+            link.symlink_to(target,target_is_directory=True)
+        # 目标不存在时 exists() 为 False；boundary 仍须按链接/reparse point 拒绝。
+        self.assertFalse(link.exists())
+        with self.assertRaises(ValueError):
+            boundary(link,self.base)
+
     def test_clean_rejects_root_junction(self):
         alias=self.base/'alias'
         if os.name=='nt':
@@ -265,7 +278,7 @@ test_cmd=["missing-command-xyznothing"]
     def test_worktree_prune_only_invalid_registrations_under_state_root(self):
         repo=self.base/'repo';repo.mkdir()
         def git(*args):
-            return subprocess.run(['git','-C',str(repo),*args],check=True,capture_output=True)
+            return subprocess.run(['git','-C',str(repo),*args],env=dict(os.environ),check=True,capture_output=True)
         git('init','-q');git('config','user.name','test');git('config','user.email','test@example.invalid')
         git('commit','--allow-empty','-qm','base')
         target=self.root/'old-worktree'

@@ -320,7 +320,7 @@ type = "fake"
         context = RunContext("task", "r", "report", self.base, self.base / "run", timeout_s=1, kind="report")
         response = io.BytesIO(json.dumps({"choices": [{"message": {"content": "body"}}]}).encode())
         with mock.patch.dict("os.environ", {"POLICY_TEST_KEY": "dummy"}), \
-                mock.patch("urllib.request.urlopen", return_value=response) as request:
+                mock.patch("orchestrator.adapters.openai_compat._open_request", return_value=response) as request:
             self.assertTrue(adapter.run("p", self.base, context).ok)
         self.assertEqual(request.call_args.kwargs["timeout"], 1)
 

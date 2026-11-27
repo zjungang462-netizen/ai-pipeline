@@ -55,7 +55,7 @@ class TestAPIEndToEnd(unittest.TestCase):
             # 用 side_effect 保证每次调用返回全新流（重试不会读到已关闭流）
 
             with mock.patch.dict(os.environ, {"TEST_API_KEY": "sk-test"}), \
-                 mock.patch("urllib.request.urlopen", side_effect=fake_urlopen):
+                 mock.patch("orchestrator.adapters.openai_compat._open_request", side_effect=fake_urlopen):
                 eng = Engine(cfg, adapters, run_id="e2e", task="demo")
                 res = eng.run()
 

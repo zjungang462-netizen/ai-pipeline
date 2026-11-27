@@ -77,7 +77,7 @@ Claude Code 2.1.325 / 2.1.328 可作为文件工具代理接入你现有的 Deep
 | `state-check --state-dir 目录` | 只读检查现存状态与当前 schema 的兼容性 |
 | `state-backup --state-dir 目录 --output 新目录` | 停写后备份完整状态并逐文件校验 SHA-256 |
 | `state-restore --backup 备份目录 --output 新目录` | 校验并恢复原始字节，不覆盖现有目录或自动续跑 |
-| `dashboard --config 配置 --port 端口 [--open]` | 启动本机工作台（可重复 `--config`，`--open` 自动打开浏览器） |
+| `dashboard --config 配置 --port 端口 [--host 地址] [--origin 外部源] [--open]` | 启动本机工作台（默认仅回环；非回环监听必须指定 `--origin`；可重复 `--config`，`--open` 自动打开浏览器） |
 | `tune --state-dir 目录 --config 配置` | 生成待审批的历史策略提案 |
 | `approve-tune --state-dir 目录 --output 新配置` | 批准并写入配置副本 |
 | `autotune 配置` | 在显式预授权范围内选择后续策略 |
@@ -188,6 +188,8 @@ Qwen 0.26.0 新调用不加载用户/项目自定义配置、hooks、技能、MC
 | 适配器 | 参数 | 类型 | 默认值 | 工作台可覆盖 | 范围/说明 |
 |---|---|---|---|---|---|
 | `fake` | `kind` | `str` | — |  | 取值 report/code/review；固定产出类型；缺省按阶段名推断 |
+| `fake` | `scenario` | `str` | — |  | 取值 normalize_repair；显式离线脚本演示；缺省保留普通 fake 行为 |
+| `fake` | `delay_s` | `float` | `0` |  | >= 0；每次调用的演示延迟，0 至 5 秒 |
 | `openai_compat` | `base_url` | `str` | 必填 |  | 不含凭据的 HTTP(S) 端点 |
 | `openai_compat` | `model` | `str` | 必填 | 是 | 模型标识 |
 | `openai_compat` | `api_key_env` | `str` | 必填 |  | 只填环境变量名；凭据环境变量名；只存变量名，不存密钥 |
@@ -197,6 +199,7 @@ Qwen 0.26.0 新调用不加载用户/项目自定义配置、hooks、技能、MC
 | `openai_compat` | `reasoning_effort` | `str` | — | 是 | 取值 none/low/medium/high/xhigh；思考强度；须由端点支持 |
 | `openai_compat` | `thinking` | `str` | — | 是 | 取值 enabled/disabled；思考开关；须由端点支持 |
 | `openai_compat` | `review_json_mode` | `bool` | `false` | 是 | 审查阶段约束输出为 JSON 对象 |
+| `openai_compat` | `allow_insecure_http` | `bool` | `false` |  | 允许非回环 HTTP 明文传输 API 凭据（仅限受信网络） |
 | `cli_codex` | `exe` | `str` | — |  | 可执行文件绝对路径或 PATH 命令名 |
 | `cli_codex` | `extra_env` | `list` | — |  | 透传给工具的环境变量名 |
 | `cli_codex` | `timeout_s` | `int` | `300` |  | > 0；单次调用超时（秒） |

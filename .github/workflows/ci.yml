@@ -45,20 +45,25 @@ jobs:
           if ($env:BASE_BRANCH) { $base = git merge-base HEAD "origin/$env:BASE_BRANCH" }
           if (-not $base -or $base -match '^0+$') { $base = git rev-parse HEAD^ }
           python scripts/precommit.py --checks-only --base-ref $base
+      - name: Offline judge demo through approval
+        run: python -X utf8 agent-orchestrator/scripts/verify_judge_demo.py
       - name: Quick offline acceptance
         working-directory: agent-orchestrator
         run: python scripts/verify_delivery.py --quick --redact-logs --output ../ci-evidence
       - name: Navigation regressions
         working-directory: agent-orchestrator
         run: |
-          python -m unittest discover -s tests -p test_navigation_reading.py
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           python -m unittest discover -s tests -p test_time_sort.py
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           python -m unittest discover -s tests -p test_workbench_service.py
       - name: Deterministic convergence benchmark (no model calls)
         working-directory: agent-orchestrator
         run: python scripts/benchmark.py --output ../ci-benchmark
+      - name: Summarize failing tests
+        if: failure()
+        shell: pwsh
+        working-directory: agent-orchestrator
+        run: ./scripts/ci_failure_summary.ps1 -Evidence ../ci-evidence
       - uses: actions/upload-artifact@v4
         if: always()
         with:
@@ -66,4 +71,40 @@ jobs:
           path: |
             ci-evidence/
             ci-benchmark/
+          retention-days: 14
+  # 快速集不含 CLI 可靠性等慢模块；全量至少在 Windows 上对每个候选提交跑一次。
+  full:
+    runs-on: windows-latest
+    timeout-minutes: 45
+    env:
+      PYTHONUTF8: '1'
+      PYTHONIOENCODING: utf-8
+    steps:
+      - name: Use runner temporary directory
+        shell: pwsh
+        run: |
+          "TEMP=$env:RUNNER_TEMP" >> $env:GITHUB_ENV
+          "TMP=$env:RUNNER_TEMP" >> $env:GITHUB_ENV
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: Full offline acceptance
+        working-directory: agent-orchestrator
+        run: python scripts/verify_delivery.py --suite full --workers 8 --timing-baseline tests/fixtures/verification-module-timings.json --redact-logs --output ../ci-evidence-full
+      - name: Summarize failing tests
+        if: failure()
+        shell: pwsh
+        working-directory: agent-orchestrator
+        run: ./scripts/ci_failure_summary.ps1 -Evidence ../ci-evidence-full
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: offline-full-${{ github.sha }}
+          path: ci-evidence-full/
           retention-days: 14

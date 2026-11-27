@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import http.client
 import json
+import os
 from pathlib import Path
 import sys
 import tempfile
@@ -73,12 +74,44 @@ test_cmd = ["python", "-c", "pass"]
         project = projects['projects'][0]['id']
         return request, project, server.shutdown
 
+    def test_worker_launch_passes_declared_adapter_environment(self):
+        with self.config_path.open('a', encoding='utf-8') as config:
+            config.write('\n[adapters.qwen]\ntype="cli_qwen"\n'
+                         'extra_env=["QWEN_API_KEY","OPENAI_BASE_URL"]\n'
+                         '[adapters.api]\ntype="openai_compat"\n'
+                         'base_url="https://example.invalid/v1"\nmodel="m"\n'
+                         'api_key_env="API_KEY_ENV"\n')
+        cfg = load_config(self.config_path)
+        path = self.root / 'worker'
+        path.mkdir()
+        env = {'QWEN_API_KEY': 'qwen-private-key', 'OPENAI_BASE_URL': 'https://example.invalid/v1',
+               'API_KEY_ENV': 'api-private-key', 'UNDECLARED_API_KEY': 'must-not-leak'}
+        with patch.dict(os.environ, env), patch.object(arena_jobs.subprocess, 'Popen') as popen:
+            arena_jobs._launch(path, cfg)
+        child_env = popen.call_args.kwargs['env']
+        self.assertEqual(child_env['QWEN_API_KEY'], env['QWEN_API_KEY'])
+        self.assertEqual(child_env['OPENAI_BASE_URL'], env['OPENAI_BASE_URL'])
+        self.assertEqual(child_env['API_KEY_ENV'], env['API_KEY_ENV'])
+        self.assertNotIn('UNDECLARED_API_KEY', child_env)
+
+    def test_fixed_test_project_rejects_arena_launch(self):
+        request, project, _ = self._workbench()
+        with patch.object(arena_jobs, '_launch') as launch:
+            status, _, _ = request('POST', f'/api/projects/{project}/arena', self.body)
+        self.assertEqual(status, 409)
+        launch.assert_not_called()
+
     def test_http_background_job_reopens_and_replays_after_cursor(self):
+        # 竞技场仅对开发项目开放。启动器和候选执行器均由测试替身接管。
+        with self.config_path.open('a', encoding='utf-8') as config:
+            config.write('\n[adapters.coder]\ntype="cli_agy"\n[[stages]]\n'
+                         'name="coding"\nkind="code"\nadapter="coder"\nprompt="test"\n')
         request, project, shutdown = self._workbench()
         route = f'/api/projects/{project}/arena'
         with patch.object(arena_jobs, '_launch') as launch:
             status, queued, _ = request('POST', route, self.body)
-            self.assertEqual((status, queued['status']), (202, 'queued'))
+            self.assertEqual(status, 202, queued)
+            self.assertEqual(queued['status'], 'queued')
             status, duplicate, _ = request('POST', route, self.body)
             self.assertEqual((status, duplicate['arena_id']), (202, queued['arena_id']))
             self.assertEqual(request('POST', route, dict(self.body, task='不同请求'))[0], 409)
@@ -113,6 +146,14 @@ test_cmd = ["python", "-c", "pass"]
         self.assertEqual(status, 200)
         ids = [int(line.removeprefix('id: ')) for line in stream.splitlines() if line.startswith('id: ')]
         self.assertEqual(ids, list(range(3, done['cursor'] + 1)))
+        secret = 'arena-sse-private-token-123456'
+        event = {'cursor': done['cursor'] + 1, 'status': 'running', 'label': secret, 'time': time.time()}
+        with patch.dict(os.environ, {'GITHUB_TOKEN': secret}), \
+                patch.object(arena_jobs, 'read_events', return_value=([event], True)):
+            status, redacted, _ = request2('GET', path + '/events?after=0')
+        self.assertEqual(status, 200)
+        self.assertIn('[REDACTED]', redacted)
+        self.assertNotIn(secret, redacted)
         self.assertEqual(request2('GET', route.replace(project, 'missing') + '/' + queued['arena_id'])[0], 404)
 
     def test_cancel_running_job_cleans_up_worktrees(self):

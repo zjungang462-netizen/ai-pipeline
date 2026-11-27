@@ -15,7 +15,8 @@ import urllib.request
 from urllib.parse import urlsplit
 
 from ..adapters.cli_base import resolve_exe
-from ..safety import build_subprocess_env
+from ..adapters.spec import is_insecure_api_url
+from ..safety import build_subprocess_env, open_same_origin
 
 _MAX_CATALOG_HTTP_BYTES = 256 * 1024
 _MAX_CACHE_ENTRIES = 32
@@ -107,9 +108,12 @@ def _probe_agy_models(exe: str, proxy_url: str = '') -> list[dict[str, str]]:
     return []
 
 
-def _probe_openai_compat_models(base_url: str, api_key_env: str) -> tuple[bool, list[dict[str, str]]]:
+def _probe_openai_compat_models(base_url: str, api_key_env: str,
+                                allow_insecure_http: bool = False) -> tuple[bool, list[dict[str, str]]]:
     parsed = urlsplit(str(base_url or '').strip())
     if parsed.scheme not in ('http', 'https') or not parsed.hostname or parsed.username or parsed.password:
+        return False, []
+    if is_insecure_api_url(base_url, allow_insecure_http):
         return False, []
     key = os.environ.get(api_key_env, '').strip()
     if not key:
@@ -117,7 +121,7 @@ def _probe_openai_compat_models(base_url: str, api_key_env: str) -> tuple[bool, 
     url = base_url.rstrip('/') + '/models'
     req = urllib.request.Request(url, headers={'Authorization': f'Bearer {key}', 'Accept': 'application/json'})
     try:
-        with urllib.request.urlopen(req, timeout=6) as resp:
+        with open_same_origin(req, timeout=6) as resp:
             raw = resp.read(_MAX_CATALOG_HTTP_BYTES + 1)
             if len(raw) > _MAX_CATALOG_HTTP_BYTES:
                 return True, []
@@ -143,10 +147,11 @@ def discover_local_catalog(
     proxy_url: str = '',
     api_base_url: str = 'https://api.deepseek.com/v1',
     api_key_env: str = 'DEEPSEEK_API_KEY',
+    api_allow_insecure_http: bool = False,
     force: bool = False,
 ) -> dict[str, Any]:
     """探测本机已安装的 CLI 与真实可用模型列表，带短期内存缓存。"""
-    cache_key = f'{proxy_url}|{api_base_url}|{api_key_env}'
+    cache_key = f'{proxy_url}|{api_base_url}|{api_key_env}|{api_allow_insecure_http}'
     now = time.time()
     with _CACHE_LOCK:
         cached = _CACHE.get(cache_key)
@@ -159,12 +164,14 @@ def discover_local_catalog(
     agy_exe = resolve_exe('agy')
     if agy_exe:
         with ThreadPoolExecutor(max_workers=2) as pool:
-            api_fut = pool.submit(_probe_openai_compat_models, api_base_url, api_key_env)
+            api_fut = pool.submit(_probe_openai_compat_models, api_base_url, api_key_env,
+                                  api_allow_insecure_http)
             agy_fut = pool.submit(_probe_agy_models, agy_exe, proxy_url=proxy_url)
             api_configured, api_live = api_fut.result()
             agy_live = agy_fut.result()
     else:
-        api_configured, api_live = _probe_openai_compat_models(api_base_url, api_key_env)
+        api_configured, api_live = _probe_openai_compat_models(
+            api_base_url, api_key_env, api_allow_insecure_http)
         agy_live = []
 
     adapters['openai_compat'] = {

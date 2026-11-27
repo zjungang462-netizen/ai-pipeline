@@ -1,6 +1,7 @@
 """后台同步须覆盖全部历史、限制每批开销、保留恢复与控制收据。"""
 import hashlib
 import json
+import os
 import tempfile
 import time
 import unittest
@@ -116,6 +117,40 @@ class BackgroundSyncTests(unittest.TestCase):
         launch.assert_any_call(key)
         discuss.assert_any_call(topic['id'])
         self.assertEqual(self.s.store.command(command['id'])['status'],'queued')
+
+    def test_managed_workers_receive_only_declared_adapter_environment(self):
+        self.cfg.write_text(
+            'task_workdir="ws"\nstate_dir="state"\n'
+            '[[stages]]\nname="verify"\nkind="test"\n'
+            'test_cmd=["python","-c","print(1)"]\n'
+            '[adapters.qwen]\ntype="cli_qwen"\n'
+            'extra_env=["QWEN_API_KEY","OPENAI_BASE_URL"]\n'
+            '[adapters.api]\ntype="openai_compat"\n'
+            'base_url="https://example.invalid/v1"\nmodel="m"\n'
+            'api_key_env="API_KEY_ENV"\n', encoding='utf8')
+        service = Service(self.root/'workers.sqlite3', [self.cfg], recover=False)
+        self.addCleanup(service._background_sync.close)
+        project = service.store.register_project(self.cfg)
+        run_path = self.root/'state/runs/env-run'
+        run_path.mkdir(parents=True)
+        atomic_write_json(run_path/'state.json', {'task':'env', 'stages':{}, 'events':[]})
+        atomic_write_json(run_path/'job.json', {'status':'pending'})
+        key = service.store.register_run(project, 'env-run', self.cfg, self.root/'state', managed=True)
+        topic = service.store.create_thread(key, 'question', ['developer'], 1000, {}, 'env-topic-001')
+        env = {'QWEN_API_KEY':'qwen-private-key', 'OPENAI_BASE_URL':'https://example.invalid/v1',
+               'API_KEY_ENV':'api-private-key', 'UNDECLARED_API_KEY':'must-not-leak'}
+        with mock.patch.dict(os.environ, env), \
+                mock.patch('orchestrator.collaboration.service.subprocess.Popen') as popen:
+            popen.return_value.poll.return_value = None
+            service.launch(key)
+            service.launch_discussion(topic['id'])
+        self.assertEqual(popen.call_count, 2)
+        for call in popen.call_args_list:
+            child_env = call.kwargs['env']
+            self.assertEqual(child_env['QWEN_API_KEY'], env['QWEN_API_KEY'])
+            self.assertEqual(child_env['OPENAI_BASE_URL'], env['OPENAI_BASE_URL'])
+            self.assertEqual(child_env['API_KEY_ENV'], env['API_KEY_ENV'])
+            self.assertNotIn('UNDECLARED_API_KEY', child_env)
 
     def test_receipt_written_after_last_visit_reconciles_on_next_sweep(self):
         key,path=self.seed(1)

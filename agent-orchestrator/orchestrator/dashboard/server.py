@@ -5,6 +5,7 @@ import hmac
 import json
 import os
 import secrets
+import socket
 import threading
 import time
 from http.cookies import SimpleCookie
@@ -15,6 +16,48 @@ from urllib.parse import parse_qs, unquote, urlsplit
 from ..collaboration.service import Service
 from ..collaboration.storage import Conflict
 from ..collaboration.projection import read_artifact
+
+
+class MissingField(ValueError):
+    """请求体缺少必填字段：属于客户端错误（400），不是资源不存在（404）。"""
+
+
+class RequestBody(dict):
+    def __missing__(self, key):
+        raise MissingField(f'请求缺少字段：{key}')
+
+
+_STATIC_FILES = {
+    '/': ('index.html', 'text/html; charset=utf-8'),
+    '/i18n.js': ('i18n.js', 'text/javascript; charset=utf-8'),
+    '/app.js': ('app.js', 'text/javascript; charset=utf-8'),
+    '/insights.js': ('insights.js', 'text/javascript; charset=utf-8'),
+    '/style.css': ('style.css', 'text/css; charset=utf-8'),
+}
+_STATIC_CACHE: dict = {}
+_STATIC_LOCK = threading.Lock()
+
+
+def _static_asset(name):
+    """按 (mtime, size) 缓存原文、gzip 与 ETag；文件改动后自动失效。"""
+    import gzip
+    import hashlib
+    path = Path(__file__).parent / 'static' / name
+    info = path.stat()
+    key = (info.st_mtime_ns, info.st_size)
+    with _STATIC_LOCK:
+        cached = _STATIC_CACHE.get(name)
+    if cached and cached[0] == key:
+        return cached[1]
+    raw = path.read_bytes()
+    asset = {
+        'raw': raw,
+        'etag': f'"{hashlib.sha256(raw).hexdigest()[:16]}"',
+        'gzip': gzip.compress(raw, compresslevel=6) if len(raw) >= 1024 else None,
+    }
+    with _STATIC_LOCK:
+        _STATIC_CACHE[name] = (key, asset)
+    return asset
 
 
 class Application:
@@ -31,6 +74,8 @@ class Application:
         self.projection_thread = None
         self.requests = threading.Condition()
         self.active_requests = 0
+        self.request_slots = threading.BoundedSemaphore(64)
+        self.connections = set()
 
     def start_projection(self):
         def loop():
@@ -48,6 +93,12 @@ class Application:
     def close(self):
         with self.requests:
             self.closed.set()
+            connections = list(self.connections)
+        for connection in connections:
+            try:
+                connection.shutdown(socket.SHUT_RDWR)
+            except OSError:
+                pass
         thread = self.projection_thread
         if thread is not None and thread is not threading.current_thread():
             thread.join(10)
@@ -57,6 +108,24 @@ class Application:
         with self.requests:
             if not self.requests.wait_for(lambda: self.active_requests == 0, timeout=10):
                 raise RuntimeError('工作台请求会话尚未退出，不能确认资源已释放')
+
+
+def _normalise_origin(value: str) -> str:
+    try:
+        parts = urlsplit(str(value or '').strip())
+        port = parts.port
+    except ValueError as error:
+        raise ValueError('工作台 origin 必须是合法的 HTTP(S) 地址') from error
+    if (parts.scheme not in ('http', 'https') or not parts.hostname
+            or parts.username or parts.password or parts.path not in ('', '/')
+            or parts.query or parts.fragment):
+        raise ValueError('工作台 origin 必须是无路径、无凭据的 HTTP(S) 地址')
+    default_port = 443 if parts.scheme == 'https' else 80
+    host = parts.hostname.lower()
+    if ':' in host:
+        host = f'[{host}]'
+    netloc = host if port in (None, default_port) else f'{host}:{port}'
+    return f'{parts.scheme}://{netloc}'
 
 
 class WorkbenchServer(ThreadingHTTPServer):
@@ -114,19 +183,25 @@ class Handler(BaseHTTPRequestHandler):
             return False
 
     def handle_request(self, method):
-        # 响应字节发完不等于 SQLite 会话已关闭；关闭服务须等待 finally。
-        with self.app.requests:
-            if self.app.closed.is_set():
-                self.close_connection = True
-                return
-            self.app.active_requests += 1
+        # 限制同时处理的请求数，避免线程与 SQLite 会话无界增长。
+        if not self.app.request_slots.acquire(blocking=False):
+            return self.respond({'error': '工作台繁忙，请稍后重试'}, 503)
         try:
-            with self.app.service.store.session():
-                return self.handle_session_request(method)
-        finally:
+            # 响应字节发完不等于 SQLite 会话已关闭；关闭服务须等待 finally。
             with self.app.requests:
-                self.app.active_requests -= 1
-                self.app.requests.notify_all()
+                if self.app.closed.is_set():
+                    self.close_connection = True
+                    return
+                self.app.active_requests += 1
+            try:
+                with self.app.service.store.session():
+                    return self.handle_session_request(method)
+            finally:
+                with self.app.requests:
+                    self.app.active_requests -= 1
+                    self.app.requests.notify_all()
+        finally:
+            self.app.request_slots.release()
 
     def handle_session_request(self, method):
         try:
@@ -138,35 +213,30 @@ class Handler(BaseHTTPRequestHandler):
             query = parse_qs(parsed.query, keep_blank_values=True)
             if path == '/api/health' and method == 'GET':
                 return self.respond({'status': 'ok', 'pid': os.getpid(), 'version': self.app.version})
-            if method == 'GET' and path in ('/', '/app.js', '/insights.js', '/style.css'):
-                import gzip
-                import hashlib
-                name = {'/': 'index.html', '/app.js': 'app.js', '/insights.js': 'insights.js', '/style.css': 'style.css'}[path]
-                raw_body = (Path(__file__).parent / 'static' / name).read_bytes()
-                etag = f'"{hashlib.sha256(raw_body).hexdigest()[:16]}"'
+            if method == 'GET' and path in _STATIC_FILES:
+                name, content_type = _STATIC_FILES[path]
+                asset = _static_asset(name)
+                etag = asset['etag']
                 if self.headers.get('If-None-Match') == etag:
                     self.send_response(304)
                     self.headers_common()
                     self.send_header('ETag', etag)
                     self.end_headers()
                     return
-                use_gzip = 'gzip' in self.headers.get('Accept-Encoding', '').lower() and len(raw_body) >= 1024
-                body = gzip.compress(raw_body, compresslevel=6) if use_gzip else raw_body
+                use_gzip = asset['gzip'] is not None and 'gzip' in self.headers.get('Accept-Encoding', '').lower()
+                body = asset['gzip'] if use_gzip else asset['raw']
                 self.send_response(200)
                 self.headers_common()
                 self.send_header('ETag', etag)
                 self.send_header('Vary', 'Accept-Encoding')
                 if use_gzip:
                     self.send_header('Content-Encoding', 'gzip')
-                self.send_header('Content-Type', {'index.html': 'text/html; charset=utf-8',
-                                                  'app.js': 'text/javascript; charset=utf-8',
-                                                  'insights.js': 'text/javascript; charset=utf-8',
-                                                  'style.css': 'text/css; charset=utf-8'}[name])
+                self.send_header('Content-Type', content_type)
                 self.send_header('Content-Length', str(len(body)))
                 self.end_headers()
                 self.wfile.write(body)
                 return
-            body = {}
+            body = RequestBody()
             if method == 'POST':
                 if self.headers.get('Origin') != self.app.origin:
                     return self.respond({'error': '写操作必须来自同一工作台'}, 403)
@@ -176,6 +246,7 @@ class Handler(BaseHTTPRequestHandler):
                 body = json.loads(self.rfile.read(length))
                 if not isinstance(body, dict):
                     raise ValueError('请求必须为 JSON 对象')
+                body = RequestBody(body)
             if path == '/api/session' and method == 'POST':
                 token = body.get('token')
                 if not isinstance(token, str) or not hmac.compare_digest(token, self.app.bootstrap):
@@ -211,6 +282,8 @@ class Handler(BaseHTTPRequestHandler):
                 proxy_url = ''
                 api_base_url = ''
                 api_key_env = ''
+                api_allow_insecure_http = False
+                config_warnings = []
                 for proj in service.list_projects():
                     try:
                         cfg = service.config(proj['config'])
@@ -220,14 +293,21 @@ class Handler(BaseHTTPRequestHandler):
                             if not api_base_url and ad.type == 'openai_compat' and ad.options.get('base_url') and ad.options.get('api_key_env'):
                                 api_base_url = ad.options['base_url']
                                 api_key_env = ad.options['api_key_env']
-                    except Exception:
-                        pass
+                                api_allow_insecure_http = ad.options.get('allow_insecure_http') is True
+                    except Exception as error:
+                        # 单个项目配置损坏不阻断目录探测，但要让页面知道跳过了哪个项目。
+                        reason = str(error) or error.__class__.__name__
+                        config_warnings.append({'project_id': proj.get('id'), 'error': reason[:300]})
                     if proxy_url and api_base_url:
                         break
                 kwargs = {'proxy_url': proxy_url, 'force': force}
                 if api_base_url and api_key_env:
-                    kwargs.update(api_base_url=api_base_url, api_key_env=api_key_env)
-                return self.respond(discover_local_catalog(**kwargs))
+                    kwargs.update(api_base_url=api_base_url, api_key_env=api_key_env,
+                                  api_allow_insecure_http=api_allow_insecure_http)
+                catalog = discover_local_catalog(**kwargs)
+                if config_warnings:
+                    catalog = {**catalog, 'config_warnings': config_warnings}
+                return self.respond(catalog)
             if path == '/api/projects' and method == 'GET':
                 return self.respond({'projects': service.list_projects()})
             if path == '/api/projects/register' and method == 'POST':
@@ -264,6 +344,10 @@ class Handler(BaseHTTPRequestHandler):
                     if method == 'GET':
                         return self.respond(service.redact({'jobs': arena_jobs.list_jobs(cfg, project_id)}))
                     if method == 'POST':
+                        from ..collaboration.execution_scope import execution_scope
+                        scope = execution_scope(cfg)
+                        if scope['mode'] != 'development':
+                            raise Conflict('离线演练、固定测试或分析流程不会启动本机真实 CLI；请使用代码开发项目')
                         with service.operations:
                             job = arena_jobs.start_job(cfg, entry['config'], project_id, self.idem(), body)
                         return self.respond(service.redact(job), 202)
@@ -283,9 +367,12 @@ class Handler(BaseHTTPRequestHandler):
                 self.idem()
                 from ..arena import apply_arena_winner
                 from ..collaboration import arena_jobs, project_manager
+                from ..collaboration.execution_scope import execution_scope
                 project_id = parts[2]
                 entry = store.project(project_id)
                 cfg = service.config(entry['config'])
+                if execution_scope(cfg)['mode'] != 'development':
+                    raise Conflict('离线演练、固定测试或分析流程不会启动本机真实 CLI；请使用代码开发项目')
                 job_id = str(body.get('arena_id') or '')
                 try:
                     with service.operations:
@@ -385,7 +472,10 @@ class Handler(BaseHTTPRequestHandler):
                     return self.respond(code_diff(run, parts[4], query.get('mode', ['previous'])[0]))
             return self.respond({'error': '接口不存在'}, 404)
         except Conflict as error:
-            return self.respond({'error': str(error)}, 409)
+            body = {'error': str(error)}
+            if error.run_id:
+                body['run_id'] = error.run_id
+            return self.respond(body, 409)
         except KeyError as error:
             return self.respond({'error': str(error)}, 404)
         except (ValueError, TypeError) as error:
@@ -401,9 +491,15 @@ class Handler(BaseHTTPRequestHandler):
 
     def arena_stream(self, events, query):
         cursor = max(0, int(self.headers.get('Last-Event-ID') or query.get('after', ['0'])[0]))
-        rows, terminal = events(cursor)
+        # 先占实时连接名额再查首批事件：名额已满时不做无用的读盘和查询。
         if not self.app.streams.acquire(blocking=False):
             return self.respond({'error': '实时连接数量已到上限'}, 429)
+        try:
+            rows, terminal = events(cursor)
+        except BaseException:
+            # 任务不存在等错误仍按原映射返回 404/400，名额立即归还。
+            self.app.streams.release()
+            raise
         try:
             self.send_response(200)
             self.headers_common()
@@ -413,7 +509,7 @@ class Handler(BaseHTTPRequestHandler):
             self.close_connection = True
             heartbeat = time.monotonic()
             while not self.app.closed.is_set():
-                for event in rows:
+                for event in self.app.service.redact(rows) if rows else ():
                     cursor = event['cursor']
                     data = json.dumps(event, ensure_ascii=False)
                     self.wfile.write(f'id: {cursor}\nevent: update\ndata: {data}\n\n'.encode('utf8'))
@@ -475,21 +571,33 @@ class Handler(BaseHTTPRequestHandler):
         self.handle_request('POST')
 
 
-def create_server(database, configs, port=8765, *, recover=True):
+def create_server(database, configs, port=8765, *, recover=True, host='127.0.0.1', origin=None):
+    expected_origin = _normalise_origin(origin) if origin else None
     app = Application(database, configs, recover=recover)
-    server = WorkbenchServer(('127.0.0.1', port), Handler)
+    server = WorkbenchServer((host, port), Handler)
     server.application = app
-    app.origin = f'http://127.0.0.1:{server.server_port}'
+    app.origin = expected_origin or f'http://127.0.0.1:{server.server_port}'
     app.start_projection()
     return server
 
 
-def serve(database, configs, port=8765, *, open_browser=False):
-    server = create_server(database, configs, port)
+def serve(database, configs, port=8765, *, open_browser=False, language='zh', host='127.0.0.1',
+          origin=None):
+    server = create_server(database, configs, port, host=host, origin=origin)
     app = server.application
-    url = f'{app.origin}/#token={app.bootstrap}'
-    print(f'工作台：{url}', flush=True)
-    print('仅本机单用户。关闭页面不停止已启动的独立任务进程。', flush=True)
+    url = (f'{app.origin}/?lang=en#token={app.bootstrap}' if language == 'en'
+           else f'{app.origin}/#token={app.bootstrap}')
+    if language == 'en':
+        print(f'Workbench: {url}', flush=True)
+        print('Local single-user service. Closing the page does not stop independently running tasks.', flush=True)
+    else:
+        print(f'工作台：{url}', flush=True)
+        print('仅本机单用户。关闭页面不停止已启动的独立任务进程。', flush=True)
+    if host != '127.0.0.1':
+        warning = ('Listening beyond loopback; keep the bootstrap token private and restrict network access.'
+                   if language == 'en' else
+                   '监听地址不限于回环；请保密启动令牌，并用防火墙或 SSH 隧道限制访问。')
+        print(warning, flush=True)
     if open_browser:
         import webbrowser
         threading.Thread(target=webbrowser.open, args=(url,), daemon=True).start()

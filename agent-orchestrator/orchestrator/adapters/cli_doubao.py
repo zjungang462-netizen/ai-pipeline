@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import contextlib
 import json
+import os
 import re
 import subprocess
 import tempfile
@@ -78,8 +79,12 @@ class DoubaoAdapter(CLIAdapter):
     def _container_binary(self):
         return f'/opt/doubao/{self.binary.name}'
 
-    def _common_run(self):
-        return [*base_run_args(host=HOST), '--tmpfs', '/tmp:rw,nosuid,nodev,mode=1777,size=128m',
+    def _common_run(self, *, staging_uid=None):
+        user = f'{staging_uid}:{os.getegid()}' if staging_uid is not None else '65534:65534'
+        args = [*base_run_args(host=HOST, user=user)]
+        if staging_uid is not None:
+            args += ['--cap-add', 'DAC_OVERRIDE']
+        return [*args, '--tmpfs', '/tmp:rw,nosuid,nodev,mode=1777,size=128m',
                 '--env', 'PYTHONDONTWRITEBYTECODE=1', '--env', 'PYTHONPYCACHEPREFIX=/tmp/pyc']
 
     def _proxy_env(self):
@@ -158,6 +163,7 @@ class DoubaoAdapter(CLIAdapter):
         isolated = writable and bool(ctx.editable_files)
         files = {}
         names = ()
+        staging_uid = None
         if isolated:
             try:
                 names = tuple(dict.fromkeys((*ctx.context_files, *ctx.editable_files)))
@@ -173,7 +179,7 @@ class DoubaoAdapter(CLIAdapter):
                 staging_dir = Path(stack.enter_context(
                     tempfile.TemporaryDirectory(prefix='pipeline-doubao-ws-', dir=stage_parent)))
                 stack.callback(make_staging_removable, staging_dir)
-                materialize_staging(staging_dir, files, ctx.editable_files)
+                staging_uid = materialize_staging(staging_dir, files, ctx.editable_files)
                 mount_source = staging_dir.resolve()
                 stdin_prompt = (
                     '容器工作区里只有下面清单中的声明文件。只能修改可编辑文件列表中的相对路径。\n'
@@ -183,11 +189,19 @@ class DoubaoAdapter(CLIAdapter):
             else:
                 mount_source = Path(workdir).resolve()
                 stdin_prompt = prompt
-            args = [*self._common_run(), *self._proxy_env(), *self._profile_args(),
-                    '--name', name, '-i',
-                    '--mount', _mount(mount_source, '/workspace', readonly=not writable),
-                    self.runtime.image, self._container_binary(), '-C', '/workspace',
-                    '--permission-mode', 'ask_risky', '--output-format', 'stream-json', '-p', '-']
+            workspace_mounts = [_mount(mount_source, '/workspace', readonly=not writable)]
+            if isolated:
+                editable = set(ctx.editable_files)
+                workspace_mounts += [
+                    _mount(mount_source / filename, f'/workspace/{filename}', readonly=True)
+                    for filename in names if filename not in editable
+                ]
+            args = [*self._common_run(staging_uid=staging_uid), *self._proxy_env(), *self._profile_args(),
+                    '--name', name, '-i']
+            for mount_spec in workspace_mounts:
+                args += ['--mount', mount_spec]
+            args += [self.runtime.image, self._container_binary(), '-C', '/workspace',
+                     '--permission-mode', 'ask_risky', '--output-format', 'stream-json', '-p', '-']
             try:
                 result = self._exec(args, workdir, ctx, stdin_data=stdin_prompt)
             finally:

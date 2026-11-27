@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 import subprocess
 import tempfile
@@ -16,7 +17,7 @@ from orchestrator.contracts import Result
 
 def _git(args: list[str], cwd: Path) -> str:
     proc = subprocess.run(
-        ['git', *args], cwd=str(cwd), capture_output=True, text=True, encoding='utf-8', check=True
+        ['git', *args], cwd=str(cwd), env=dict(os.environ), capture_output=True, text=True, encoding='utf-8', check=True
     )
     return proc.stdout.strip()
 

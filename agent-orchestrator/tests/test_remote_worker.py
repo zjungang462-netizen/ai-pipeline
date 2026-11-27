@@ -5,7 +5,9 @@ import base64
 import os
 from pathlib import Path
 import tempfile
+import threading
 import unittest
+from unittest import mock
 
 from orchestrator.remote_worker import (
     RemoteJobReceipt,
@@ -17,6 +19,20 @@ from orchestrator.remote_worker import (
 
 
 class RemoteWorkerTests(unittest.TestCase):
+    def test_close_after_thread_start_failure_does_not_wait_for_serve_forever(self):
+        server = RemoteWorkerServer('worker-start-failure', 'secret', lambda spec: None)
+        self.addCleanup(server.httpd.server_close)
+        with mock.patch.object(server._thread, 'start', side_effect=RuntimeError('thread start failed')), \
+                mock.patch.object(server.httpd, 'shutdown') as shutdown, \
+                mock.patch.object(server.httpd, 'server_close') as server_close, \
+                mock.patch.object(server._thread, 'join') as join:
+            with self.assertRaisesRegex(RuntimeError, 'thread start failed'):
+                server.start()
+            server.close()
+        shutdown.assert_not_called()
+        server_close.assert_called_once_with()
+        join.assert_not_called()
+
     def test_health_dispatch_signature_verification_and_declared_writeback(self):
         secret = 'worker-shared-secret-20261121'
         os.environ['TEST_REMOTE_WORKER_SECRET'] = secret
@@ -88,7 +104,7 @@ class RemoteWorkerTests(unittest.TestCase):
                 client.dispatch(spec, workdir=ws, context_files=('app.py',))
             self.assertEqual((ws / 'secret_test.py').read_bytes(), b'protected')
 
-    def test_replay_duplicate_job_expired_timestamp_and_oversized_body_are_rejected(self):
+    def test_retry_replays_receipt_and_rejects_conflicting_payload_or_stale_timestamp(self):
         import json
         import urllib.error
         import urllib.request
@@ -98,10 +114,9 @@ class RemoteWorkerTests(unittest.TestCase):
         os.environ['TEST_REMOTE_REPLAY_SECRET'] = secret
         self.addCleanup(lambda: os.environ.pop('TEST_REMOTE_REPLAY_SECRET', None))
 
-        server = RemoteWorkerServer(
-            'w-replay', secret,
-            lambda spec: RemoteJobReceipt(spec.job_id, 'w-replay', 'done', 0, text='ok'),
-        )
+        executor = mock.Mock(side_effect=lambda spec: RemoteJobReceipt(
+            spec.job_id, 'w-replay', 'done', 0, text='ok'))
+        server = RemoteWorkerServer('w-replay', secret, executor)
         server.start()
         self.addCleanup(server.close)
         client = RemoteWorkerClient(f'http://127.0.0.1:{server.port}', 'TEST_REMOTE_REPLAY_SECRET')
@@ -110,9 +125,13 @@ class RemoteWorkerTests(unittest.TestCase):
         receipt, _ = client.dispatch(spec)
         self.assertEqual(receipt.status, 'done')
 
-        # 重复 job_id 重放必须被 409 拒绝
+        replay, _ = client.dispatch(spec)
+        self.assertEqual(replay, receipt)
+        executor.assert_called_once()
+        self.assertEqual(executor.call_args.args[0].job_id, 'job-once')
+
         with self.assertRaisesRegex(RemoteWorkerError, '409'):
-            client.dispatch(spec)
+            client.dispatch(RemoteJobSpec('job-once', 'run-1', 'review', 'report', 'changed'))
 
         # 过期时间戳必须被 403 拒绝
         body = json.dumps({'job_id': 'job-old', 'run_id': 'r', 'stage': 's', 'kind': 'report', 'prompt': 'p'}).encode()
@@ -127,8 +146,6 @@ class RemoteWorkerTests(unittest.TestCase):
         self.assertEqual(ctx.exception.code, 403)
 
         # 客户端也必须拒绝过期/重放的回执时间戳
-        from unittest import mock
-
         class _StaleResp:
             headers = {
                 'X-Worker-Timestamp': '1000000000',
@@ -144,6 +161,71 @@ class RemoteWorkerTests(unittest.TestCase):
             def read(self, n=-1):
                 return b'{"job_id":"job-stale"}'
 
-        with mock.patch('orchestrator.remote_worker.urllib.request.urlopen', return_value=_StaleResp()):
+        with mock.patch('orchestrator.remote_worker.open_same_origin', return_value=_StaleResp()):
             with self.assertRaisesRegex(RemoteWorkerError, '时间戳'):
                 client.dispatch(RemoteJobSpec('job-stale', 'run-1', 'review', 'report', 'hi'))
+
+    def test_concurrent_retry_waits_for_original_receipt_without_reexecution(self):
+        secret = 'worker-concurrent-secret'
+        os.environ['TEST_REMOTE_CONCURRENT_SECRET'] = secret
+        self.addCleanup(lambda: os.environ.pop('TEST_REMOTE_CONCURRENT_SECRET', None))
+        started = threading.Event()
+        release = threading.Event()
+        self.addCleanup(release.set)
+
+        def execute(spec):
+            started.set()
+            if not release.wait(5):
+                raise RuntimeError('test release timeout')
+            return RemoteJobReceipt(spec.job_id, 'w-concurrent', 'done', 0, text='once')
+
+        executor = mock.Mock(side_effect=execute)
+        server = RemoteWorkerServer('w-concurrent', secret, executor)
+        server.start()
+        self.addCleanup(server.close)
+        client = RemoteWorkerClient(f'http://127.0.0.1:{server.port}',
+                                    'TEST_REMOTE_CONCURRENT_SECRET', timeout_s=5)
+        spec = RemoteJobSpec('job-concurrent', 'run-1', 'review', 'report', 'hi', timeout_s=10)
+        receipts, errors = [], []
+
+        def dispatch():
+            try:
+                receipts.append(client.dispatch(spec)[0])
+            except Exception as error:
+                errors.append(error)
+
+        first = threading.Thread(target=dispatch)
+        second = threading.Thread(target=dispatch)
+        first.start()
+        self.assertTrue(started.wait(2))
+        second.start()
+        release.set()
+        first.join(5)
+        second.join(5)
+        self.assertFalse(first.is_alive() or second.is_alive())
+        self.assertEqual(errors, [])
+        self.assertEqual(len(receipts), 2)
+        self.assertEqual(receipts[0], receipts[1])
+        executor.assert_called_once()
+
+    def test_executor_failure_is_cached_and_replayed_instead_of_rerun(self):
+        secret = 'worker-failure-secret'
+        os.environ['TEST_REMOTE_FAILURE_SECRET'] = secret
+        self.addCleanup(lambda: os.environ.pop('TEST_REMOTE_FAILURE_SECRET', None))
+        executor = mock.Mock(side_effect=[ValueError('invalid job'), RuntimeError('worker crashed')])
+        server = RemoteWorkerServer('w-failure', secret, executor)
+        server.start()
+        self.addCleanup(server.close)
+        client = RemoteWorkerClient(f'http://127.0.0.1:{server.port}',
+                                    'TEST_REMOTE_FAILURE_SECRET')
+        for job_id, error, status in (
+            ('job-rejected', 'invalid job', 'rejected'),
+            ('job-failed', 'worker crashed', 'failed'),
+        ):
+            spec = RemoteJobSpec(job_id, 'run-1', 'review', 'report', 'hi')
+            receipt, _ = client.dispatch(spec)
+            replay, _ = client.dispatch(spec)
+            self.assertEqual(receipt.status, status)
+            self.assertIn(error, receipt.stderr)
+            self.assertEqual(replay, receipt)
+        self.assertEqual(executor.call_count, 2)

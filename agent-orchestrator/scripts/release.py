@@ -6,6 +6,7 @@ import ast
 import hashlib
 import io
 import json
+import os
 import subprocess
 import sys
 import zipfile
@@ -19,7 +20,8 @@ def encoded(value): return (json.dumps(value, ensure_ascii=False, indent=2)+'\n'
 
 
 def git(repo, *args):
-    return subprocess.run(['git', '-C', str(repo), *args], check=True, capture_output=True, timeout=60).stdout
+    return subprocess.run(['git', '-C', str(repo), *args], env=dict(os.environ),
+                          check=True, capture_output=True, timeout=60).stdout
 
 
 def release_version(source):
@@ -65,13 +67,16 @@ def check_tree(root, expected):
 
 
 def verify(root, output):
-    run = subprocess.run([sys.executable, '-X', 'utf8', 'scripts/verify_delivery.py',
-                          '--redact-logs', '--output', str(output)], cwd=root/'agent-orchestrator')
+    command = [sys.executable, '-X', 'utf8', 'scripts/verify_delivery.py', '--redact-logs']
+    if sys.platform.startswith('linux'):
+        command.append('--allow-linux-windows-skips')
+    command.extend(['--output', str(output)])
+    run = subprocess.run(command, cwd=root/'agent-orchestrator')
     proof_path = output/'verification.json'
     if run.returncode or not proof_path.is_file(): raise ValueError('完整离线验收失败，保留证据：'+str(output))
     proof = json.loads(proof_path.read_bytes())
     if (proof.get('mode') != 'full' or proof.get('exit_code') != 0 or proof.get('tests_run', 0) <= 0
-            or not proof.get('source_unchanged') or any(proof.get(k) for k in ('failures','errors','skipped'))):
+            or not proof.get('source_unchanged') or any(proof.get(k) for k in ('failures','errors','unexpected_skips'))):
         raise ValueError('验收结果不满足完整发布条件')
     return proof
 

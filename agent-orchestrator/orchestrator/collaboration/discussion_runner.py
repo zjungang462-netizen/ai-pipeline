@@ -1,17 +1,13 @@
 import os
 import sys
 from ..cli_telemetry import StreamRedactor
+from ..safety import environment_secrets
 from .storage import Store
 from .discussion import execute
 
 
 def _redact_text(text: str) -> str:
-    secrets = [
-        val for key, val in os.environ.items()
-        if isinstance(val, str) and len(val) >= 8
-        and any(s in key.upper() for s in ('API_KEY', 'AUTH_TOKEN', 'ACCESS_TOKEN', 'SECRET', 'PASSWORD'))
-    ]
-    return StreamRedactor(secrets).feed(text, final=True)
+    return StreamRedactor(environment_secrets()).feed(text, final=True)
 
 
 if __name__ == '__main__':

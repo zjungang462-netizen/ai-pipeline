@@ -17,6 +17,7 @@ from orchestrator.contracts import RunContext
 from orchestrator.safety import build_subprocess_env
 from orchestrator.state import _pid_alive
 from orchestrator.supervisor import supervise
+from cmd_shim import write_cmd_shim
 from scripts.failure_evidence import EvidenceTestCase
 
 
@@ -52,7 +53,7 @@ class ProcessStart(EvidenceTestCase):
                           '.write_text(str(os.getpid()))\nsys.stdin.buffer.read()\n'
                           'print("CHILD_READY",flush=True)\ntime.sleep(60)\n',encoding='utf8')
         wrapper=self.root/'child.cmd'
-        wrapper.write_text('@echo off\r\n"'+sys.executable+'" -u "'+str(script)+'"\r\n',encoding='utf8')
+        write_cmd_shim(wrapper,sys.executable,'-u',str(script))
         original=process_tree.attach
         observed=[]
         def attach(process):

@@ -143,6 +143,22 @@ class Phase5Reporting(unittest.TestCase):
         self.assertEqual(len(seen),5)
         self.assertEqual(errors[0]['id'],bad)
 
+    def test_run_summary_prefetched_row_matches_lookup(self):
+        key=self.seed('same')
+        row=self.service.store.run(key)
+        self.assertEqual(insights.run_summary(self.service,key),
+                         insights.run_summary(self.service,key,run=row))
+
+    def test_failure_page_reuses_listed_rows_without_per_run_query(self):
+        self.seed('one');self.seed('two')
+        with mock.patch.object(self.service.store,'run',
+                               side_effect=AssertionError('不应逐行重查')):
+            page=insights.failure_page(self.service,None,50)
+        self.assertEqual(sorted(row['run_id'] for row in page['failures']),['one','two'])
+        self.assertEqual(page['scanned'],2)
+        self.assertEqual(set(page),{'failures','counts','scanned','errors',
+                                    'has_more','next_after','scope'})
+
     def test_changed_config_does_not_show_budget_alert_from_wrong_limit(self):
         key=self.seed('changed',99)
         self.assertEqual(self.service.snapshot(key)['budget_alerts'],[])

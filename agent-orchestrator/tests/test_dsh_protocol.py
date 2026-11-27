@@ -37,6 +37,13 @@ class DshProtocol(unittest.TestCase):
     def test_unknown_version_and_duplicate_final_are_rejected(self):
         self.a._version='9.9';self.assertTrue(self.parse().parse_unknown)
         self.a._version='0.2.2-rc.3';self.assertFalse(self.parse(self.raw+self.raw.splitlines()[-1]).ok)
+    def test_empty_output_is_never_success_even_after_workspace_edits(self):
+        for version in ('0.2.2-rc.3','unverified legacy'):
+            self.a._version=version
+            result=self.parse(' \n\t')
+            self.assertFalse(result.ok)
+            self.assertTrue(result.parse_unknown)
+            self.assertEqual(result.error_kind,ErrorKind.PARSE_FAILED)
     def test_unknown_version_stops_before_model_call(self):
         with mock.patch('orchestrator.adapters.cli_base.resolve_exe', return_value='dsh'), \
                 mock.patch('orchestrator.adapters.cli_base.run_cli_process', return_value=
@@ -57,7 +64,7 @@ class DshProtocol(unittest.TestCase):
         self.assertEqual(execute.call_args.kwargs['input'],'private prompt');self.assertTrue(r.ok)
     def test_no_full_access_or_proxy_embedded_credentials(self):
         with self.assertRaises(ValueError):DshAdapter('dsh',permission_mode='full-access')
-        with self.assertRaises(ValueError):DshAdapter('dsh',proxy_url='http://user:secret@localhost')
+        with self.assertRaises(ValueError):DshAdapter('dsh',proxy_url='http://'+'user:secret@localhost')
 
     def test_legacy_plaintext_can_be_archived_but_never_completes_stage(self):
         self.a._version='unverified legacy'

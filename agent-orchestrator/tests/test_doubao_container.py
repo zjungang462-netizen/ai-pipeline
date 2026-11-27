@@ -1,4 +1,5 @@
 import json
+import os
 from pathlib import Path
 from tempfile import TemporaryDirectory
 import unittest
@@ -21,6 +22,19 @@ def _result(text='done', denials=None):
 
 
 class DoubaoContainer(unittest.TestCase):
+    def test_staging_chown_failure_stops_instead_of_adding_capabilities(self):
+        from types import SimpleNamespace
+        from orchestrator.adapters.workspace_sync import materialize_staging
+        fake_os = SimpleNamespace(
+            name='posix', geteuid=lambda: 0,
+            chown=mock.Mock(side_effect=PermissionError('not owner')),
+            walk=lambda target: [(str(target), [], ['editable.py'])],
+        )
+        with TemporaryDirectory() as directory, \
+                mock.patch('orchestrator.adapters.workspace_sync.os', fake_os):
+            with self.assertRaisesRegex(RuntimeError, '已停止执行'):
+                materialize_staging(Path(directory), {'editable.py': b'x\n'}, ('editable.py',))
+
     def test_success_terminal_has_no_token_usage(self):
         adapter = DoubaoAdapter('doubao')
         adapter._version = VERSION
@@ -109,6 +123,32 @@ class DoubaoContainer(unittest.TestCase):
         self.assertFalse(missing.ok)
         self.assertEqual(missing.error_kind, ErrorKind.REJECTED)
 
+    def test_staging_requests_host_uid_override_only_when_chown_is_unavailable(self):
+        from types import SimpleNamespace
+        from orchestrator.adapters.workspace_sync import materialize_staging
+
+        for chown_fails in (False, True):
+            with self.subTest(chown_fails=chown_fails), TemporaryDirectory() as tmp:
+                root = Path(tmp)
+                chown = mock.Mock(side_effect=PermissionError('not owner') if chown_fails else None)
+                fake_os = SimpleNamespace(
+                    name='posix', geteuid=lambda: 1000, chown=chown,
+                    walk=lambda target: [(str(target), [], ['app.py'])],
+                )
+                with mock.patch('orchestrator.adapters.workspace_sync.os', fake_os):
+                    staging_uid = materialize_staging(root, {'app.py': b'x = 1\n'}, ('app.py',))
+                self.assertEqual(staging_uid, 1000 if chown_fails else None)
+                self.assertTrue(chown.called)
+
+    def test_private_staging_fallback_uses_host_uid_and_dac_override(self):
+        from types import SimpleNamespace
+
+        adapter = DoubaoAdapter('doubao')
+        with mock.patch('orchestrator.adapters.cli_doubao.os', SimpleNamespace(getegid=lambda: 4444)):
+            args = adapter._common_run(staging_uid=1234)
+        self.assertEqual(args[args.index('--user') + 1], '1234:4444')
+        self.assertIn('DAC_OVERRIDE', args)
+
     def test_code_stage_with_editable_files_uses_isolated_staging_and_verifies_writeback(self):
         import csv
         scratch = TemporaryDirectory()
@@ -129,16 +169,37 @@ class DoubaoContainer(unittest.TestCase):
                          context_files=('pricing.py', 'readonly.py'), editable_files=('pricing.py',))
 
         def fake_exec(args, workdir, context, stdin_data=None):
-            mount_arg = next(item for item in args if isinstance(item, str) and 'target=/workspace' in item)
-            fields = dict(part.split('=', 1) for part in next(csv.reader([mount_arg])) if '=' in part)
-            staging = Path(fields['source'])
+            mounts = []
+            for item in args:
+                if not isinstance(item, str) or not item.startswith('type=bind'):
+                    continue
+                fields = {}
+                for part in next(csv.reader([item])):
+                    key, separator, value = part.partition('=')
+                    fields[key] = value if separator else True
+                mounts.append(fields)
+            staging = Path(next(row['source'] for row in mounts if row['target'] == '/workspace'))
+            readonly_mount = next(row for row in mounts if row['target'] == '/workspace/readonly.py')
+            self.assertIn('readonly', readonly_mount)
+            self.assertFalse(any(row['target'] == '/workspace/pricing.py' for row in mounts))
             # 容器只挂载隔离 staging 目录，未声明的保护测试文件不可见。
             self.assertNotEqual(staging.resolve(), workspace.resolve())
             self.assertTrue((staging / 'pricing.py').is_file())
             self.assertTrue((staging / 'readonly.py').is_file())
             self.assertFalse((staging / 'secret_test.py').exists())
-            # 模拟容器内修改了声明可编辑文件、误改了只读文件并创建了垃圾文件。
-            (staging / 'pricing.py').write_bytes(b'new-price')
+            if os.name != 'nt':
+                self.assertEqual(staging.stat().st_mode & 0o777, 0o700)
+                self.assertEqual((staging / 'pricing.py').stat().st_mode & 0o777, 0o600)
+                self.assertEqual((staging / 'readonly.py').stat().st_mode & 0o777, 0o400)
+                if os.geteuid() not in (0, 65534):
+                    self.assertNotIn('DAC_OVERRIDE', args)
+                    self.assertEqual(args[args.index('--user') + 1], f'{os.geteuid()}:{os.getegid()}')
+            # 模拟容器内原子替换可编辑文件、绕过只读挂载改写上下文并创建垃圾文件。
+            replacement = staging / 'pricing.py.tmp'
+            replacement.write_bytes(b'new-price')
+            replacement.chmod(0o600)
+            os.replace(replacement, staging / 'pricing.py')
+            (staging / 'readonly.py').chmod(0o600)
             (staging / 'readonly.py').write_bytes(b'tampered-readonly')
             (staging / 'junk.tmp').write_bytes(b'junk')
             return Result(True, 0, text='done', channel='cli_doubao')

@@ -4,6 +4,7 @@ from __future__ import annotations
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 from orchestrator import artifacts
 from orchestrator.config import parse_config
@@ -82,6 +83,68 @@ class TestWorktree(unittest.TestCase):
             # 代码已合并回主线工作区
             self.assertTrue((cfg.task_workdir / "coding_output.py").is_file())
             self.assertIsNotNone(eng.state.stage("coding").commit_sha)
+
+    def test_rerun_in_same_workspace_commits_on_first_attempt(self):
+        # 同一工作区的第二次运行必须产出不同内容，否则零净变更会让编码阶段先失败一次。
+        with tempfile.TemporaryDirectory() as d:
+            tmp = Path(d)
+            raw = {"task_workdir": "workspace", "state_dir": ".state",
+                   "stages": [{"name": "coding", "adapter": "fake", "prompt": "编码", "kind": "code"}],
+                   "adapters": {"fake": {"type": "fake"}}}
+            cfg = parse_config(raw, base_dir=tmp)
+            Engine(cfg, {"fake": FakeAdapter()}, run_id="first", task="demo").run()
+            second = Engine(cfg, {"fake": FakeAdapter()}, run_id="second", task="demo")
+            res = second.run()
+            self.assertEqual(res["coding"], StageStatus.DONE.value)
+            self.assertEqual(second.state.stage("coding").current_attempt, 1)
+            self.assertEqual([e for e in second.state.events if e["kind"] == "attempt_fail"], [])
+
+    def test_archive_failure_reason_is_recorded(self):
+        # 界面靠事件里的 reason 解释一次失败；归档失败以前只留下 error_kind=archive。
+        class SameOutput(FakeAdapter):
+            def run(self, prompt, workdir, ctx):
+                result = super().run(prompt, workdir, ctx)
+                (Path(workdir) / "coding_output.py").write_text("VALUE = 1\n", encoding="utf-8")
+                return result
+        with tempfile.TemporaryDirectory() as d:
+            tmp = Path(d)
+            raw = {"task_workdir": "workspace", "state_dir": ".state",
+                   "stages": [{"name": "coding", "adapter": "fake", "prompt": "编码",
+                               "kind": "code", "max_attempts": 1}],
+                   "adapters": {"fake": {"type": "fake"}}}
+            cfg = parse_config(raw, base_dir=tmp)
+            Engine(cfg, {"fake": SameOutput()}, run_id="first", task="demo").run()
+            second = Engine(cfg, {"fake": SameOutput()}, run_id="second", task="demo")
+            res = second.run()
+            self.assertEqual(res["coding"], StageStatus.FAILED.value)
+            failure = [e for e in second.state.events if e["kind"] == "attempt_fail"]
+            self.assertEqual(len(failure), 1)
+            self.assertEqual(failure[0]["error_kind"], "archive")
+            self.assertIn("代码未发生变化", failure[0]["reason"])
+
+    def test_transient_archive_error_does_not_persist_git_diagnostics(self):
+        with tempfile.TemporaryDirectory() as d:
+            cfg = parse_config({"task_workdir": "workspace", "state_dir": ".state",
+                "stages": [{"name": "coding", "kind": "code", "adapter": "fake",
+                            "prompt": "code", "max_attempts": 2}],
+                "adapters": {"fake": {"type": "fake"}}}, base_dir=Path(d))
+            engine = Engine(cfg, {"fake": FakeAdapter()}, "archive-safe", "demo")
+            from orchestrator.archive import ArchiveOperations
+            original = ArchiveOperations.archive
+            calls = 0
+            secret = "private-filter-credential-123456789"
+            def archive(instance, *args, **kwargs):
+                nonlocal calls
+                calls += 1
+                if calls == 1:
+                    raise artifacts.GitError(f"git filter failed: {secret}")
+                return original(instance, *args, **kwargs)
+            with mock.patch.object(ArchiveOperations, "archive", archive):
+                self.assertEqual(engine.run()["coding"], "done")
+            failures = [e for e in engine.state.events if e["kind"] == "attempt_fail"]
+            self.assertEqual(failures[0]["reason_code"], "archive_failed")
+            for name in ("events.jsonl", "state.json"):
+                self.assertNotIn(secret, (engine.state.run_dir / name).read_text(encoding="utf-8"))
 
 
 if __name__ == "__main__":

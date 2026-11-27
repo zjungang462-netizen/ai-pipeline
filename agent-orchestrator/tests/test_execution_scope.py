@@ -23,8 +23,8 @@ class ExecutionScope(unittest.TestCase):
         temporary=tempfile.TemporaryDirectory();self.addCleanup(temporary.cleanup)
         self.root=Path(temporary.name)
 
-    def start(self,configs):
-        server=create_server(self.root/'dashboard.sqlite3',list(configs),0)
+    def start(self,configs,*,recover=True):
+        server=create_server(self.root/'dashboard.sqlite3',list(configs),0,recover=recover)
         thread=threading.Thread(target=server.serve_forever,daemon=True);thread.start()
         def close():
             server.shutdown();server.server_close();thread.join(5)
@@ -61,6 +61,22 @@ class ExecutionScope(unittest.TestCase):
         return parse_config({'task_workdir':'fixed-workspace','state_dir':'state','stages':[stage],
                             'adapters':{'backend':{'type':adapter,'api_key':'private-fixture-never-expose'}}},base_dir=self.root)
 
+    def test_only_exact_offline_showcase_is_offered_in_project_list(self):
+        name = 'kiroween-demo.example.toml'
+        original = (Path(__file__).resolve().parents[1] / name).read_bytes().replace(b'\r\n', b'\n')
+        configs = []
+        for folder, body in [('lf', original), ('crlf', original.replace(b'\n', b'\r\n')),
+                             ('changed', original.replace(b'max_tokens = 20000', b'max_tokens = 20001'))]:
+            path = self.root / folder / name
+            path.parent.mkdir()
+            path.write_bytes(body)
+            configs.append(path)
+        server = self.start(configs)
+        status, data, _ = self.http(server, 'GET', '/api/projects', cookie=self.login(server))
+        self.assertEqual(status, 200)
+        self.assertEqual({Path(p['config']).parent.name: p['verified_showcase'] for p in data['projects']},
+                         {'lf': True, 'crlf': True, 'changed': False})
+
     def test_fixed_tests_do_not_claim_development_or_model_execution(self):
         scope=execution_scope(self.config())
         self.assertEqual(scope['mode'],'fixed_tests')
@@ -80,6 +96,20 @@ class ExecutionScope(unittest.TestCase):
         self.assertEqual(scope['mode'],'simulation');self.assertFalse(scope['uses_model'])
         self.assertNotIn('private-fixture-never-expose',json.dumps(scope))
         self.assertEqual(scope['stages'][0]['adapter_type'],'fake')
+
+    def test_execution_scope_has_stable_english_labels_and_summaries(self):
+        scopes=[execution_scope(self.config()),
+                execution_scope(self.config('code')),
+                execution_scope(self.config('code','cli_agy')),
+                execution_scope(self.config('report','cli_codex'))]
+        self.assertEqual([scope['mode'] for scope in scopes],
+                         ['fixed_tests','simulation','development','analysis'])
+        for scope in scopes:
+            for key in ('label_en','summary_en'):
+                self.assertTrue(scope[key])
+                self.assertFalse(any('\u4e00' <= char <= '\u9fff' for char in scope[key]))
+        self.assertEqual(scopes[0]['label_en'],'Fixed-test workflow')
+        self.assertIn('no model',scopes[0]['summary_en'])
 
     def test_projects_and_old_run_snapshot_expose_scope_without_changing_run(self):
         cfgfile=self.root/'controls.toml'
@@ -171,6 +201,84 @@ class ExecutionScope(unittest.TestCase):
             self.assertEqual(data['lifecycle'],'pending')
             self.assertEqual(data['execution_scope']['mode'],'fixed_tests')
             self.assertTrue(launch.called)
+
+    def test_second_run_for_busy_project_names_the_blocking_run(self):
+        from orchestrator.collaboration.service import Service
+        launch_patch = mock.patch.object(Service, 'launch')
+        launch = launch_patch.start()
+        self.addCleanup(launch_patch.stop)
+        cfgfile=self.root/'busy.toml'
+        cfgfile.write_text('task_workdir="ws"\nstate_dir="state"\n[run_budget]\nmax_tokens=1000\nmax_duration_s=60\n'
+                           '[[stages]]\nname="verify"\nkind="test"\ntest_cmd=["python","-c","assert 2+2==4"]\n',
+                           encoding='utf8')
+        server=self.start([cfgfile],recover=False);cookie=self.login(server)
+        service=server.application.service
+        project=service.store.projects()[0]
+        body={'project_id':project['id'],'task':'重复演示',
+              'expected_config_hash':hashlib.sha256(cfgfile.read_bytes()).hexdigest()}
+        status,first,_=self.post(server,'/api/runs',body,cookie,'first-run-001')
+        self.assertEqual(status,202,first)
+        status,second,_=self.post(server,'/api/runs',body,cookie,'second-run-001')
+        self.assertEqual(status,409,second)
+        self.assertEqual(second['run_id'],first['id'])
+        self.assertIn('未结束任务',second['error'])
+        self.assertEqual(launch.call_count,1)
+
+    def test_arena_refuses_project_with_simulated_stages(self):
+        # 零密钥演练含模拟执行器；竞技场的候选是真实 CLI，不能在这里被启动。
+        cfgfile=self.root/'simulated.toml'
+        cfgfile.write_text('task_workdir="ws"\nstate_dir="state"\n[run_budget]\nmax_tokens=1000\nmax_duration_s=60\n'
+                           '[[stages]]\nname="coding"\nkind="code"\nadapter="fake"\nprompt="编码"\n'
+                           '[adapters.fake]\ntype="fake"\n',encoding='utf8')
+        server=self.start([cfgfile]);cookie=self.login(server)
+        project=server.application.service.store.projects()[0]
+        body={'task':'演示','candidates':[{'label':'A','adapter_type':'cli_agy'},
+                                          {'label':'B','adapter_type':'cli_agy'}]}
+        with mock.patch('orchestrator.collaboration.arena_jobs.start_job') as start:
+            status,data,_=self.post(server,f'/api/projects/{project["id"]}/arena',body,cookie,'arena-sim-001')
+        self.assertEqual(status,409,data)
+        self.assertIn('不会启动本机真实 CLI',data['error'])
+        self.assertFalse(start.called)
+
+    def test_arena_start_and_apply_refuse_analysis_project(self):
+        cfgfile = self.root / 'analysis.toml'
+        cfgfile.write_text('task_workdir="ws"\nstate_dir="state"\n'
+                           '[adapters.reviewer]\ntype="cli_codex"\n'
+                           '[[stages]]\nname="review"\nkind="report"\n'
+                           'adapter="reviewer"\nprompt="review"\n', encoding='utf-8')
+        server = self.start([cfgfile])
+        cookie = self.login(server)
+        project = server.application.service.store.projects()[0]
+        endpoint = f'/api/projects/{project["id"]}/arena'
+        body = {'task': 'demo', 'candidates': [{'label': 'A', 'adapter_type': 'cli_agy'},
+                                               {'label': 'B', 'adapter_type': 'cli_agy'}]}
+        with mock.patch('orchestrator.collaboration.arena_jobs.start_job') as start, \
+                mock.patch('orchestrator.arena.apply_arena_winner') as apply:
+            status, data, _ = self.post(server, endpoint, body, cookie, 'arena-analysis-001')
+            self.assertEqual(status, 409, data)
+            self.assertIn('分析流程', data['error'])
+            status, data, _ = self.post(server, endpoint + '/apply', {}, cookie, 'arena-analysis-002')
+        self.assertEqual(status, 409, data)
+        self.assertIn('分析流程', data['error'])
+        self.assertFalse(start.called)
+        self.assertFalse(apply.called)
+
+    def test_arena_refuses_fixed_test_project(self):
+        cfgfile = self.root / 'fixed.toml'
+        cfgfile.write_text('task_workdir="ws"\nstate_dir="state"\n'
+                           '[[stages]]\nname="verify"\nkind="test"\n'
+                           'test_cmd=["python","-c","assert 2+2==4"]\n', encoding='utf8')
+        server = self.start([cfgfile])
+        cookie = self.login(server)
+        project = server.application.service.store.projects()[0]
+        body = {'task': 'demo', 'candidates': [{'label': 'A', 'adapter_type': 'cli_agy'},
+                                               {'label': 'B', 'adapter_type': 'cli_agy'}]}
+        with mock.patch('orchestrator.collaboration.arena_jobs.start_job') as start:
+            status, data, _ = self.post(server, f'/api/projects/{project["id"]}/arena',
+                                        body, cookie, 'arena-fixed-001')
+        self.assertEqual(status, 409, data)
+        self.assertIn('固定测试', data['error'])
+        self.assertFalse(start.called)
 
     def test_derived_task_rejects_stale_parent_config_hash(self):
         from orchestrator.collaboration.service import Service

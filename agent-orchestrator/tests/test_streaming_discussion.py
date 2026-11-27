@@ -317,7 +317,8 @@ class StreamingDiscussionTests(unittest.TestCase):
             f'base_url = "http://127.0.0.1:{mock_api.server_port}/v1"\n'
             'api_key_env = "TEST_RT_HI_KEY"\nmodel = "m-default"\n'
             '[adapters.agy]\ntype = "cli_agy"\nmodel = "gemini-4-neon-high"\n'
-            'proxy_url = "http://127.0.0.1:7897"\nmode = "accept-edits"\nsandbox = false\n'
+            'proxy_url = "http://127.0.0.1:7897"\nextra_env = ["RT_PROXY_CERT"]\n'
+            'mode = "accept-edits"\nsandbox = false\n'
             '[[stages]]\nname = "design"\nkind = "report"\nadapter = "api"\nprompt = "设计"\n',
             encoding='utf8',
         )
@@ -331,7 +332,10 @@ class StreamingDiscussionTests(unittest.TestCase):
         self.assertEqual(seat.options['mode'], 'plan')
         self.assertTrue(seat.options['sandbox'])
         self.assertEqual(seat.options['proxy_url'], 'http://127.0.0.1:7897')
+        self.assertEqual(seat.options['extra_env'], ['RT_PROXY_CERT'])
         self.assertEqual(seat.options['model'], 'claude-opus-5-5-high')
+        with self.assertRaisesRegex(ValueError, '没有可用的 cli_agy'):
+            _build_seat_adapter('skeptic', 'cli_agy', '', cfg, apis, [])
 
         # 2) 验证 service.discuss 拒绝非白名单后端（如 cli_codex）
         server = create_server(root / 'db.sqlite3', [cfg_path], 0, recover=False)
@@ -347,6 +351,16 @@ class StreamingDiscussionTests(unittest.TestCase):
                 run_key, '测试后端白名单', ['developer'], 4000, 'idem-bad-backend-1234',
                 role_adapters={'developer': 'cli_codex'},
             )
+
+        source = cfg_path.read_text(encoding='utf8')
+        no_agy = root / 'no-agy.toml'
+        no_agy.write_text(source[:source.index('[adapters.agy]')] + source[source.index('[[stages]]'):],
+                          encoding='utf8')
+        project2 = service.store.register_project(no_agy)
+        run2 = service.store.register_run(project2, 'run-no-agy', no_agy, root / 'state-no-agy')
+        with self.assertRaisesRegex(ValueError, '未配置 cli_agy'):
+            service.discuss(run2, '未配置后端', ['developer'], 4000, 'idem-no-agy-1234',
+                            role_adapters={'developer': 'cli_agy'})
 
         # 3) 验证人工主持人插话仅注入第 2 轮及共识阶段，不污染第 1 轮
         run = service.store.run(run_key)
@@ -364,6 +378,182 @@ class StreamingDiscussionTests(unittest.TestCase):
         self.assertIn('人工主持人最新插话引导', captured_prompts[1])
         self.assertIn('不要改数据库表结构', captured_prompts[1])
         self.assertIn('人工主持人最新插话引导', captured_prompts[2])
+
+    def test_discussion_failure_settles_usage_already_consumed_by_engine(self):
+        import time as _time
+        import warnings
+        from types import SimpleNamespace
+        from unittest import mock
+
+        from orchestrator.collaboration.discussion import capture, execute
+        from orchestrator.collaboration.service import Service
+        from orchestrator.config import load_config
+        from orchestrator.state import RunState, atomic_write_json
+
+        scratch = tempfile.TemporaryDirectory()
+        self.addCleanup(scratch.cleanup)
+        root = Path(scratch.name)
+        ws = root / 'ws'
+        ws.mkdir()
+        (ws / 'app.py').write_text('VALUE = 1\n', encoding='utf8')
+        state_dir = root / 'state'
+        cfg_path = root / 'project.toml'
+        cfg_path.write_text(
+            f'task_workdir = "{ws.as_posix()}"\n'
+            f'state_dir = "{state_dir.as_posix()}"\n'
+            '[run_budget]\nmax_tokens = 20000\nmax_duration_s = 120\n'
+            '[adapters.api]\ntype = "openai_compat"\n'
+            'base_url = "https://example.invalid/v1"\napi_key_env = "TEST_UNUSED_KEY"\nmodel = "mock"\n'
+            '[[stages]]\nname = "design"\nkind = "report"\nadapter = "api"\nprompt = "设计"\n',
+            encoding='utf8',
+        )
+        cfg = load_config(cfg_path)
+        service = Service(root / 'db.sqlite3', [cfg_path])
+        project_id = service.store.projects()[0]['id']
+        parent = RunState(state_dir, 'run-discussion-failure')
+        parent.usage_total = {
+            'tokens': 1000, 'reported_tokens': 1000, 'reserved_tokens': 0,
+            'unknown_calls': 0, 'duration_s': 1.0,
+        }
+        parent.save()
+        atomic_write_json(
+            parent.run_dir / 'job.json',
+            {'status': 'paused', 'started_at': _time.time(), 'max_duration_s': 120,
+             'config_hash': cfg.source_hash},
+        )
+        run_key = service.store.register_run(project_id, 'run-discussion-failure', cfg_path, state_dir, managed=True)
+        run = service.store.run(run_key)
+        topic = service.store.create_thread(
+            run_key, '讨论失败后的用量', ['developer'], 4000,
+            capture(run, question='讨论失败后的用量'), 'idem-discussion-failure-001',
+        )
+
+        class FailingEngine:
+            def __init__(self, *args):
+                self.state = SimpleNamespace(usage_total={
+                    'tokens': 25, 'reported_tokens': 25, 'reserved_tokens': 0,
+                    'unknown_calls': 0, 'duration_s': 2.0,
+                })
+
+            def run(self):
+                raise RuntimeError('failed after token consumption')
+
+        with mock.patch('orchestrator.collaboration.discussion.Engine', return_value=FailingEngine()):
+            with self.assertRaisesRegex(RuntimeError, 'failed after token consumption'):
+                execute(service.store, topic['id'], stream_tokens=True)
+
+        reloaded = RunState(state_dir, 'run-discussion-failure')
+        reloaded.load()
+        self.assertEqual(reloaded.usage_total['tokens'], 1025)
+        self.assertEqual(reloaded.usage_total['reserved_tokens'], 0)
+        self.assertEqual(reloaded.usage_total['reported_tokens'], 1025)
+        hold = reloaded.control['discussion_holds'][topic['id']]
+        self.assertTrue(hold['settled'])
+        self.assertEqual(hold['usage']['tokens'], 25)
+
+        topic2 = service.store.create_thread(
+            run_key, '讨论结算失败后的原异常', ['developer'], 4000,
+            capture(run, question='讨论结算失败后的原异常'), 'idem-discussion-settle-failure-002',
+        )
+        with mock.patch('orchestrator.collaboration.discussion.Engine', return_value=FailingEngine()), \
+                mock.patch('orchestrator.collaboration.discussion.settle_parent',
+                           side_effect=OSError('settlement failed')):
+            with warnings.catch_warnings():
+                warnings.simplefilter('error')
+                with self.assertLogs('orchestrator.collaboration.discussion', level='WARNING') as logs:
+                    with self.assertRaisesRegex(RuntimeError, 'failed after token consumption'):
+                        execute(service.store, topic2['id'], stream_tokens=True)
+        self.assertIn('用量结算失败', logs.output[0])
+        reloaded = RunState(state_dir, 'run-discussion-failure')
+        reloaded.load()
+        self.assertEqual(reloaded.usage_total['tokens'], 5025)
+        self.assertEqual(reloaded.usage_total['reserved_tokens'], 4000)
+        self.assertFalse(reloaded.control['discussion_holds'][topic2['id']]['settled'])
+
+    def test_non_inline_discussion_failure_settles_persisted_usage(self):
+        import time as _time
+        from unittest import mock
+
+        from orchestrator.collaboration.discussion import capture, execute
+        from orchestrator.collaboration.service import Service
+        from orchestrator.config import load_config
+        from orchestrator.state import RunState, atomic_write_json
+
+        scratch = tempfile.TemporaryDirectory()
+        self.addCleanup(scratch.cleanup)
+        root = Path(scratch.name)
+        ws = root / 'ws'
+        ws.mkdir()
+        state_dir = root / 'state'
+        cfg_path = root / 'project.toml'
+        cfg_path.write_text(
+            f'task_workdir = "{ws.as_posix()}"\n'
+            f'state_dir = "{state_dir.as_posix()}"\n'
+            '[run_budget]\nmax_tokens = 20000\nmax_duration_s = 120\n'
+            '[adapters.api]\ntype = "openai_compat"\n'
+            'base_url = "https://example.invalid/v1"\napi_key_env = "TEST_UNUSED_KEY"\nmodel = "mock"\n'
+            '[[stages]]\nname = "design"\nkind = "report"\nadapter = "api"\nprompt = "设计"\n',
+            encoding='utf8',
+        )
+        cfg = load_config(cfg_path)
+        service = Service(root / 'db.sqlite3', [cfg_path])
+        project_id = service.store.projects()[0]['id']
+        parent = RunState(state_dir, 'run-discussion-worker-failure')
+        parent.usage_total = {
+            'tokens': 1000, 'reported_tokens': 1000, 'reserved_tokens': 0,
+            'unknown_calls': 0, 'duration_s': 1.0,
+        }
+        parent.save()
+        atomic_write_json(
+            parent.run_dir / 'job.json',
+            {'status': 'paused', 'started_at': _time.time(), 'max_duration_s': 120,
+             'config_hash': cfg.source_hash},
+        )
+        run_key = service.store.register_run(
+            project_id, 'run-discussion-worker-failure', cfg_path, state_dir, managed=True)
+        run = service.store.run(run_key)
+
+        for index, mode in enumerate(('supervise', 'load_config'), start=1):
+            with self.subTest(mode=mode):
+                topic = service.store.create_thread(
+                    run_key, f'非 inline 异常结算 {mode}', ['developer'], 4000,
+                    capture(run, question=f'非 inline 异常结算 {mode}'),
+                    f'idem-discussion-worker-{index}',
+                )
+
+                def fake_supervise(config_path, run_id, task, max_restarts):
+                    analysis = RunState(Path(config_path).parent / 'state', run_id)
+                    analysis.usage_total = {
+                        'tokens': 25, 'reported_tokens': 25, 'reserved_tokens': 0,
+                        'unknown_calls': 0, 'duration_s': 2.0,
+                    }
+                    analysis.save()
+                    if mode == 'supervise':
+                        raise RuntimeError('worker failed after token consumption')
+                    return {'status': 'failed'}
+
+                patches = [mock.patch('orchestrator.supervisor.supervise', side_effect=fake_supervise)]
+                if mode == 'load_config':
+                    patches.append(mock.patch(
+                        'orchestrator.config.load_config',
+                        side_effect=[cfg, RuntimeError('analysis config failed after worker exit')],
+                    ))
+                with patches[0]:
+                    if len(patches) == 2:
+                        with patches[1]:
+                            with self.assertRaisesRegex(RuntimeError, 'analysis config failed'):
+                                execute(service.store, topic['id'], stream_tokens=False)
+                    else:
+                        with self.assertRaisesRegex(RuntimeError, 'worker failed after token consumption'):
+                            execute(service.store, topic['id'], stream_tokens=False)
+
+                reloaded = RunState(state_dir, 'run-discussion-worker-failure')
+                reloaded.load()
+                self.assertEqual(reloaded.usage_total['tokens'], 1000 + 25 * index)
+                self.assertEqual(reloaded.usage_total['reserved_tokens'], 0)
+                hold = reloaded.control['discussion_holds'][topic['id']]
+                self.assertTrue(hold['settled'])
+                self.assertEqual(hold['usage']['tokens'], 25)
 
     def test_discussion_security_dotfile_exe_inheritance_budget_refund_and_cli_agy_capability(self):
         import time as _time

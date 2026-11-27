@@ -12,7 +12,8 @@ from unittest import mock
 from scripts.failure_evidence import (capture, classify, EvidenceTestCase, EvidenceResultMixin,
                                       ENV_OUTPUT, MAX_BUNDLE_BYTES, MAX_TAIL_BYTES,
                                       environment_secrets)
-from scripts.verify_delivery import digest_files, redact_verification
+from scripts.verify_delivery import (digest_files, permitted_platform_skips,
+                                     redact_verification, unexpected_skip_entries)
 from orchestrator.adapters.cli_agy import AgyAdapter
 from orchestrator.contracts import RunContext, ErrorKind
 from orchestrator.state import atomic_write_json
@@ -401,6 +402,18 @@ class FaultClassification(unittest.TestCase):
 
 
 class DeliveryVerification(unittest.TestCase):
+    def test_unexpected_skips_are_identified_without_linux_allowlist(self):
+        skipped = [{'test': 'suite.test_a', 'reason': 'fixture skip'}]
+        self.assertEqual(unexpected_skip_entries(skipped, permitted_platform_skips(False)),
+                         [('suite.test_a', 'fixture skip')])
+
+    def test_linux_allowlist_permits_only_registered_test_and_reason(self):
+        permitted = permitted_platform_skips(True)
+        test, reason = next(iter(permitted))
+        self.assertEqual(unexpected_skip_entries([{'test': test, 'reason': reason}], permitted), [])
+        self.assertEqual(unexpected_skip_entries([{'test': test, 'reason': reason + ' changed'}], permitted),
+                         [(test, reason + ' changed')])
+
     def test_source_digest_covers_demo_delivery_sources(self):
         files=digest_files()
         self.assertIn('demo/run_api_demo.py',files)

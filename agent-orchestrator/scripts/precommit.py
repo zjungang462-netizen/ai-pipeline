@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import re
 import subprocess
 import sys
@@ -23,8 +24,8 @@ SECRET_ASSIGNMENT = re.compile(
 
 
 def git(repo, *args, check=True):
-    return subprocess.run(['git', '-C', str(repo), *args], check=check,
-                          capture_output=True, timeout=30)
+    return subprocess.run(['git', '-C', str(repo), *args], env=dict(os.environ),
+                          check=check, capture_output=True, timeout=30)
 
 
 def credential_findings(data, path, source):

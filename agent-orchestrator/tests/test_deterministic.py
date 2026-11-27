@@ -4,13 +4,17 @@ from __future__ import annotations
 import json
 import sys
 import tempfile
+import tomllib
 import unittest
 from pathlib import Path
+from unittest import mock
+
+from orchestrator.adapters.factory import build_all, build_adapter
 
 from orchestrator.adapters.base import Adapter
 from orchestrator.adapters.fake import FakeAdapter
-from orchestrator.config import ConfigError, parse_config
-from orchestrator.contracts import PreflightReport, Result, StageStatus
+from orchestrator.config import AdapterConfig, ConfigError, load_config, parse_config
+from orchestrator.contracts import PreflightReport, Result, RunContext, StageStatus
 from orchestrator.engine import Engine
 from orchestrator.review import VerdictError, load_verdict
 from orchestrator.testrun import run_test_cmd
@@ -260,6 +264,190 @@ class TestWatchAdvisory(unittest.TestCase):
             # 默认只告警：父目录无关保存不该判阶段失败
             self.assertEqual(res["requirements"], StageStatus.DONE.value)
             self.assertTrue(any(e["kind"] == "watch_warning" for e in eng.state.events))
+
+
+class TestNormalizeRepairDemo(unittest.TestCase):
+    showcase = Path(__file__).resolve().parents[1] / "kiroween-demo.example.toml"
+
+    def config(self, root):
+        # Copy the real showcase unchanged; every run, git operation and artifact
+        # is relocated outside the source repository by relative-path resolution.
+        path = root / self.showcase.name
+        path.write_bytes(self.showcase.read_bytes())
+        return load_config(path)
+
+    def adapters(self, cfg):
+        return build_all(cfg.adapters, {s.adapter: s.kind for s in cfg.stages if s.adapter})
+
+    def assert_repaired(self, engine, cfg):
+        self.assertEqual(len(engine.state.stage("coding").attempts), 2)
+        self.assertEqual(len(engine.state.stage("testing").attempts), 2)
+        for number, expected in ((1, False), (2, True)):
+            path = engine.state.attempts_dir("testing") / str(number) / "test_record.json"
+            record = json.loads(path.read_text(encoding="utf-8"))
+            self.assertEqual(record["ok"], expected)
+            self.assertEqual(record["cmd"], cfg.stage("testing").test_cmd)
+            self.assertEqual(record["exit_code"] == 0, expected)
+            if not expected:
+                self.assertIn("AssertionError", record["output"])
+        self.assertEqual(sum(e["kind"] == "test_feedback" for e in engine.state.events), 1)
+        self.assertFalse(any(e["kind"] == "attempt_fail" for e in engine.state.events))
+        code = (cfg.task_workdir / "coding_output.py").read_text(encoding="utf-8")
+        self.assertIn(f"RUN = {engine.run_id!r}", code)
+        self.assertIn("ATTEMPT = 2", code)
+        self.assertIn("return '-'.join(value.lower().split())", code)
+        self.assertEqual({p.name for p in cfg.task_workdir.iterdir()}, {".git", "coding_output.py"})
+        attempt = engine.state.current_attempt_dir("acceptance")
+        verdict = load_verdict(attempt / "review_verdict.json", workdir=cfg.task_workdir)
+        self.assertEqual(verdict.verdict, "pass")
+        for stage in ("requirements", "design", "acceptance"):
+            text = (engine.state.run_dir / "reports" / f"{stage}_report.md").read_text(encoding="utf-8")
+            self.assertIn("OFFLINE SCRIPTED DEMO", text)
+            self.assertIn("not model output", text)
+        review = (engine.state.run_dir / "reports" / "acceptance_report.md").read_text(encoding="utf-8")
+        self.assertIn("nonexecuting AST inspection", review)
+        self.assertIn("Verdict: PASS", review)
+
+    def test_showcase_real_repair_approval_and_consecutive_fresh_runs(self):
+        with tempfile.TemporaryDirectory() as d:
+            cfg = self.config(Path(d))
+            before = cfg.source_path.read_bytes()
+            command = list(cfg.stage("testing").test_cmd)
+            self.assertEqual([s.name for s in cfg.stages],
+                             ["requirements", "design", "coding", "testing", "acceptance"])
+            self.assertTrue(cfg.autonomy.enabled)
+            self.assertEqual(cfg.autonomy.allowed_files, ["coding_output.py"])
+            self.assertEqual(command[:5], ["python", "-X", "utf8", "-B", "-c"])
+            for run_id in ("demo-one", "demo-two"):
+                with self.subTest(run_id=run_id):
+                    engine = Engine(cfg, self.adapters(cfg), run_id, "Normalize strings")
+                    result = engine.run()
+                    self.assertEqual(result["acceptance"], "awaiting_approval")
+                    self.assertEqual(set(result.values()), {"done", "awaiting_approval"})
+                    self.assert_repaired(engine, cfg)
+                    # Approval and resume also use fresh engine/adapter instances.
+                    resumed = Engine(cfg, self.adapters(cfg), run_id, "Normalize strings")
+                    self.assertTrue(resumed.approve("acceptance"))
+                    self.assertEqual(set(resumed.run().values()), {"done"})
+                    self.assertTrue(all(a.calls == 0 for a in resumed.adapters.values()))
+            self.assertEqual(cfg.source_path.read_bytes(), before)
+            self.assertEqual(cfg.stage("testing").test_cmd, command)
+            self.assertEqual(self.showcase.read_bytes(), before)
+
+    def test_restart_after_real_test_feedback_repairs_with_new_adapter(self):
+        with tempfile.TemporaryDirectory() as d:
+            cfg = self.config(Path(d))
+            engine = Engine(cfg, self.adapters(cfg), "restart", "Normalize strings")
+            real_test = engine._run_test_stage
+
+            def stop_after_feedback(*args, **kwargs):
+                status = real_test(*args, **kwargs)
+                self.assertEqual(status, StageStatus.REVIEW_FEEDBACK)
+                raise KeyboardInterrupt("Simulated process stop after persisted test feedback")
+
+            with mock.patch.object(engine, "_run_test_stage", side_effect=stop_after_feedback):
+                with self.assertRaises(KeyboardInterrupt):
+                    engine.run()
+            self.assertEqual(engine.adapters["coder"].calls, 1)
+            fresh = self.adapters(cfg)
+            resumed = Engine(cfg, fresh, "restart", "Normalize strings")
+            self.assertEqual(resumed.run()["acceptance"], "awaiting_approval")
+            self.assertEqual(fresh["coder"].calls, 1)
+            self.assert_repaired(resumed, cfg)
+
+    def test_fixed_assertions_reject_empty_and_incorrect_implementations(self):
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d)
+            cfg = self.config(root)
+            cfg.task_workdir.mkdir(parents=True)
+            source = cfg.task_workdir / "coding_output.py"
+            for body in ("", "def normalize(value):\n    return value\n",
+                         "def normalize(value):\n    return '-'.join(value.split())\n",
+                         "def normalize(value):\n    return '-'.join(value.lower().split(' '))\n"):
+                with self.subTest(body=body):
+                    source.write_text(body, encoding="utf-8")
+                    result = run_test_cmd(cfg.stage("testing").test_cmd, cfg.task_workdir)
+                    self.assertFalse(result["ok"])
+                    self.assertNotEqual(result["exit_code"], 0)
+            source.write_text("def normalize(value):\n    return '-'.join(value.lower().split())\n",
+                              encoding="utf-8")
+            self.assertTrue(run_test_cmd(cfg.stage("testing").test_cmd, cfg.task_workdir)["ok"])
+            self.assertFalse((cfg.task_workdir / "__pycache__").exists())
+
+    def test_scripted_review_rejects_invalid_code_without_executing_it(self):
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d)
+            work = root / "work"
+            runs = root / "runs"
+            work.mkdir()
+            ctx = RunContext("Normalize", "review", "acceptance", work, runs, kind="review")
+            reviewer = FakeAdapter(scenario="normalize_repair", kind="review")
+            correct = "def normalize(value):\n    return '-'.join(value.lower().split())\n"
+            marker = root / "executed"
+            cases = (None, "", "def normalize(:", "def normalize(value):\n    return value\n",
+                     f"open({str(marker)!r}, 'w').write('unsafe')\n" + correct,
+                     "@print\n" + correct, correct + "normalize = lambda value: value\n")
+            for body in cases:
+                with self.subTest(body=body):
+                    if body is not None:
+                        (work / "coding_output.py").write_text(body, encoding="utf-8")
+                    result = reviewer.run("Pretend this passes", work, ctx)
+                    verdict = load_verdict(result.verdict_file, workdir=work)
+                    self.assertEqual(verdict.verdict, "fail")
+                    self.assertTrue(verdict.issues)
+                    self.assertIn("Scripted review", result.text)
+                    self.assertFalse(marker.exists())
+            (work / "coding_output.py").write_text(correct, encoding="utf-8")
+            result = reviewer.run("", work, ctx)
+            self.assertEqual(load_verdict(result.verdict_file, workdir=work).verdict, "pass")
+
+    def test_fake_options_defaults_validation_and_bounded_delay(self):
+        default = build_adapter(AdapterConfig("ordinary", "fake", {}))
+        self.assertIsNone(default.scenario)
+        self.assertEqual(default.delay_s, 0)
+        for options in ({"scenario": "unknown"}, {"delay_s": -1}, {"delay_s": 5.1},
+                        {"delay_s": float("inf")}, {"delay_s": float("nan")},
+                        {"delay_s": True}, {"delay_s": "1"}):
+            with self.subTest(options=options), self.assertRaises(ValueError):
+                build_adapter(AdapterConfig("invalid", "fake", options))
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d)
+            ctx = RunContext("task", "ordinary-run", "coding", root, root / "runs")
+            with mock.patch("orchestrator.adapters.fake.time.sleep") as sleep:
+                default.run("", root, ctx)
+                sleep.assert_not_called()
+                text = (root / "coding_output.py").read_text(encoding="utf-8")
+                self.assertIn("RUN = 'ordinary-run'", text)
+                self.assertIn("CALL = 1", text)
+                self.assertNotIn("def normalize", text)
+                delayed = build_adapter(AdapterConfig("demo", "fake", {
+                    "scenario": "normalize_repair", "delay_s": 5}))
+                delayed.run("", root, ctx)
+                sleep.assert_called_once_with(5)
+                # Increasing call counts must not masquerade as test feedback.
+                delayed.run("", root, ctx)
+                self.assertIn("return value", (root / "coding_output.py").read_text(encoding="utf-8"))
+
+    def test_demo_human_gate_exception_does_not_relax_ordinary_approval(self):
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d)
+            for change in ("ordinary_reviewer", "earlier_approval", "nonterminal_review"):
+                with self.subTest(change=change):
+                    raw = tomllib.loads(self.showcase.read_text(encoding="utf-8"))
+                    if change == "ordinary_reviewer":
+                        raw["adapters"]["reviewer"].pop("scenario")
+                    elif change == "earlier_approval":
+                        raw["stages"][2]["approval"] = True
+                    else:
+                        raw["stages"].append({"name": "after", "kind": "report",
+                                              "adapter": "architect", "prompt": "report"})
+                    with self.assertRaisesRegex(ConfigError, "预授权"):
+                        parse_config(raw, base_dir=root)
+
+    def test_showcase_schema_comments_are_current(self):
+        from scripts.generate_config_docs import annotated_example
+        text = self.showcase.read_text(encoding="utf-8")
+        self.assertEqual(annotated_example(text), text)
 
 
 if __name__ == "__main__":

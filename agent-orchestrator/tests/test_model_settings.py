@@ -92,7 +92,7 @@ max_tokens=500
         def open_url(request,**kwargs):
             seen.append(json.loads(request.data));return Response(json.dumps({'choices':[{'message':{'content':'report'}}], 'usage':{'total_tokens':15}}).encode())
         ctx=RunContext(task='test',run_id='run',stage='report',workdir=self.root,runs_dir=self.root,kind='report')
-        with mock.patch.dict('os.environ',{'MODEL_TEST_KEY':'test-value'}),mock.patch('urllib.request.urlopen',side_effect=open_url):
+        with mock.patch.dict('os.environ',{'MODEL_TEST_KEY':'test-value'}),mock.patch('orchestrator.adapters.openai_compat._open_request',side_effect=open_url):
             result=adapter.run('task',self.root,ctx)
         self.assertTrue(result.ok)
         self.assertEqual(seen[0]['reasoning_effort'],'high')
@@ -100,7 +100,7 @@ max_tokens=500
         self.assertNotIn('temperature',seen[0]);self.assertNotIn('max_tokens',seen[0])
         def without_usage(request,**kwargs):
             return Response(json.dumps({'choices':[{'message':{'content':'report'}}]}).encode())
-        with mock.patch.dict('os.environ',{'MODEL_TEST_KEY':'test-value'}),mock.patch('urllib.request.urlopen',side_effect=without_usage):
+        with mock.patch.dict('os.environ',{'MODEL_TEST_KEY':'test-value'}),mock.patch('orchestrator.adapters.openai_compat._open_request',side_effect=without_usage):
             unknown=adapter.run('task',self.root,ctx)
         self.assertTrue(unknown.usage['usage_unknown'],'不限token也不能把服务端缺失计量视作免费')
 
@@ -154,7 +154,7 @@ max_tokens=500
             requests.append(json.loads(request.data))
             return Response(json.dumps({'choices':[{'message':{'content':'{"verdict":"pass","issues":[]}'}}],
                                         'usage':{'total_tokens':10}}).encode())
-        with mock.patch.dict('os.environ',{'MODEL_TEST_KEY':'test-value'}),mock.patch('urllib.request.urlopen',side_effect=send):
+        with mock.patch.dict('os.environ',{'MODEL_TEST_KEY':'test-value'}),mock.patch('orchestrator.adapters.openai_compat._open_request',side_effect=send):
             for kind in ('review','report'):
                 ctx=RunContext(task='test',run_id='run',stage=kind,workdir=self.root,runs_dir=self.root,kind=kind)
                 result=adapter.run('Return JSON verdict',self.root,ctx)

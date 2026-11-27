@@ -65,3 +65,7 @@ Thumbs.db
 *.sqlite3-journal
 /agent-orchestrator/pipeline-doubao-ws-*/
 /agent-orchestrator/_workers/
+
+# CI 与 Kiro hook 的验收回执
+/ci-evidence/
+/ci-evidence-full/

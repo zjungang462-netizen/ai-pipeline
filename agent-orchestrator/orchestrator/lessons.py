@@ -9,31 +9,26 @@ from __future__ import annotations
 
 from collections import Counter
 import json
-import os
 from pathlib import Path
 import re
 import time
 from typing import Any
 
 from .cli_telemetry import StreamRedactor
+from .safety import environment_secrets
 from .state import atomic_write_json, sha256_text
 
 APPROVED_LESSONS_FILE = 'approved_lessons.json'
 MAX_APPROVED_ITEMS = 12
 MAX_ITEM_CHARS = 240
 _MAX_RECORD_BYTES = 2 * 1024 * 1024
-_SECRET_ENV_HINTS = ('KEY', 'TOKEN', 'SECRET', 'PASSWORD', 'CREDENTIAL')
 _BEARER_RE = re.compile(r'(?i)\b(Bearer\s+)[A-Za-z0-9._\-~+/]+=*')
 _TOKEN_PREFIX_RE = re.compile(r'\b(?:sk|pk|rk|ghp|gho|ghu|ghs|ghr|AIza)[A-Za-z0-9_\-]{12,}\b')
 _URL_CRED_RE = re.compile(r'(https?://)([^/\s:@]+):([^/\s@]+)@')
 
 
 def _env_secrets() -> tuple[str, ...]:
-    found = []
-    for k, v in os.environ.items():
-        if isinstance(v, str) and len(v) >= 8 and any(h in k.upper() for h in _SECRET_ENV_HINTS):
-            found.append(v)
-    return tuple(found)
+    return tuple(environment_secrets())
 
 
 def _scrub_sensitive(text: str, redactor: StreamRedactor) -> str:

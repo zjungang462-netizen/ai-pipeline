@@ -457,7 +457,7 @@ class TestG5ApiReviewKind(unittest.TestCase):
             ctx = RunContext(task="t", run_id="r", stage="review",
                              workdir=tmp, runs_dir=tmp / "runs", kind="review")
             with mock.patch.dict(os.environ, {"TEST_K": "sk"}), \
-                 mock.patch("urllib.request.urlopen", return_value=io.BytesIO(body)):
+                 mock.patch("orchestrator.adapters.openai_compat._open_request", return_value=io.BytesIO(body)):
                 res = ad.run("p", tmp, ctx)
             self.assertTrue(res.ok)
             self.assertEqual(len(res.report_files), 1)   # 产出报告

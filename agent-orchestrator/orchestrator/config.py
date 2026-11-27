@@ -339,7 +339,16 @@ def parse_config(raw: dict[str, Any], base_dir: Path | None = None) -> Config:
                 _require(stages[stage_names.index(s.feedback_to)].kind == "code",
                          "无人值守反馈目标必须是 code 阶段")
     if autonomy.enabled:
-        _require(all(not s.approval or s.name in autonomy.auto_approve for s in stages),
+        # The offline repair showcase deliberately ends at a human review gate.
+        # Permit that terminal scripted review without granting auto-approval or
+        # changing the preauthorization requirement for ordinary pipelines.
+        def demo_human_gate(stage):
+            return (stage is stages[-1] and stage.kind == "review"
+                    and all(a.type == "fake" for a in adapters.values())
+                    and adapters[stage.adapter].options.get("scenario") == "normalize_repair")
+
+        _require(all(not s.approval or s.name in autonomy.auto_approve or demo_human_gate(s)
+                     for s in stages),
                  "无人值守审批阶段必须在 autonomy.auto_approve 中预授权")
         _require(set(autonomy.auto_approve) <= set(stage_names), "auto_approve 含未定义阶段")
         _require(not any(s.kind == "code" for s in stages) or bool(autonomy.allowed_files),

@@ -123,14 +123,16 @@ prompt = "编码：{{task}}"
 state_dir = "{seed_state.as_posix()}"
 task_workdir = "{target_repo.as_posix()}"
 
-[adapters.mock]
-type = "fake"
+# 竞技场只接受代码开发项目；start_job 在测试中被替换，不会启动真实 CLI。
+[adapters.backend]
+type = "cli_agy"
+model = "fixture-model"
 
 [[stages]]
-name = "design"
-kind = "report"
-adapter = "mock"
-prompt = "设计：{{task}}"
+name = "coding"
+kind = "code"
+adapter = "backend"
+prompt = "fixture"
 ''',
             encoding='utf-8',
         )

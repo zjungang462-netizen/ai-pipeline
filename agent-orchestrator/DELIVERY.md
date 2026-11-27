@@ -1,6 +1,12 @@
 # 干净目录运行与验收
 
-## 当前版本：0.5.6（当前 CLI 文件工具与维护验证）
+## 当前版本：0.5.9（稳定性与安全收口）
+
+本版修复远程 Worker 线程启动失败时的关闭死锁、圆桌会诊异常路径漏计实际用量和静默结算失败；豆包隔离暂存区收紧为宿主私有权限，上下文文件改用只读子挂载保护；OpenAI 兼容非流式响应增加 4 MiB 上限；CLI 实时观测回归改为等待真实就绪标记和用量落盘，不再使用固定 10 秒启动假设。
+
+2026-11-27 隔离离线 quick 验收收集并通过 92 项，零失败、错误、跳过或意外跳过，源码未变化且未请求模型调用。随后将冒烟的工作区与状态目录迁入验收输出目录，并加固并行 worker 的异常收据；仓库内 `.workbench/demo-state` 不再被 quick/full 冒烟写入。完整验收结果以本轮仓库外 `verification.json` 为准，不把历史 full 或远端 CI 结果算作本版证据。
+
+## 0.5.6 功能与验收基线（历史）
 
 本版新增 Codex CLI 0.170.0、反重力 1.5.12 / 1.5.13 的真实读取/修改协议样本；Qwen Code 0.26.0 增加受限文件工具的 stream-json 样本，兼容原 JSON 数组回放。全部来自本机隔离单文件探针，外部断言通过、用户连接配置哈希不变，脱敏样本及来源 SHA-256 已登记。CLI 身份与模型后端分开：Codex 探针使用已有代理的 gpt-6.1-sol/high，Qwen 后端为 DeepSeek Pro；反重力默认后端模型未在本轮 init 中报告，不能按历史值猜补。全局反重力在验收过程中变为 1.5.13，先被原门禁拒绝；随后另存 1.5.13 可执行文件、验证抓包及二进制哈希未变，再加入该精确版本，没有放宽为版本前缀匹配。
 
@@ -170,7 +176,7 @@ python -m orchestrator.cli resume workbench.example.toml --run-id delivery-demo
 python scripts/verify_delivery.py --output ../delivery-verification
 ```
 
-验证脚本检查运行环境、六份示例的加载和提示词引用、脱敏样本指纹、CLI 帮助、离线示例 run/status/approve/resume，以及本机临时 HTTP 端口上的登录和项目列表。随后执行原有全部 unittest（包括 Node.js 前端契约）。失败、错误或跳过均使验收返回非零。源码前后指纹覆盖 `orchestrator/`、`tests/`、`prompts/`、`scripts/`、`demo/`、示例配置与交付说明；验收期间改动其中任一文件都会使 `source_unchanged` 为假。
+验证脚本检查运行环境、全部示例的加载和提示词引用、脱敏样本指纹、CLI 帮助、离线示例 run/status/approve/resume，以及本机临时 HTTP 端口上的登录和项目列表。冒烟使用输出目录内的独立配置、工作区和状态目录，不读写仓库内 `.workbench/demo-state`。随后执行原有全部 unittest（包括 Node.js 前端契约）。失败、错误或跳过均使验收返回非零。源码前后指纹覆盖 `orchestrator/`、`tests/`、`prompts/`、`scripts/`、`demo/`、示例配置与交付说明；验收期间改动其中任一文件都会使 `source_unchanged` 为假。
 
 运行结束在指定输出目录保存 `verification.json`、`full-regression.log`、`smoke.json` 和源码前后指纹。输出目录应在项目目录之外。脚本不下载依赖，不读取登录凭据，不运行 API/CLI 模型示例。`verification.json` 中的失败/错误/跳过正文按已知环境凭据与可识别令牌/URL 规则脱敏；`full-regression.log` 由 unittest 流直接写入，**保持原始内容、不做脱敏**，只应在受控本机环境保存。
 
@@ -216,14 +222,19 @@ python scripts/precommit.py --output ../precommit-verification
 
 ## 配置与测试维护（阶段三）
 
-配置 dataclass 的字段元数据统一声明默认值、数值上下限与说明；严格校验、doctor 字段集合、README 配置表和六份示例注释复用这些声明。生成示例注释不改变 TOML 解析值；生成文件的漂移会使提交前检查失败。历史过程与旧测试数字已移至 HISTORY。
+配置 dataclass 的字段元数据统一声明默认值、数值上下限与说明；严格校验、doctor 字段集合、README 配置表和全部示例注释复用这些声明。生成示例注释不改变 TOML 解析值；生成文件的漂移会使提交前检查失败。历史过程与旧测试数字已移至 HISTORY。
 
 ```powershell
 python scripts/generate_config_docs.py --check
 python scripts/verify_delivery.py --suite fast --redact-logs --output ../fast-verification
 python scripts/verify_delivery.py --suite slow --redact-logs --output ../slow-verification
 python scripts/verify_delivery.py --suite full --redact-logs --output ../full-verification
+python scripts/verify_delivery.py --suite full --workers 8 --timing-baseline tests/fixtures/verification-module-timings.json --redact-logs --output ../full-verification-8w
 ```
+
+全量验收可选用仓库内的 `tests/fixtures/verification-module-timings.json` 做整模块耗时均衡，Windows/Linux CI 使用 8 个 worker。该基线只是排程提示，不是通过断言；未知模块按已有模块耗时中位数估算，非法基线会直接拒绝。worker 子进程异常、缺失输出、畸形 JSON 或无效记录结构会转换为该分片的明确错误收据，不丢失其它分片结果，也不中断最终 `verification.json` 汇总。并行模式默认对单个 worker 设置 600 秒上限、对回归阶段设置 1200 秒总上限，可用 `--worker-timeout` 与 `--suite-timeout` 调整；超时会终止本次 worker 进程树并写入失败证据。单进程模式不强制这两个上限，`verification.json` 的 `timeout_enforced=false` 会明确标注。无论串行或并行，仍要求零失败、零错误、零意外跳过，且验收前后源码哈希一致。
+
+赛事离线演练使用独立的 CLI 检查。可从仓库根目录运行 `python -X utf8 agent-orchestrator/scripts/verify_judge_demo.py`。它以临时目录运行同一份演练配置，检查测试退出码 1 → 0、重试次数、审查结果和人工审批后终态。CI 将该检查作为单独步骤。多轮开箱演练、反馈后的进程恢复和竞技场集成由 `full` 执行。快速集保留演练的反例、审查判定、人工门禁以及固定测试项目禁止启动竞技场的检查。
 
 `--quick` 与 `--suite fast` 使用同一组测试；slow 为完整发现集合减去 fast，因此新增测试不会因未分类而漏出 full。`--quick` 与 `--suite` 互斥。每次仍执行原有冒烟，并额外保存 `test-ids.json`、`test-durations.json`、`slow-tests.json`；默认将至少 2 秒的用例列入慢表，可用正数 `--slow-threshold` 调整。
 

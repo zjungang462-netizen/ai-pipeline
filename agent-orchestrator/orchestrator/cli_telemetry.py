@@ -159,7 +159,7 @@ _ASSISTANT_TOOL_NAMES = {
 class StreamRedactor:
     """先替换已知完整密钥，再保留最长密钥长度的尾部，防止跨 chunk 泄漏。"""
     def __init__(self,secrets=()):
-        self.secrets=sorted({v for v in secrets if isinstance(v,str) and len(v)>=8},key=len,reverse=True)
+        self.secrets=sorted({v for v in secrets if isinstance(v,str) and len(v)>=4},key=len,reverse=True)
         self.hold=max((len(v)-1 for v in self.secrets),default=0)
         self.pending=''
 

@@ -1,19 +1,21 @@
 """独立 Git 发布夹具：原始字节、两个验证阶段、失败不发布与状态边界。"""
 import json
+import os
 import subprocess
 import tempfile
 import unittest
 import zipfile
 from pathlib import Path
+from unittest import mock
 
-from scripts.release import build_release, sha
+from scripts.release import build_release, sha, verify
 
 
 class ReleaseBuilder(unittest.TestCase):
     def setUp(self):
         temporary=tempfile.TemporaryDirectory();self.addCleanup(temporary.cleanup)
         self.root=Path(temporary.name);self.repo=self.root/'repo';self.repo.mkdir()
-        def git(*args):return subprocess.run(['git',*args],cwd=self.repo,check=True,capture_output=True)
+        def git(*args):return subprocess.run(['git',*args],cwd=self.repo,env=dict(os.environ),check=True,capture_output=True)
         self.git=git
         git('init','-q');git('config','user.name','test');git('config','user.email','test@example.invalid')
         git('config','core.autocrlf','true')
@@ -25,7 +27,8 @@ class ReleaseBuilder(unittest.TestCase):
 
     def verifier(self,root,output):
         self.calls.append(root);output.mkdir()
-        proof={'mode':'full','tests_run':5,'exit_code':0,'failures':[],'errors':[],'skipped':[],'source_unchanged':True}
+        proof={'mode':'full','tests_run':5,'exit_code':0,'failures':[],'errors':[],'skipped':[],
+               'unexpected_skips':[],'source_unchanged':True}
         for name in ('verification.json','smoke.json','source-before.json','source-after.json',
                      'test-durations.json','slow-tests.json','test-ids.json'):
             (output/name).write_text(json.dumps(proof if name=='verification.json' else {}),encoding='utf8')
@@ -67,3 +70,25 @@ class ReleaseBuilder(unittest.TestCase):
             return result
         with self.assertRaises(ValueError):build_release(self.repo,self.root/'mutated',verify)
         self.assertFalse((self.root/'mutated/release-result.json').exists())
+
+    def test_linux_release_allows_registered_windows_skips(self):
+        output=self.root/'linux-proof';output.mkdir()
+        proof={'mode':'full','tests_run':5,'exit_code':0,'failures':[],'errors':[],
+               'skipped':[{'test':'test_process_start.ProcessStart.test_short_command_executes_after_job_attachment',
+                           'reason':'Windows Job 启动顺序回归'}],
+               'unexpected_skips':[],'source_unchanged':True}
+        (output/'verification.json').write_text(json.dumps(proof),encoding='utf8')
+        with mock.patch('scripts.release.sys.platform','linux'), \
+                mock.patch('scripts.release.subprocess.run',return_value=mock.Mock(returncode=0)) as run:
+            self.assertEqual(verify(self.repo,output),proof)
+        self.assertIn('--allow-linux-windows-skips',run.call_args.args[0])
+
+    def test_release_rejects_unexpected_skips_even_when_process_succeeds(self):
+        output=self.root/'unexpected-proof';output.mkdir()
+        proof={'mode':'full','tests_run':5,'exit_code':0,'failures':[],'errors':[],
+               'skipped':[{'test':'test_unregistered','reason':'not allowed'}],
+               'unexpected_skips':[['test_unregistered','not allowed']],'source_unchanged':True}
+        (output/'verification.json').write_text(json.dumps(proof),encoding='utf8')
+        with mock.patch('scripts.release.subprocess.run',return_value=mock.Mock(returncode=0)):
+            with self.assertRaisesRegex(ValueError,'不满足完整发布条件'):
+                verify(self.repo,output)
