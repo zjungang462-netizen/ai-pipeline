@@ -38,6 +38,10 @@ def run_test_cmd(cmd: list[str], workdir: Path, timeout_s: int = 600,
                 "output": "", "error": f"工作目录不可用: {e}"}
     t0 = time.monotonic()
     env = build_subprocess_env(extra_allow=extra_env)
+    # 测试命令的 stdout/stderr 由本函数按 UTF-8 解码；确保 Python 子进程也使用 UTF-8，
+    # 不依赖宿主机的 ANSI 代码页（CI Windows 为 cp1252，本机可能是 cp936）。
+    env['PYTHONUTF8'] = '1'
+    env['PYTHONIOENCODING'] = 'utf-8'
     argv = list(cmd)
     if argv:
         entry = argv[0]

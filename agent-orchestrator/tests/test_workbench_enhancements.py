@@ -454,7 +454,11 @@ prompt = "fixture"
         from orchestrator.collaboration.model_catalog import _parse_agy_models
         parsed = _parse_agy_models('Fetching available models...\ngemini-4-neon-high\tGemini 4 Neon (High)\nclaude-opus-5-5-high\tClaude Opus 5.5 (High)\n')
         self.assertEqual([m['id'] for m in parsed], ['gemini-4-neon-high', 'claude-opus-5-5-high'])
-        with mock.patch('orchestrator.collaboration.model_catalog._probe_agy_models', return_value=parsed), \
+        # 目录探测会先检查本机是否安装 agy；CI 干净 runner 没装，不能依赖宿主机。
+        # 让“已安装”判定也进入 mock，才能稳定走到被 mock 的探测结果。
+        with mock.patch('orchestrator.collaboration.model_catalog.resolve_exe',
+                        side_effect=lambda name: '/fake/agy' if name == 'agy' else None), \
+                mock.patch('orchestrator.collaboration.model_catalog._probe_agy_models', return_value=parsed), \
                 mock.patch('orchestrator.collaboration.model_catalog._probe_openai_compat_models', return_value=(True, [{'id': 'deepseek-chat', 'label': 'deepseek-chat'}])):
             status, catalog, _ = req('GET', '/api/models/catalog?refresh=1', headers={'Cookie': cookie})
             self.assertEqual(status, 200)

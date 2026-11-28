@@ -45,12 +45,19 @@ class Collaboration(unittest.TestCase):
     def service(self):
         service = Service(self.root / 'collaboration.sqlite3', [self.config])
         def cleanup():
+            # 先停止后台派生，避免清理临时目录时仍有线程/子进程持有 SQLite 句柄。
+            service.closed.set()
             for process in service.active.values():
                 try:
                     process.wait(timeout=10)
                 except Exception:
                     from orchestrator.supervisor import _terminate
                     _terminate(process)
+            deadline = time.monotonic() + 10
+            while service._command_waiters and time.monotonic() < deadline:
+                time.sleep(.05)
+            service._background_sync.close()
+            service.store.release_session()
         self.addCleanup(cleanup)
         return service
 
@@ -58,8 +65,17 @@ class Collaboration(unittest.TestCase):
         project = service.store.projects()[0]
         return service.create_run(project['id'], '验证受控运行', key)
 
-    def wait_status(self, service, key, status):
-        return eventually(lambda: (value if (value := service.snapshot(key))['lifecycle'] == status else None))
+    def wait_status(self, service, key, status, timeout=30):
+        def predicate():
+            value = service.snapshot(key)
+            if value['lifecycle'] == status:
+                return value
+            if (value['lifecycle'] in ('failed', 'timeout', 'cancelled')
+                    and status not in ('failed', 'timeout', 'cancelled')):
+                raise AssertionError(
+                    f"运行已终止为 {value['lifecycle']}，不可能到达 {status}")
+            return None
+        return eventually(predicate, timeout=timeout)
 
     def test_store_commands_messages_and_replay_are_idempotent(self):
         store = Store(self.root / 'db.sqlite3')
@@ -135,7 +151,7 @@ class Collaboration(unittest.TestCase):
         self.assertEqual(self.create(service)['id'], run['id'])
 
     def test_pause_at_real_test_boundary_then_resume(self):
-        self.write_config('import time; time.sleep(1.2); print("completed current test")')
+        self.write_config('import time; time.sleep(5); print("completed current test")')
         service = self.service()
         run = self.create(service)
         eventually(lambda: service.snapshot(run['id'])['stages'].get('verify', {}).get('status') == 'running')
@@ -145,7 +161,7 @@ class Collaboration(unittest.TestCase):
         self.assertEqual(service.store.command(command['id'])['status'], 'applied')
         self.assertEqual(service.command(run['id'], 'pause', {}, 'pause-command-001')['id'], command['id'])
         service.command(run['id'], 'resume', {}, 'resume-command-001')
-        result = self.wait_status(service, run['id'], 'done')
+        result = self.wait_status(service, run['id'], 'done', timeout=90)
         self.assertEqual(result['stages']['verify']['current_attempt'], 1)
 
     def test_cancel_terminates_owned_worker_and_is_terminal(self):
@@ -399,7 +415,7 @@ class Collaboration(unittest.TestCase):
         before = (cfg.task_workdir / 'coding_output.py').read_bytes()
         old_state = engine.state.state_file.read_bytes()
         child = service.create_run(parent['project_id'], 'follow-up task', 'derive-request-001', parent['id'])
-        self.wait_status(service, child['id'], 'done')
+        self.wait_status(service, child['id'], 'done', timeout=90)
         child_cfg = load_config(service.store.run(child['id'])['config'])
         self.assertNotEqual(child_cfg.task_workdir, cfg.task_workdir)
         self.assertEqual((cfg.task_workdir / 'coding_output.py').read_bytes(), before)

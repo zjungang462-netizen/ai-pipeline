@@ -450,8 +450,16 @@ class TestArena(unittest.TestCase):
         td = tempfile.TemporaryDirectory()
         self.addCleanup(td.cleanup)
         root = Path(td.name)
-        # 8000 个中文字符约 24000 字节（> MAX_OUTPUT=20000 字节），但字符数 < 20000，不应误判截断
-        rec = run_test_cmd([sys.executable, '-c', 'print("测" * 8000)'], root, timeout_s=30)
+        # 8000 个中文字符约 24000 字节（> MAX_OUTPUT=20000 字节），但字符数 < 20000，不应误判截断。
+        # 模拟 CI Windows 的非 UTF-8 代码页：产品必须给测试子进程强制 UTF-8，不能依赖宿主 locale。
+        from orchestrator.safety import build_subprocess_env as real_build_env
+        def env_with_ci_codepage(*args, **kwargs):
+            env = real_build_env(*args, **kwargs)
+            env['PYTHONUTF8'] = '0'
+            env['PYTHONIOENCODING'] = 'cp1252'
+            return env
+        with mock.patch('orchestrator.testrun.build_subprocess_env', side_effect=env_with_ci_codepage):
+            rec = run_test_cmd([sys.executable, '-c', 'print("测" * 8000)'], root, timeout_s=30)
         self.assertTrue(rec['ok'])
         self.assertFalse(rec['truncated'])
         self.assertGreaterEqual(len(rec['output'].strip()), 8000)

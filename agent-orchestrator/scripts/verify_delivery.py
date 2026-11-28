@@ -510,7 +510,8 @@ def permitted_platform_skips(allow_linux_windows_skips):
                      'test_fast_resume_falls_back_to_thread_scan_when_unavailable',
                      'test_resume_failure_terminates_owned_process_and_leaves_no_job_handle',
                      'test_failed_resume_closes_job_and_kills_suspended_process',
-                     'test_short_command_executes_after_job_attachment')
+                     'test_short_command_executes_after_job_attachment',
+                     'test_test_cmd_timeout_kills_descendant_when_taskkill_is_unavailable')
     } | {
         (f'test_codex_windows_profile.CodexWindowsProfile.{name}', 'Windows 沙箱配置仅适用于 Windows')
         for name in ('test_isolated_profile_keeps_explicit_backend_without_global_extensions',

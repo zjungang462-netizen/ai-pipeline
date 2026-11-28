@@ -217,7 +217,25 @@ test_cmd = ["python", "-c", "pass"]
         path = launch.call_args.args[0]
         with self.config_path.open('a', encoding='utf-8') as stream:
             stream.write('\n# changed while queued\n')
-        launch_worker(path, self.cfg)
+        processes = []
+        real_popen = arena_jobs.subprocess.Popen
+        def capture_popen(*args, **kwargs):
+            process = real_popen(*args, **kwargs)
+            processes.append(process)
+            return process
+        with patch.object(arena_jobs.subprocess, 'Popen', side_effect=capture_popen):
+            launch_worker(path, self.cfg)
+        def wait_worker():
+            for process in processes:
+                deadline = time.monotonic() + 20
+                while process.poll() is None and time.monotonic() < deadline:
+                    time.sleep(.05)
+                if process.poll() is None:
+                    from orchestrator.process_tree import terminate
+                    terminate(process)
+                    process.wait(timeout=10)
+                    raise AssertionError('arena worker 在终态后 20s 仍未退出')
+        self.addCleanup(wait_worker)
         deadline = time.monotonic() + 10
         while time.monotonic() < deadline:
             result = arena_jobs.get_job(self.cfg, 'p', job['arena_id'])
