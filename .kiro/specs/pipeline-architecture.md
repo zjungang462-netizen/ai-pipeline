@@ -1,4 +1,4 @@
-# AI Pipeline Specification (v0.5.9)
+# AI Pipeline Specification (v0.5.10)
 
 ## Overview
 AI Pipeline (`agent-orchestrator`) is a local-first, evidence-driven multi-AI development workflow orchestrator built with zero external runtime dependencies (Python 3.11+ standard library) and an embedded web workbench (`orchestrator/dashboard`).

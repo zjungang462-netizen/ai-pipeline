@@ -162,7 +162,7 @@ TOML Workflow Config (10 validated *.example.toml templates)
 ## Accomplishments That We're Proud Of
 
 - **Zero External Runtime Dependencies**: Full orchestrator, 10-adapter layer, SQLite collaboration store, SSE server, Arena, and bilingual UI built strictly on Python 3.11+ stdlib.
-- **Rigorous Offline Verification (`920` Tests)**: A **`920`-test offline Python regression suite**, **`7` Node.js frontend contract suites** (covering pagination, cursor stability, i18n state preservation, and execution scope), **`10` drift-checked example configs**, and dual-run (`quick` + `full`) release packaging (`scripts/release.py`).
+- **Rigorous Offline Verification (`928` Tests)**: A **`928`-test offline Python regression suite** (v0.5.10, CI run #71), **`7` Node.js frontend contract suites** (covering pagination, cursor stability, i18n state preservation, and execution scope), **`10` drift-checked example configs**, and dual-run (`quick` + `full`) release packaging (`scripts/release.py`).
 - **Stream-Level Credential Hygiene**: Live `StreamRedactor` and `precommit.py` credential scanners scrub secret environment values, bearer tokens, and URL credentials before logs or failure receipts touch disk.
 
 ---
@@ -289,4 +289,4 @@ $releaseOut = Join-Path $env:TEMP ('kiroween-release-' + [guid]::NewGuid().ToStr
 python -X utf8 agent-orchestrator/scripts/release.py --output $releaseOut
 ```
 
-Then open `https://github.com/zjungang462-netizen/ai-pipeline/releases/new`, select tag `v0.5.9` (or create `v0.5.10`), attach the generated `.zip` archive from `$releaseOut`, and click **Publish release**.
+Then open `https://github.com/zjungang462-netizen/ai-pipeline/releases/new`, select tag `v0.5.10` (create it if needed), attach the generated `.zip` archive from `$releaseOut`, and click **Publish release**.

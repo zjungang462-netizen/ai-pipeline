@@ -1,6 +1,6 @@
 # AI Pipeline · Judge & Reviewer Quickstart (`START-HERE.md`)
 
-Welcome! **AI Pipeline** (`agent-orchestrator`, v0.5.9) is our **Kiroween 2026 (`Frankenstein` category)** submission: a zero-dependency multi-agent engineering pipeline and local collaborative workbench that stitches heterogeneous model APIs, local coding CLIs, Docker sandboxes, deterministic test gates, AST/JSON reviews, and hash-locked human approvals into one verifiable delivery loop.
+Welcome! **AI Pipeline** (`agent-orchestrator`, v0.5.10) is our **Kiroween 2026 (`Frankenstein` category)** submission: a zero-dependency multi-agent engineering pipeline and local collaborative workbench that stitches heterogeneous model APIs, local coding CLIs, Docker sandboxes, deterministic test gates, AST/JSON reviews, and hash-locked human approvals into one verifiable delivery loop.
 
 No model API keys, cloud accounts, or third-party `pip` packages are needed to verify this submission.
 
