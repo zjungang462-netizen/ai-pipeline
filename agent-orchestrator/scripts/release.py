@@ -39,8 +39,13 @@ def changelog(repo, commit):
     return '# 提交变更记录\n\n自动记录最近最多 30 个项目提交；功能说明与验证边界见 RELEASE_NOTES/DELIVERY。\n\n'+''.join('- `'+line.split('\t',1)[0]+'` '+line.split('\t',1)[1]+'\n' for line in raw.splitlines() if '\t' in line)
 
 
+_OPTIONAL_ROOT_FILES = ('Dockerfile', '.dockerignore', 'START-HERE.md', 'README.en.md', 'LICENSE')
+
+
 def source_files(repo, commit):
-    raw = git(repo, '-c', 'core.autocrlf=false', '-c', 'core.eol=lf', 'archive', '--format=zip', commit, 'agent-orchestrator')
+    present = set(git(repo, 'ls-tree', '--name-only', commit, '--', *_OPTIONAL_ROOT_FILES).decode('utf8').splitlines())
+    paths = ['agent-orchestrator', *(name for name in _OPTIONAL_ROOT_FILES if name in present)]
+    raw = git(repo, '-c', 'core.autocrlf=false', '-c', 'core.eol=lf', 'archive', '--format=zip', commit, *paths)
     with zipfile.ZipFile(io.BytesIO(raw)) as archive:
         files = {name: archive.read(name) for name in archive.namelist() if not name.endswith('/')}
     for name, body in files.items():
@@ -68,6 +73,10 @@ def check_tree(root, expected):
 
 def verify(root, output):
     command = [sys.executable, '-X', 'utf8', 'scripts/verify_delivery.py', '--redact-logs']
+    timing = Path(root) / 'agent-orchestrator/tests/fixtures/verification-module-timings.json'
+    if timing.is_file():
+        command.extend(['--workers', str(min(4, os.cpu_count() or 1)),
+                        '--timing-baseline', 'tests/fixtures/verification-module-timings.json'])
     if sys.platform.startswith('linux'):
         command.append('--allow-linux-windows-skips')
     command.extend(['--output', str(output)])

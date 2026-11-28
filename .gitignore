@@ -69,3 +69,4 @@ Thumbs.db
 # CI 与 Kiro hook 的验收回执
 /ci-evidence/
 /ci-evidence-full/
+/ci-benchmark/

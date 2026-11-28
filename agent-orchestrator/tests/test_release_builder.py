@@ -92,3 +92,19 @@ class ReleaseBuilder(unittest.TestCase):
         with mock.patch('scripts.release.subprocess.run',return_value=mock.Mock(returncode=0)):
             with self.assertRaisesRegex(ValueError,'不满足完整发布条件'):
                 verify(self.repo,output)
+
+    def test_optional_root_files_archived_into_source_and_package_checks(self):
+        (self.repo/'Dockerfile').write_bytes(b'FROM python:3.11-slim\n')
+        (self.repo/'.dockerignore').write_bytes(b'**/.env\n')
+        (self.repo/'START-HERE.md').write_bytes(b'# Quickstart\n')
+        self.git('add','Dockerfile','.dockerignore','START-HERE.md')
+        self.git('commit','-qm','补充根打包文件')
+        result=build_release(self.repo,self.root/'with-root-files',self.verifier)
+        for checked_root in self.calls:
+            self.assertTrue((checked_root/'Dockerfile').is_file())
+            self.assertTrue((checked_root/'.dockerignore').is_file())
+            self.assertTrue((checked_root/'START-HERE.md').is_file())
+        with zipfile.ZipFile(result['package']) as z:
+            manifest=json.loads(z.read('SNAPSHOT.json'))
+            self.assertIn('Dockerfile',manifest['files'])
+            self.assertIn('START-HERE.md',manifest['files'])

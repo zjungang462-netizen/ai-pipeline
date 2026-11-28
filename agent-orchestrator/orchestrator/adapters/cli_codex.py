@@ -95,6 +95,14 @@ class CodexAdapter(CLIAdapter):
         # 仅复制模型连接与显式 Windows 沙箱后端；MCP、插件、通知、hooks 不进入本次 CLI。
         profile = {key: provider[key] for key in ('name', 'base_url', 'wire_api', 'env_key', 'requires_openai_auth')
                    if key in provider}
+        base_url = profile.get('base_url')
+        if base_url is not None:
+            from urllib.parse import urlsplit
+            if not isinstance(base_url, str):
+                raise ValueError('Codex base_url 必须为字符串')
+            parsed = urlsplit(base_url)
+            if parsed.scheme not in ('http', 'https') or not parsed.hostname or parsed.username or parsed.password:
+                raise ValueError('Codex 兼容端点必须为不含凭据的 HTTP(S) 地址')
         token = provider.get('experimental_bearer_token')
         if not token and provider.get('env_key'):
             token = os.environ.get(provider['env_key'])
@@ -148,7 +156,12 @@ class CodexAdapter(CLIAdapter):
         if ctx.allow_yolo:
             args.append("--yolo")
         # 显式的 stdin 占位符；不把提示词拼进命令行。
-        res = self._exec([*args, '-'], workdir, ctx, stdin_data=prompt, env_overrides=environment)
+        extra_secrets = (profile['token'],) if isinstance(profile.get('token'), str) and profile['token'] else ()
+        try:
+            res = self._exec([*args, '-'], workdir, ctx, stdin_data=prompt,
+                             env_overrides=environment, additional_secrets=extra_secrets)
+        finally:
+            out_file.unlink(missing_ok=True)
         if model:
             res.usage['requested_model'] = model
         return self._finalize(res, ctx)

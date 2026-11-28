@@ -155,8 +155,8 @@ def load_config(path: str | Path) -> Config:
     _require(path.is_file(), f"配置文件不存在: {path}")
     content = path.read_bytes()
     try:
-        raw = tomllib.loads(content.decode("utf-8"))
-    except tomllib.TOMLDecodeError as e:
+        raw = tomllib.loads(content.decode("utf-8-sig"))
+    except (UnicodeDecodeError, tomllib.TOMLDecodeError) as e:
         raise ConfigError(f"TOML 解析失败: {e}") from e
     config = parse_config(raw, base_dir=path.parent)
     config.source_path = path.resolve()
@@ -221,6 +221,9 @@ def parse_config(raw: dict[str, Any], base_dir: Path | None = None) -> Config:
     for key in ("serial", "allow_yolo", "watch_enforce"):
         if key in raw:
             _require(type(raw[key]) is bool, f"{key} 必须是布尔值")
+    for key in ("git_exe", "watch_root", "tune_proposal_id"):
+        if key in raw:
+            _require(isinstance(raw[key], str), f"{key} 必须是字符串")
     _require(raw.get("serial", default_value(Config, "serial")), "当前只支持 serial=true")
     if raw.get("tune_proposal_id"):
         _require(isinstance(raw["tune_proposal_id"], str)
@@ -405,11 +408,13 @@ def _command(value, label):
 
 
 def _paths(value, label):
+    import tempfile
     from .safety import relative_target
     paths = _command(value, label)
+    probe_root = Path(tempfile.gettempdir()).resolve() / "ai-pipeline-config-check"
     for name in paths:
         try:
-            relative_target(Path.cwd(), name)
+            relative_target(probe_root, name)
         except RuntimeError as error:
             raise ConfigError(f"{label}: {error}") from error
     return paths

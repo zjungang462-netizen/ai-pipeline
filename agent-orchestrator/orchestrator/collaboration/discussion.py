@@ -123,7 +123,7 @@ def capture(run, *, extra_files: list[str] | None = None, question: str = ''):
 
 def reserve_parent(run, topic, config):
     job = read_json(directory(run) / 'job.json')
-    if job.get('status') not in ('paused', 'waiting_approval'):
+    if job.get('status') not in ('paused', 'waiting_approval', 'waiting_external', 'waiting_owner'):
         return topic['budget']
     state = RunState(Path(run['state_dir']), run['run_id'])
     with StageLock(state.run_dir / '.run.lock'):
@@ -386,7 +386,7 @@ def execute(store, topic_id, *, stream_tokens: bool = False):
         from .config_copy import dump_config
         maximum_duration = min(360, max(90, sum(s.timeout_s for s in stages)))
         parent_job = read_json(directory(run) / 'job.json')
-        if parent_job.get('status') in ('paused', 'waiting_approval'):
+        if parent_job.get('status') in ('paused', 'waiting_approval', 'waiting_external', 'waiting_owner'):
             remaining_s = parent_job['started_at'] + parent_job['max_duration_s'] - time.time()
             maximum_duration = max(1, int(min(maximum_duration, remaining_s)))
         config_path = base / 'analysis.toml'
@@ -420,28 +420,34 @@ def execute(store, topic_id, *, stream_tokens: bool = False):
         settle_parent(run, topic, engine.state.usage_total)
         settled = True
         consensus_text = ''
+        from .storage import Conflict
         for spec, role, r_idx in turn_meta:
             attempt = engine.state.current_attempt_dir(spec.name)
             if attempt and (attempt / 'final_text.txt').is_file():
                 body = (attempt / 'final_text.txt').read_text(encoding='utf8')
+                if not body.strip():
+                    continue
                 if role == 'consensus':
                     consensus_text = body[:4000]
                 response = read_json(attempt / 'stdout.txt')
                 msg_key = f'{topic_id}:{role}' if rounds == 1 and role != 'consensus' else f'{topic_id}:r{r_idx}:{role}'
-                store.message(
-                    run['id'], body[:31000], msg_key,
-                    source='agent_response', role=role,
-                    refs=[{
-                        'snapshot_revision': topic['snapshot']['revision'],
-                        'call_id': response.get('id'),
-                        'returned_model': response.get('model') or adapters[role].options.get('model'),
-                        'adapter_type': adapters[role].type,
-                        'turn': spec.name,
-                        **({'round': r_idx, 'total_rounds': rounds} if rounds > 1 and role != 'consensus' else {}),
-                        **({'consensus': True} if role == 'consensus' else {}),
-                    }],
-                    thread=topic_id,
-                )
+                try:
+                    store.message(
+                        run['id'], body[:31000], msg_key,
+                        source='agent_response', role=role,
+                        refs=[{
+                            'snapshot_revision': topic['snapshot']['revision'],
+                            'call_id': response.get('id'),
+                            'returned_model': response.get('model') or adapters[role].options.get('model'),
+                            'adapter_type': adapters[role].type,
+                            'turn': spec.name,
+                            **({'round': r_idx, 'total_rounds': rounds} if rounds > 1 and role != 'consensus' else {}),
+                            **({'consensus': True} if role == 'consensus' else {}),
+                        }],
+                        thread=topic_id,
+                    )
+                except Conflict:
+                    pass
         completed = bool(result) and len(result) == len(stages) and all(v == 'done' for v in result.values())
         store.update_thread(topic_id, 'completed' if completed else 'failed', {
             'analysis_run': topic_id, 'results': result, 'usage': engine.state.usage_total,

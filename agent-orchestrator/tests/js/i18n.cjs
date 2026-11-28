@@ -91,6 +91,10 @@ function boot({search='',stored='zh-CN',throws=false}={}){
  assert.equal(events.length,1);assert.ok(events[0] instanceof chinese.CustomEvent,'必须派发浏览器可接受的事件对象');
  assert.equal(events[0].detail.language,'en');
  assert.equal(chinese.i18n.t('scope.workdir','实际工作目录：{path}。',{path:'D:/work/项目'}),'Actual working directory: D:/work/项目.');
+ assert.equal(chinese.i18n.t('scope.attention','需关注 · ')+chinese.i18n.t('scope.criticalApproval','有产物等待审批'),'Attention · Artifact awaiting approval');
+ assert.equal(chinese.i18n.t('route.card','代码阶段 (code) · {recommendation}',{kind:chinese.i18n.t('route.code','代码阶段 (code)'),recommendation:'Recommended: CLI / m'}),'Coding stage (code) · Recommended: CLI / m');
+ assert.ok(!/[【】]/.test(chinese.i18n.t('demo.task')),'英文演练文案不应残留中文方头括号');
+ assert.equal(chinese.i18n.error('候选未通过验收测试'),'Candidate did not pass acceptance tests');
  chinese.i18n.setLanguage('zh-CN');
  assert.equal(chinese.i18n.t('scope.workdir','实际工作目录：{path}。',{path:'D:/work/项目'}),'实际工作目录：D:/work/项目。');
 

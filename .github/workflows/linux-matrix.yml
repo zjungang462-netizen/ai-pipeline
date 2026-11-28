@@ -6,6 +6,8 @@ on:
     branches: [main]
     paths:
       - '.github/workflows/linux-matrix.yml'
+      - 'Dockerfile'
+      - '.dockerignore'
       - 'agent-orchestrator/orchestrator/**'
       - 'agent-orchestrator/tests/**'
       - 'agent-orchestrator/scripts/**'
@@ -45,4 +47,5 @@ jobs:
         with:
           name: linux-${{ matrix.python }}-${{ github.sha }}
           path: ${{ runner.temp }}/linux-evidence/
+          overwrite: true
           retention-days: 14

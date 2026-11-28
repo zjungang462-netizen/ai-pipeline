@@ -10,6 +10,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 import hashlib
 import hmac
+import http.client
 import json
 import os
 import time
@@ -137,8 +138,11 @@ class WebhookNotifier:
         usage: dict | None = None,
     ) -> list[NotificationReceipt]:
         receipts: list[NotificationReceipt] = []
-        clean_stage = self._scrub(stage)
-        clean_summary = self._scrub(summary)
+        target_secrets = tuple(
+            val for t in self.targets if t.secret_env and (val := os.environ.get(t.secret_env, ''))
+        )
+        clean_stage = self._scrub(stage, target_secrets)
+        clean_summary = self._scrub(summary, target_secrets)
         for target in self.targets:
             if event not in target.events:
                 receipts.append(NotificationReceipt(target.name, True, skipped=True))
@@ -172,8 +176,9 @@ class WebhookNotifier:
                     code = getattr(resp, 'status', 200)
                     receipts.append(NotificationReceipt(target.name, 200 <= code < 300, status_code=code))
             except urllib.error.HTTPError as error:
+                error.close()
                 receipts.append(NotificationReceipt(target.name, False, status_code=error.code, error=f'HTTP {error.code}'))
-            except (urllib.error.URLError, TimeoutError, OSError) as error:
+            except (urllib.error.URLError, http.client.HTTPException, ValueError, TimeoutError, OSError) as error:
                 receipts.append(NotificationReceipt(target.name, False, error=type(error).__name__))
         return receipts
 

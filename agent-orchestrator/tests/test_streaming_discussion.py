@@ -8,7 +8,9 @@ import os
 from pathlib import Path
 import tempfile
 import threading
+import time
 import unittest
+from unittest import mock
 
 from orchestrator.adapters.openai_compat import OpenAICompatAdapter, parse_sse_stream
 from orchestrator.collaboration.discussion_stream import (
@@ -65,6 +67,93 @@ class StreamingDiscussionTests(unittest.TestCase):
         # 超出 max_bytes 必须拒绝
         with self.assertRaises(ValueError):
             parse_sse_stream(lines, max_bytes=32)
+
+    def test_sse_deadline_and_cancel_interrupt_blocking_or_trickling_reads(self):
+        class BlockingResponse:
+            def __init__(self):
+                self.closed = threading.Event()
+
+            def read1(self, size):
+                self.closed.wait(2)
+                return b''
+
+            def close(self):
+                self.closed.set()
+
+        blocked = BlockingResponse()
+        started = time.monotonic()
+        with self.assertRaisesRegex(TimeoutError, '总时长超时'):
+            parse_sse_stream(blocked, deadline=started + 0.1)
+        self.assertLess(time.monotonic() - started, 1)
+        self.assertTrue(blocked.closed.is_set())
+
+        cancelled = threading.Event()
+        blocked = BlockingResponse()
+        timer = threading.Timer(0.05, cancelled.set)
+        timer.start()
+        self.addCleanup(timer.join, 1)
+        started = time.monotonic()
+        with self.assertRaisesRegex(TimeoutError, '已取消'):
+            parse_sse_stream(blocked, cancel_requested=cancelled.is_set)
+        self.assertLess(time.monotonic() - started, 1)
+        self.assertTrue(blocked.closed.is_set())
+
+        class TrickleResponse(BlockingResponse):
+            def read1(self, size):
+                time.sleep(0.02)
+                return b'x'
+
+        trickle = TrickleResponse()
+        started = time.monotonic()
+        with self.assertRaisesRegex(TimeoutError, '总时长超时'):
+            parse_sse_stream(trickle, deadline=started + 0.11)
+        self.assertLess(time.monotonic() - started, 1)
+        self.assertTrue(trickle.closed.is_set())
+
+        class OversizedResponse(BlockingResponse):
+            def read1(self, size):
+                return b'x' * 65
+
+        with self.assertRaisesRegex(ValueError, '最大字节上限'):
+            parse_sse_stream(OversizedResponse(), max_bytes=64)
+
+    def test_openai_stream_total_deadline_interrupts_slow_http_body(self):
+        class Handler(BaseHTTPRequestHandler):
+            def log_message(self, *args):
+                return
+
+            def do_POST(self):
+                length = int(self.headers.get('Content-Length', '0'))
+                if length:
+                    self.rfile.read(length)
+                self.send_response(200)
+                self.send_header('Content-Type', 'text/event-stream')
+                self.end_headers()
+                try:
+                    for _ in range(30):
+                        self.wfile.write(b'x')
+                        self.wfile.flush()
+                        time.sleep(0.1)
+                except (BrokenPipeError, ConnectionAbortedError, ConnectionResetError):
+                    pass
+
+        server = ThreadingHTTPServer(('127.0.0.1', 0), Handler)
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        self.addCleanup(lambda: (server.shutdown(), server.server_close(), thread.join(3)))
+        with mock.patch.dict(os.environ, {'TEST_STREAM_DEADLINE_KEY': 'dummy-deadline-key'}):
+            with tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp)
+                adapter = OpenAICompatAdapter(
+                    'api', f'http://127.0.0.1:{server.server_port}/v1', 'm1',
+                    'TEST_STREAM_DEADLINE_KEY', stream_tokens=True, timeout_s=1,
+                )
+                started = time.monotonic()
+                result = adapter.run('slow', root, RunContext('t', 'r', 'turn', root, root,
+                                                             kind='report', timeout_s=1))
+                self.assertLess(time.monotonic() - started, 2)
+        self.assertFalse(result.ok)
+        self.assertEqual(result.error_kind, ErrorKind.TIMEOUT)
 
     def test_openai_compat_stream_tokens_reports_usage_and_marks_missing_usage_unknown(self):
         sse_with_usage = [

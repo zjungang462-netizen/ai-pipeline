@@ -391,6 +391,32 @@ class TestGitHardening(unittest.TestCase):
             self.assertFalse((repo / "hook-ran.txt").exists())
 
     @unittest.skipUnless(artifacts.git_available(), "git 不可用")
+    def test_shared_hooks_directory_cannot_preplant_commit_hook(self):
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d)
+            shared = root / "ai-pipeline-no-hooks"
+            shared.mkdir()
+            hook = shared / "pre-commit"
+            hook.write_text(
+                "#!/bin/sh\nprintf 'hooked\\n' > hook-ran.txt\nexit 1\n",
+                encoding="utf-8", newline="\n",
+            )
+            if os.name == "posix":
+                hook.chmod(0o755)
+            repo = root / "repo"
+            with mock.patch.object(artifacts, "_NO_HOOKS_DIR", None), \
+                    mock.patch.object(artifacts.tempfile, "gettempdir", return_value=d):
+                artifacts.ensure_repo(repo)
+                (repo / "a.txt").write_text("a\n", encoding="utf-8")
+                artifacts.commit_files(repo, ["a.txt"], "m")
+                hooks_dir = Path(artifacts._NO_HOOKS_DIR or "")
+            self.assertNotEqual(hooks_dir, shared)
+            self.assertTrue(hooks_dir.name.startswith("ai-pipeline-no-hooks-"))
+            self.assertFalse((hooks_dir / "pre-commit").exists())
+            self.assertFalse((repo / "hook-ran.txt").exists())
+            self.assertEqual((repo / "a.txt").read_text(encoding="utf-8"), "a\n")
+
+    @unittest.skipUnless(artifacts.git_available(), "git 不可用")
     def test_outside_git_path_fails_stage_and_cleans_worktree(self):
         class Bad(Adapter):
             channel = "fake"

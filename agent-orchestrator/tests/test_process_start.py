@@ -17,6 +17,7 @@ from orchestrator.contracts import RunContext
 from orchestrator.safety import build_subprocess_env
 from orchestrator.state import _pid_alive
 from orchestrator.supervisor import supervise
+from orchestrator.testrun import run_test_cmd
 from cmd_shim import write_cmd_shim
 from scripts.failure_evidence import EvidenceTestCase
 
@@ -73,6 +74,34 @@ class ProcessStart(EvidenceTestCase):
             if pidfile.exists() and _pid_alive(int(pidfile.read_text())):
                 subprocess.run(['taskkill','/PID',pidfile.read_text().strip(),'/T','/F'],
                                stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL,timeout=10)
+
+    def test_test_cmd_timeout_kills_descendant_when_taskkill_is_unavailable(self):
+        pidfile = self.root / 'test-child.pid'
+        child_code = (
+            'import os,time; from pathlib import Path; '
+            f'Path({str(pidfile)!r}).write_text(str(os.getpid())); time.sleep(60)'
+        )
+        parent_code = (
+            'import subprocess,sys,time; '
+            f'subprocess.Popen([sys.executable,"-c",{child_code!r}]); time.sleep(60)'
+        )
+
+        def cleanup():
+            if not pidfile.is_file():
+                return
+            pid = int(pidfile.read_text(encoding='utf8'))
+            if _pid_alive(pid):
+                subprocess.run(['taskkill', '/PID', str(pid), '/T', '/F'],
+                               stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=10)
+
+        self.addCleanup(cleanup)
+        with mock.patch('orchestrator.testrun.subprocess.run',
+                        side_effect=OSError('taskkill unavailable')):
+            record = run_test_cmd([sys.executable, '-c', parent_code], self.root, timeout_s=5)
+        self.assertFalse(record['ok'])
+        self.assertIn('超时', record['error'])
+        self.assertTrue(pidfile.is_file(), '后代应已启动，才能验证超时清理')
+        self.assertFalse(_pid_alive(int(pidfile.read_text(encoding='utf8'))))
 
     def test_fast_resume_path_does_not_enumerate_system_threads(self):
         # P2-4：句柄级恢复成功后不得再走全系统线程表扫描。

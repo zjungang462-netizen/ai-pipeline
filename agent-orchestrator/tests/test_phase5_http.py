@@ -1,14 +1,17 @@
 """新工作台接口沿用会话、同源/CSRF和固定配置约束。"""
 import http.client
 import json
+import os
 import tempfile
 import threading
 import unittest
+from contextlib import contextmanager
 from pathlib import Path
+from types import SimpleNamespace
 from unittest import mock
 from urllib.parse import quote, urlencode
 
-from orchestrator.dashboard.server import create_server
+from orchestrator.dashboard.server import Handler, create_server
 from orchestrator.state import atomic_write_json
 
 
@@ -63,6 +66,20 @@ class Phase5HTTP(unittest.TestCase):
             self.assertEqual(self.request(path,headers={'Cookie':''})[0],401)
         self.assertEqual(self.request('/api/compare?left=a&left=b&right=c')[0],400)
         self.assertEqual(self.request('/api/failures?limit=500')[0],400)
+
+    def test_health_keeps_ok_and_reports_projection_diagnostics(self):
+        secret='health-projection-private-token'
+        stats={'errors':2,'last_error':f'bad projection: {secret}'}
+        with mock.patch.dict(os.environ,{'HEALTH_PROJECTION_TOKEN':secret}), \
+                mock.patch.object(self.service._background_sync,'sync',return_value=stats):
+            self.service.sync(incremental=True)
+            status,data,_=self.request('/api/health')
+        self.assertEqual(status,200)
+        self.assertEqual(data['status'],'ok')
+        self.assertEqual(data['projection']['errors'],2)
+        self.assertIn('bad projection',data['projection']['last_error'])
+        self.assertNotIn(secret,data['projection']['last_error'])
+        self.assertIn('[REDACTED]',data['projection']['last_error'])
 
     def test_comparison_failure_page_and_budget_warning_through_http(self):
         a=self.seed('one',80);b=self.seed('two',90)
@@ -124,3 +141,79 @@ class Phase5HTTP(unittest.TestCase):
         self.assertEqual(status,200)
         self.assertEqual(headers['Content-Type'],'text/javascript; charset=utf-8')
         self.assertIn(b'WorkbenchI18n',data)
+
+    def test_localhost_origin_and_https_secure_cookie(self):
+        local_srv=create_server(self.root/'localhost.sqlite3',[self.config],0,host='localhost')
+        self.assertEqual(local_srv.application.origin,f'http://localhost:{local_srv.server_port}')
+        local_srv.server_close()
+        https_srv=create_server(self.root/'https.sqlite3',[self.config],0,host='127.0.0.1',
+                                origin='https://workbench.example')
+        t=threading.Thread(target=https_srv.serve_forever,daemon=True);t.start()
+        self.addCleanup(lambda:(https_srv.application.closed.set(),https_srv.shutdown(),
+                                https_srv.server_close(),t.join(5)))
+        c=http.client.HTTPConnection('127.0.0.1',https_srv.server_port,timeout=5)
+        try:
+            c.request('POST','/api/session',json.dumps({'token':https_srv.application.bootstrap}),
+                      {'Host':'workbench.example','Origin':'https://workbench.example','Content-Type':'application/json'})
+            resp=c.getresponse();resp.read()
+            self.assertEqual(resp.status,200)
+            self.assertIn('Secure',resp.getheader('Set-Cookie',''))
+        finally:
+            c.close()
+
+
+class StreamSessionTests(unittest.TestCase):
+    def test_each_poll_reuses_one_session_without_holding_it_during_io(self):
+        store=mock.Mock()
+        store.active=0
+        store.session_count=0
+        observations=[]
+
+        @contextmanager
+        def session():
+            store.active+=1
+            store.session_count+=1
+            try:yield
+            finally:store.active-=1
+
+        store.session.side_effect=session
+        app=SimpleNamespace(streams=threading.BoundedSemaphore(1),closed=threading.Event())
+        polls=0
+
+        def sync_run_events(run):
+            nonlocal polls
+            observations.append(('sync',store.active))
+            polls+=1
+            if polls==2:app.closed.set()
+
+        def events(run_id,cursor,limit):
+            observations.append(('events',store.active))
+            return []
+
+        store.events.side_effect=events
+        app.service=SimpleNamespace(
+            store=store,sync_run_events=sync_run_events,redact=lambda value:value)
+        handler=object.__new__(Handler)
+        handler.server=SimpleNamespace(application=app)
+        handler.headers={'Last-Event-ID':'0'}
+        handler.connection=mock.Mock()
+        handler.send_response=mock.Mock()
+        handler.headers_common=mock.Mock()
+        handler.send_header=mock.Mock()
+        handler.end_headers=mock.Mock()
+        handler.wfile=mock.Mock()
+        handler.wfile.write.side_effect=lambda data:observations.append(('write',store.active))
+        handler.wfile.flush.side_effect=lambda:observations.append(('flush',store.active))
+
+        def wait(timeout):
+            observations.append(('wait',store.active))
+            return app.closed.is_set()
+
+        with mock.patch.object(app.closed,'wait',side_effect=wait):
+            handler.stream({'id':'run-1'},{})
+
+        self.assertEqual(polls,2)
+        self.assertEqual(store.session_count,2)
+        self.assertEqual(store.events.call_count,2)
+        for operation,depth in observations:
+            self.assertEqual(depth,1 if operation in ('sync','events') else 0,operation)

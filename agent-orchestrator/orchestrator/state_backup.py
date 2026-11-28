@@ -80,6 +80,13 @@ def _lock_paths(root):
     paths = [root / '.backup.lock']
     if (root / 'tuning').is_dir():
         paths.append(root / 'tuning/.policy.lock')
+        paths.append(root / 'tuning/.lock')
+    if (root / 'arenas').is_dir():
+        paths.append(root / 'arenas/.apply.lock')
+    for topic in sorted((root / 'discussions').iterdir()) if (root / 'discussions').is_dir() else []:
+        boundary(topic, root)
+        if topic.is_dir():
+            paths.append(topic / '.discussion.lock')
     for run in sorted((root / 'runs').iterdir()) if (root / 'runs').is_dir() else []:
         boundary(run, root)
         if run.is_dir():

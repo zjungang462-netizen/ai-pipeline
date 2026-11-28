@@ -9,6 +9,7 @@ from collections.abc import Callable
 import copy
 from dataclasses import dataclass
 import json
+import os
 from pathlib import Path
 import shutil
 from typing import Any
@@ -110,7 +111,10 @@ class SchemaMigrationRegistry:
         backup_dir: Path | None = None,
     ) -> dict[str, Any]:
         """默认干跑（apply=False）；apply=True 时强制加锁、校验原字节备份再原子替换。"""
-        path = Path(state_path).resolve()
+        raw_path = Path(state_path)
+        if raw_path.is_symlink():
+            raise MigrationError('目标 state.json 不是普通文件')
+        path = raw_path.resolve()
         if not path.is_file() or path.is_symlink():
             raise MigrationError('目标 state.json 不是普通文件')
         before_sha = sha256_file(path)
@@ -123,7 +127,7 @@ class SchemaMigrationRegistry:
         from_version = raw.get('schema_version')
         migrated, executed = self.migrate_dict(raw, target_version=target_version)
         to_version = migrated['schema_version']
-        preview_bytes = json.dumps(migrated, ensure_ascii=False, indent=2)
+        preview_bytes = json.dumps(migrated, ensure_ascii=False, indent=2).replace('\n', os.linesep)
         preview_sha = sha256_text(preview_bytes)
 
         receipt: dict[str, Any] = {

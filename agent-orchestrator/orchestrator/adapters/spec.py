@@ -92,8 +92,11 @@ class Issue:
 
 
 def check_http_url(value: str) -> str | None:
+    if not isinstance(value, str) or value != value.strip() or any(ord(ch) < 33 for ch in value):
+        return '不是合法的 URL'
     try:
         parts = urlsplit(value)
+        _ = parts.port
     except ValueError:
         return '不是合法的 URL'
     if parts.scheme not in ('http', 'https') or not parts.hostname:

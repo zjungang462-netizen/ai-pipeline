@@ -14,7 +14,7 @@ const failureCounts=new Map(),failureSeen=new Set();
 function renderBudgetAlerts(run){
  const box=$('budget-alert'),alerts=run.budget_alerts||[];
  box.textContent=alerts.map(a=>a.dimension==='tokens'?it('budget.tokens','token 额度已使用 {percent}%（含预留）',{percent:Math.round(a.ratio*100)}):a.dimension==='wall_clock'?it('budget.wallClock','运行期限剩余 {seconds} 秒',{seconds:Math.ceil(a.remaining_s)}):it('budget.metered','计量时长额度已使用 {percent}%',{percent:Math.round(a.ratio*100)})).join('; ');
- if(alerts.length)box.textContent+=it('budget.hint','。请核对当前进度；提示不会增加预算。');show(box,alerts.length>0);
+ if(alerts.length)box.textContent+=(wbInsightsI18n?.isEnglish()?'. ':'')+it('budget.hint','。请核对当前进度；提示不会增加预算。');show(box,alerts.length>0);
  show($('token-progress'),!!run.budget?.max_tokens);
  const modelBox=$('active-models');
  const callLimits=[];
@@ -319,7 +319,7 @@ const TEST_PRESET_LABELS={
  npm_test:['editor.preset.npmTest','npm test'],
  npm_run_build:['editor.preset.npmBuild','npm run build'],
 };
-let pmDraftStages=[];
+let pmDraftStages=[],pmDraftApiConfig={};
 async function loadProjectIntoEditor(pid,returnToTask){
  const def=await api(`/projects/${encodeURIComponent(pid)}/stages`);
  const baseName=def.name||'custom-flow';
@@ -329,6 +329,7 @@ async function loadProjectIntoEditor(pid,returnToTask){
  if($('pm-max-duration'))$('pm-max-duration').value=String(def.max_duration_s||900);
  if($('pm-max-calls'))$('pm-max-calls').value=String(def.max_model_calls||15);
  if($('pm-patch-probe'))$('pm-patch-probe').checked=def.allow_patch_probe!==false;
+ pmDraftApiConfig={api_base_url:def.api_base_url||'',api_key_env:def.api_key_env||'',api_allow_insecure_http:def.api_allow_insecure_http===true};
  pmDraftStages=(def.stages||[]).map(s=>({...s}));
  pmReturnToTask=!!returnToTask;
  renderProjectStageEditor();
@@ -371,6 +372,7 @@ function renderRegisteredProjectsList(){
 }
 function resetProjectDraftFromPreset(){
  const preset=$('pm-preset')?.value||'review_plan_fix';
+ pmDraftApiConfig={};
  pmDraftStages=(PM_PRESET_STAGES[preset]||PM_PRESET_STAGES.review_plan_fix).map(s=>({...s}));
  renderProjectStageEditor();
 }
@@ -383,7 +385,7 @@ function populateProjectModelSelect(sel,type,preferred){
  }
  const ids=models.map(m=>m.id);
  if(preferred&&ids.includes(preferred))sel.value=preferred;
- else if(models.length)sel.value=models[0].id;
+ else if(!preferred&&models.length)sel.value=models[0].id;
  else sel.value='';
 }
 function renderProjectStageEditor(){
@@ -555,13 +557,20 @@ if($('project-form'))$('project-form').onsubmit=async event=>{
    kind:'test',
    test_preset:st.test_preset||'pytest',
    feedback_to:st.feedback_to||'',
+   ...(Number.isInteger(st.max_rounds)?{max_rounds:st.max_rounds}:{}),
   }):({
    name:(st.name||'').trim(),
    kind:st.kind||'report',
    adapter_type:st.adapter_type||'cli_agy',
    model:(st.model||'').trim(),
+   ...(st.adapter_type==='openai_compat'?{
+    base_url:st.base_url||'',
+    api_key_env:st.api_key_env||'',
+    allow_insecure_http:st.allow_insecure_http===true,
+   }:{}),
    approval:!!st.approval,
    feedback_to:st.kind==='review'?(st.feedback_to||''):'',
+   ...(Number.isInteger(st.max_rounds)?{max_rounds:st.max_rounds}:{}),
    prompt:(st.prompt||'').trim(),
   }));
   const created=await api('/projects/register',{method:'POST',body:{
@@ -569,6 +578,9 @@ if($('project-form'))$('project-form').onsubmit=async event=>{
    workdir:$('pm-workdir').value.trim(),
    stages:stagesPayload,
    proxy_url:$('pm-proxy').value.trim(),
+   ...(pmDraftApiConfig.api_base_url?{api_base_url:pmDraftApiConfig.api_base_url}:{}),
+   ...(pmDraftApiConfig.api_key_env?{api_key_env:pmDraftApiConfig.api_key_env}:{}),
+   ...(pmDraftApiConfig.api_allow_insecure_http?{api_allow_insecure_http:true}:{}),
    max_duration_s:Number($('pm-max-duration')?.value||900),
    max_model_calls:Number($('pm-max-calls')?.value||15),
    allow_patch_probe:!!$('pm-patch-probe').checked,
@@ -697,7 +709,7 @@ function renderArenaJob(view,job){
  const box=$('arena-results'),status=$('arena-status'),cancel=$('arena-cancel');
  const candidateStates=job.candidates.map(c=>`${c.label} ${insArena(c.status)}`).join(' · ');
  const headline=job.cancel_requested?it('arena.cancelling','正在取消'):insArena(job.status);
- status.textContent=it('arena.statusLine','{status} · {candidates} · 基线 {sha}{error}',{status:headline,candidates:candidateStates,sha:job.base_sha.slice(0,12),error:job.error?' · '+it('arena.error','错误：{error}',{error:job.error}):''});
+ status.textContent=it('arena.statusLine','{status} · {candidates} · 基线 {sha}{error}',{status:headline,candidates:candidateStates,sha:job.base_sha.slice(0,12),error:job.error?' · '+it('arena.error','错误：{error}',{error:insError(job.error)}):''});
  show(status,true);
  show(cancel,!arenaTerminal.has(job.status));
  cancel.disabled=job.cancel_requested;
@@ -715,7 +727,7 @@ function renderArenaJob(view,job){
   head.append(el('strong','',`${it('arena.candidateHead','方案 {label}',{label:c.label})} · ${insAdapter(c.adapter_type)} / ${c.model||it('arena.default','默认')}`),
               el('span','meta-chip',`${candidateLabel} · ${testBadge} · ${c.duration_s}s · ${num(c.tokens||0)} tok`));
   card.append(head);
-  if(c.error&&candidateStatus!=='cancelled')card.append(el('p','form-note',it('arena.error','错误：{error}',{error:c.error})));
+  if(c.error&&candidateStatus!=='cancelled')card.append(el('p','form-note',it('arena.error','错误：{error}',{error:insError(c.error)})));
   if(c.changed_files?.length)card.append(el('p','form-note',it('arena.changedFiles','改动文件：{files}',{files:c.changed_files.join(', ')})));
   const diffBox=el('div','diff-view arena-diff');
   if(c.diff)renderDiffLinesInto(diffBox,c.diff);
@@ -740,7 +752,7 @@ function renderArenaJob(view,job){
    };
    card.append(applyBtn);
   }else if(c.apply_blocked&&candidateStatus!=='cancelled'){
-   card.append(el('p','form-note',it('arena.blocked','仅供对比 · {reason}',{reason:c.apply_blocked})));
+   card.append(el('p','form-note',it('arena.blocked','仅供对比 · {reason}',{reason:insError(c.apply_blocked)})));
   }
   box.append(card);
  }

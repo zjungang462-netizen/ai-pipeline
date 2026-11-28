@@ -13,7 +13,7 @@ from pathlib import Path
 from unittest import mock
 
 from scripts.failure_evidence import RedactedLog, capture
-from scripts.precommit import check_repository, credential_findings
+from scripts.precommit import check_repository, committed_credential_findings, credential_findings
 from scripts import verify_delivery
 from orchestrator.config import load_config
 from orchestrator.maintenance import prune_evidence
@@ -101,6 +101,77 @@ class Gates(unittest.TestCase):
         report=check_repository(self.root)
         self.assertFalse(report['ok'])
         self.assertTrue({'url_credentials','private_key'} <= {r['kind'] for r in report['issues']})
+
+    def test_precommit_scan_all_catches_unchanged_tracked_secret(self):
+        self.repo()
+        token = 'sk-' + 'D' * 30
+        (self.root / 'committed.txt').write_text('key="' + token + '"\n', encoding='utf8')
+        self.git('add', 'committed.txt')
+        self.git('commit', '-qm', 'secret')
+        self.assertTrue(check_repository(self.root)['ok'])
+        report = check_repository(self.root, scan_all=True)
+        self.assertFalse(report['ok'])
+        self.assertTrue(any(r['kind'] == 'token_pattern' for r in report['issues']))
+        self.assertNotIn(token, json.dumps(report))
+
+    def test_precommit_commit_range_catches_secret_removed_before_head(self):
+        self.repo()
+        base = self.git('rev-parse', 'HEAD').stdout.decode().strip()
+        token = 'sk-' + 'E' * 30
+        path = self.root / 'temporary.txt'
+        path.write_text('key="' + token + '"\n', encoding='utf8')
+        self.git('add', path.name)
+        self.git('commit', '-qm', 'introduce secret')
+        path.unlink()
+        self.git('add', '-u')
+        self.git('commit', '-qm', 'remove secret')
+        rows = committed_credential_findings(self.root, base)
+        self.assertTrue(any(r['kind'] == 'token_pattern' and r['path'] == path.name for r in rows))
+        self.assertNotIn(token, json.dumps(rows))
+
+    def test_precommit_scan_all_catches_secret_removed_before_head(self):
+        self.repo()
+        token = 'sk-' + 'G' * 30
+        path = self.root / 'temporary.txt'
+        path.write_text('key="' + token + '"\n', encoding='utf8')
+        self.git('add', path.name)
+        self.git('commit', '-qm', 'introduce secret')
+        path.unlink()
+        self.git('add', '-u')
+        self.git('commit', '-qm', 'remove secret')
+        self.assertTrue(check_repository(self.root)['ok'])
+        report = check_repository(self.root, scan_all=True)
+        self.assertFalse(report['ok'])
+        self.assertTrue(any(r['kind'] == 'token_pattern' and r['source'] == 'committed_diff'
+                            and r['path'] == path.name for r in report['issues']))
+        self.assertNotIn(token, json.dumps(report))
+
+    def test_history_baseline_suppresses_only_exact_reviewed_finding(self):
+        self.repo()
+        token = 'sk-' + 'H' * 30
+        path = self.root / 'temporary.txt'
+        path.write_text('key="' + token + '"\n', encoding='utf8')
+        self.git('add', path.name)
+        self.git('commit', '-qm', 'synthetic fixture')
+        rows = committed_credential_findings(self.root, None)
+        self.assertTrue(rows)
+        finding = rows[0]
+        baseline = self.root / 'baseline.json'
+        payload = {'version': 1, 'findings': [[
+            finding['commit'], finding['path'], finding['kind'], finding['line'],
+        ]]}
+        baseline.write_text(json.dumps(payload), encoding='utf8')
+        with mock.patch('scripts.precommit.HISTORY_BASELINE', baseline):
+            self.assertEqual(committed_credential_findings(self.root, None), [])
+            payload['findings'][0][3] += 1
+            baseline.write_text(json.dumps(payload), encoding='utf8')
+            self.assertTrue(committed_credential_findings(self.root, None))
+
+    def test_precommit_secret_allowlist_requires_explicit_marker(self):
+        token = 'sk-' + 'F' * 30
+        marked = ('key="' + token + '"  # pragma: allowlist secret\n').encode()
+        self.assertEqual(credential_findings(marked, 'fixture.py', 'working_tree'), [])
+        self.assertTrue(credential_findings(('key="' + token + '"\n').encode(), 'source.py', 'working_tree'))
 
     def test_precommit_rejects_unknown_config_in_index_and_worktree(self):
         self.repo()

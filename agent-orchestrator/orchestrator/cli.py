@@ -201,12 +201,14 @@ _ENGLISH_ERROR_RULES = (
     (r'^deploy 必须在 -- 后提供固定 argv 命令$', 'deploy requires a fixed argv command after --'),
     (r'^受控部署必须显式声明至少一个前置验收阶段$', 'Controlled deployment requires at least one explicit prerequisite acceptance stage'),
     (r'^前置阶段 (.+) 未完成或缺少封存 outputs_hash，拒绝部署$', r'Prerequisite stage \1 is not DONE or has no sealed outputs_hash; deployment rejected'),
+    (r'^前置验收之后存在未纳入验收的已完成代码阶段: (.+)，拒绝部署$', r'Completed code stages after the prerequisite acceptance were not verified: \1; deployment rejected'),
     (r'^正式部署需要显式 DeployApproval，拒绝自动执行$', 'Applied deployment requires an explicit DeployApproval; automatic execution is rejected'),
     (r'^审批 run_id 与当前运行不一致$', 'Approval run_id does not match the current run'),
     (r'^审批 outputs_hash 与当前前置阶段封存产物不一致$', 'Approval outputs_hash does not match the sealed prerequisite artifacts'),
     (r'^审批 commit_sha 与已验证代码提交不一致$', 'Approval commit_sha does not match the verified code commit'),
     (r'^环境变量 (.+) 未设置$', r'Environment variable \1 is not set'),
     (r'^导出文件必须位于状态目录之外$', 'The export file must be outside the state directory'),
+    (r'^经验提案输出文件必须位于状态目录之外$', 'The lessons proposal output file must be outside the state directory'),
     (r'^--paired-results 仅适用于编码路由$', '--paired-results is supported only for coding-route recommendations'),
 )
 
@@ -333,6 +335,8 @@ def cmd_approve(args) -> int:
     if eng.approve(args.stage):
         _say(args, f"已批准 {args.stage}，继续流水线...", f"Approved {args.stage}; continuing the pipeline...")
         results = eng.run()
+        from .notifications import notify_from_env
+        notify_from_env(run_id=args.run_id, results=results, usage=eng.state.usage_total)
         return _print_results(results, 'en' if _english(args) else 'zh')
     _say(args, f"审批未完成：{args.stage} 的状态、产物证据或并发占用可能已变化，请刷新状态后重试。",
          f"Approval was not completed: {args.stage} state, artifact evidence, or concurrent activity may have changed; refresh status and retry.")
@@ -349,6 +353,8 @@ def cmd_rerun_from(args) -> int:
         _say(args, f"未找到 run: {args.run_id}", f"Run not found: {args.run_id}")
         return 2
     results = eng.rerun_from(args.stage)
+    from .notifications import notify_from_env
+    notify_from_env(run_id=args.run_id, results=results, usage=eng.state.usage_total)
     return _print_results(results, 'en' if _english(args) else 'zh')
 
 
@@ -457,6 +463,7 @@ def cmd_doctor(args) -> int:
                 message = 'Verified versions: ' + message.split('：', 1)[1]
             if message.startswith('需要已验证版本 '):
                 message = 'Verified version required: ' + message.split(' ', 1)[1]
+            message = message.replace('[值已省略]', '[omitted]')
             check['message'] = _english_error(_ENGLISH_DIAGNOSTICS.get(message, message))
             hint = _ENGLISH_DIAGNOSTICS.get(check['hint'], check['hint'])
             if hint.startswith('改为 '):

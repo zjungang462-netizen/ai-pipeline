@@ -36,6 +36,8 @@ class Element{
    if(url.includes('/lessons?'))return {proposal:{scanned_runs:4,items:[{occurrences:2,source:'tests/test_retry.py',checklist:'检查 retry.py 边界'}]},approved:{items:[]}};
    if(url.includes('/route-recommend'))return {recommendations:{code:{recommended:{tool:'cli_agy',model:'gemini-4-neon-high'}}}};
    if(url.startsWith('/models/catalog'))return {adapters:{}};
+   if(url==='/projects/register')return {id:'new-project',name:options.body.name};
+   if(url==='/projects')return {projects:[]};
    throw Error('unexpected '+url);},toast:message=>messages.push(message),select(){},renderTaskScope(){}});
  vm.runInContext(`const $=id=>document.getElementById(id);function el(tag,cls,text){const n=document.createElement(tag);if(text!==undefined)n.textContent=text;return n;}function show(){};const num=n=>String(n);const labels={done:'完成',failed:'失败'};let parent=null,taskProjectsFresh=true;const projects=[{id:'p',config_hash:'hash',models:[{name:'api',type:'openai_compat',model:'fixture-model',supports_effort:true,supports_thinking:true}]}],runs=[{id:'a',run_id:'a'},{id:'b',run_id:'b'}];`,context);
  vm.runInContext(i18nSource,context);
@@ -137,6 +139,14 @@ class Element{
  vm.runInContext("pmDraftStages=[{name:'coding',kind:'code',adapter_type:'cli_agy',model:'m1'},{name:'review',kind:'review',adapter_type:'openai_compat',model:'m2',feedback_to:'coding'}];renderProjectStageEditor();",context);
  vm.runInContext("pmDraftStages.reverse();renderProjectStageEditor();",context);
  assert.equal(vm.runInContext("pmDraftStages[0].feedback_to",context),'','review moved to index 0 must clear stale feedback_to');
+ vm.runInContext("pmDraftStages=[{name:'design',kind:'report',adapter_type:'openai_compat',model:'a',base_url:'https://a.example/v1',api_key_env:'KEY_A'},{name:'review',kind:'review',adapter_type:'openai_compat',model:'b',base_url:'http://127.0.0.1:9/v1',api_key_env:'KEY_B',allow_insecure_http:true}];pmDraftApiConfig={api_base_url:'https://a.example/v1',api_key_env:'KEY_A'};pmReturnToTask=false;",context);
+ nodes.get('pm-name').value='dual-api';nodes.get('pm-workdir').value='C:/work/demo';
+ await nodes.get('project-form').onsubmit({preventDefault(){}});
+ const registerRequest=requests.find(request=>request.url==='/projects/register');
+ assert.equal(registerRequest.options.body.stages[0].base_url,'https://a.example/v1');
+ assert.equal(registerRequest.options.body.stages[1].base_url,'http://127.0.0.1:9/v1');
+ assert.equal(registerRequest.options.body.stages[1].api_key_env,'KEY_B');
+ assert.equal(registerRequest.options.body.stages[1].allow_insecure_http,true);
  // 竞技场守卫：仅开发项目可启动，模拟、固定测试和分析项目均不发请求。
  vm.runInContext("projects.push({id:'sim',name:'kiroween-demo.example',execution_scope:{mode:'simulation'}})",context);
  nodes.get('arena-project').value='sim';assert.equal(vm.runInContext('renderArenaScope()',context),true);assert.equal(nodes.get('arena-run').disabled,true);

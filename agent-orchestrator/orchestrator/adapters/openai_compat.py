@@ -9,6 +9,8 @@ from __future__ import annotations
 
 import json
 import os
+import socket
+import threading
 import time
 import urllib.error
 import urllib.request
@@ -25,11 +27,118 @@ from .base import Adapter
 MAX_SSE_BYTES = 4 * 1024 * 1024
 
 
+def _abort_stream(lines) -> None:
+    # Windows 上 close() 不会唤醒另一线程中阻塞的 read1()。
+    raw = getattr(getattr(lines, 'fp', None), 'raw', None)
+    sock = getattr(raw, '_sock', None)
+    if sock is not None:
+        try:
+            sock.shutdown(socket.SHUT_RDWR)
+        except Exception:
+            pass
+    try:
+        lines.close()
+    except Exception:
+        pass
+
+
+def _iter_sse_lines(lines, *, max_bytes: int, deadline: float | None,
+                    cancel_requested: Callable[[], bool] | None):
+    abort_reason: list[str] = []
+
+    def mark_abort(reason: str) -> None:
+        if not abort_reason:
+            abort_reason.append(reason)
+
+    def check_abort():
+        if cancel_requested is not None and cancel_requested():
+            mark_abort('cancelled')
+            raise TimeoutError("SSE 流已取消")
+        if deadline is not None and time.monotonic() >= deadline:
+            mark_abort('deadline')
+            raise TimeoutError("SSE 流总时长超时")
+
+    read1 = getattr(lines, 'read1', None)
+    if not callable(read1):
+        for raw_line in lines:
+            check_abort()
+            yield raw_line
+        return
+
+    stopped = threading.Event()
+
+    def watch_abort():
+        while not stopped.wait(0.05):
+            if cancel_requested is not None and cancel_requested():
+                mark_abort('cancelled')
+                break
+            if deadline is not None and time.monotonic() >= deadline:
+                mark_abort('deadline')
+                break
+        if abort_reason:
+            try:
+                _abort_stream(lines)
+            except Exception:
+                pass
+
+    watcher = None
+    if callable(getattr(lines, 'close', None)) and (deadline is not None or cancel_requested is not None):
+        watcher = threading.Thread(target=watch_abort, name='sse-abort-watch', daemon=True)
+        watcher.start()
+    buffer = bytearray()
+    received = 0
+    try:
+        while True:
+            check_abort()
+            chunk = read1(65536)
+            check_abort()
+            if not chunk:
+                break
+            data = chunk.encode('utf-8') if isinstance(chunk, str) else bytes(chunk)
+            received += len(data)
+            if received > max_bytes:
+                raise ValueError(f"SSE 流超出最大字节上限 ({max_bytes})")
+            buffer.extend(data)
+            while True:
+                newline = buffer.find(b'\n')
+                if newline < 0:
+                    break
+                yield bytes(buffer[:newline + 1])
+                del buffer[:newline + 1]
+        if buffer:
+            yield bytes(buffer)
+    except ValueError as error:
+        if abort_reason:
+            reason = 'SSE 流已取消' if abort_reason[0] == 'cancelled' else 'SSE 流总时长超时'
+            raise TimeoutError(reason) from None
+        if '最大字节上限' not in str(error) and deadline is not None and time.monotonic() >= deadline:
+            raise TimeoutError("SSE 流总时长超时") from None
+        raise
+    except OSError as error:
+        if abort_reason:
+            reason = 'SSE 流已取消' if abort_reason[0] == 'cancelled' else 'SSE 流总时长超时'
+            raise TimeoutError(reason) from None
+        if deadline is not None and time.monotonic() >= deadline:
+            raise TimeoutError("SSE 流总时长超时") from None
+        raise
+    finally:
+        stopped.set()
+        if abort_reason:
+            try:
+                _abort_stream(lines)
+            except Exception:
+                pass
+        if watcher is not None:
+            watcher.join(timeout=1)
+
+
 def parse_sse_stream(
     lines,
     on_token: Callable[[str], None] | None = None,
     *,
     max_bytes: int = MAX_SSE_BYTES,
+    deadline: float | None = None,
+    cancel_requested: Callable[[], bool] | None = None,
 ) -> dict:
     """解析 OpenAI 兼容 SSE 流（data: {...} / data: [DONE]），逐块回调增量文本。"""
     chunks: list[str] = []
@@ -38,9 +147,11 @@ def parse_sse_stream(
     model = None
     finish_reason = None
     saw_data = False
+    saw_choice = False
     done = False
     total_bytes = 0
-    for raw_line in lines:
+    for raw_line in _iter_sse_lines(lines, max_bytes=max_bytes, deadline=deadline,
+                                    cancel_requested=cancel_requested):
         raw_len = len(raw_line) if isinstance(raw_line, (bytes, bytearray)) else len(str(raw_line).encode("utf-8"))
         total_bytes += raw_len
         if total_bytes > max_bytes:
@@ -61,6 +172,8 @@ def parse_sse_stream(
             raise ValueError(f"SSE JSON 块解析失败: {error}") from None
         if not isinstance(event, dict):
             raise ValueError("SSE 事件必须是 JSON 对象")
+        if event.get("error"):
+            raise ValueError(f"SSE 服务端错误: {event['error']}")
         saw_data = True
         if isinstance(event.get("id"), str) and not response_id:
             response_id = event["id"]
@@ -69,19 +182,30 @@ def parse_sse_stream(
         if isinstance(event.get("usage"), dict) and event["usage"]:
             usage = event["usage"]
         choices = event.get("choices")
-        if isinstance(choices, list) and choices:
+        if choices is not None and not isinstance(choices, list):
+            raise ValueError("SSE choices 必须是数组")
+        if choices:
             first = choices[0]
-            if isinstance(first, dict):
-                delta = first.get("delta")
-                if isinstance(delta, dict) and isinstance(delta.get("content"), str) and delta["content"]:
-                    piece = delta["content"]
-                    chunks.append(piece)
-                    if on_token is not None:
-                        on_token(piece)
-                if first.get("finish_reason") is not None:
-                    finish_reason = first["finish_reason"]
-    if not done or not saw_data:
-        raise ValueError("SSE 流未收到完整的 [DONE] 终态")
+            if not isinstance(first, dict):
+                raise ValueError("SSE choice 必须是对象")
+            delta = first.get("delta")
+            if not isinstance(delta, dict):
+                raise ValueError("SSE choice 缺少有效的 delta 对象")
+            content = delta.get("content")
+            if content is not None and not isinstance(content, str):
+                raise ValueError("SSE delta.content 必须是字符串")
+            if content:
+                chunks.append(content)
+                if on_token is not None:
+                    on_token(content)
+            reason = first.get("finish_reason")
+            if reason is not None and (not isinstance(reason, str) or not reason):
+                raise ValueError("SSE finish_reason 必须是非空字符串")
+            if reason is not None:
+                finish_reason = reason
+            saw_choice = True
+    if not done or not saw_data or not saw_choice or not chunks or finish_reason is None:
+        raise ValueError("SSE 流未收到完整的 [DONE] 终态、非空文本或 finish_reason")
     return {
         "id": response_id,
         "model": model,
@@ -101,7 +225,10 @@ class OpenAICompatAdapter(Adapter):
                  on_token: Callable[[str], None] | None = None,
                  allow_insecure_http: bool = False):
         self.name = name
-        self.base_url = base_url.rstrip("/")
+        url_problem = check_http_url(str(base_url or '').strip())
+        if url_problem:
+            raise ValueError(url_problem)
+        self.base_url = base_url.strip().rstrip("/")
         self.model = model
         self.api_key_env = api_key_env
         if type(allow_insecure_http) is not bool:
@@ -181,12 +308,21 @@ class OpenAICompatAdapter(Adapter):
             method="POST",
         )
         t0 = time.monotonic()
+        req_timeout = self.timeout_s if ctx.timeout_s is None else min(self.timeout_s, ctx.timeout_s)
         streamed_data: dict | None = None
         body = ""
+        def _scrub(value: object) -> str:
+            text_val = str(value or "")
+            return text_val.replace(key, "[REDACTED]") if key and len(key) >= 4 else text_val
         try:
-            with _open_request(req, timeout=min(self.timeout_s, ctx.timeout_s)) as resp:
+            with _open_request(req, timeout=req_timeout) as resp:
                 if self.stream_tokens:
-                    streamed_data = parse_sse_stream(resp, on_token=self.on_token)
+                    streamed_data = parse_sse_stream(
+                        resp,
+                        on_token=self.on_token,
+                        deadline=t0 + req_timeout,
+                        cancel_requested=ctx.cancel_requested,
+                    )
                     body = json.dumps(streamed_data, ensure_ascii=False)
                 else:
                     raw = resp.read(MAX_SSE_BYTES + 1)
@@ -195,30 +331,33 @@ class OpenAICompatAdapter(Adapter):
                     body = raw.decode("utf-8")
         except ValueError as e:
             return Result(ok=False, exit_code=0, error_kind=ErrorKind.PARSE_FAILED,
-                          channel=self.channel, stdout=body, parse_unknown=True,
-                          stderr=f"响应解析失败: {e}",
+                          channel=self.channel, stdout=_scrub(body), parse_unknown=True,
+                          stderr=_scrub(f"响应解析失败: {e}"),
                           usage={'usage_unknown': True, 'duration_s': time.monotonic() - t0})
         except urllib.error.HTTPError as e:
-            # 错误分类（评审 M6）：401/403→AUTH，429/5xx→RATE_LIMIT（可退避），其余 CRASH
-            if e.code in (401, 403):
-                kind = ErrorKind.AUTH
-            elif e.code == 429 or e.code >= 500:
-                kind = ErrorKind.RATE_LIMIT
-            else:
-                kind = ErrorKind.CRASH
-            return Result(ok=False, exit_code=e.code, error_kind=kind,
-                          channel=self.channel, stderr=f"HTTP {e.code}: {e.reason}",
-                          usage={'duration_s': time.monotonic()-t0,
-                                 'usage_unknown': e.code not in (400, 401, 403, 404, 429)})
+            try:
+                # 错误分类（评审 M6）：401/403→AUTH，429/5xx→RATE_LIMIT（可退避），其余 CRASH
+                if e.code in (401, 403):
+                    kind = ErrorKind.AUTH
+                elif e.code == 429 or e.code >= 500:
+                    kind = ErrorKind.RATE_LIMIT
+                else:
+                    kind = ErrorKind.CRASH
+                return Result(ok=False, exit_code=e.code, error_kind=kind,
+                              channel=self.channel, stderr=_scrub(f"HTTP {e.code}: {e.reason}"),
+                              usage={'duration_s': time.monotonic()-t0,
+                                     'usage_unknown': e.code not in (400, 401, 403, 404, 429)})
+            finally:
+                e.close()
         except http.client.HTTPException as e:
             partial = getattr(e, 'partial', b'')
             return Result(ok=False, exit_code=-1, error_kind=ErrorKind.TIMEOUT,
-                          channel=self.channel, stderr=f'HTTP 响应不完整: {e}',
-                          stdout=partial.decode('utf8', errors='replace') if isinstance(partial, bytes) else '',
+                          channel=self.channel, stderr=_scrub(f'HTTP 响应不完整: {e}'),
+                          stdout=_scrub(partial.decode('utf8', errors='replace')) if isinstance(partial, bytes) else '',
                           usage={'usage_unknown': True, 'duration_s': time.monotonic()-t0})
         except (urllib.error.URLError, TimeoutError, OSError) as e:
             return Result(ok=False, exit_code=-1, error_kind=ErrorKind.TIMEOUT,
-                          channel=self.channel, stderr=str(e),
+                          channel=self.channel, stderr=_scrub(e),
                           usage={'usage_unknown': True, 'duration_s': time.monotonic()-t0})
         duration = time.monotonic() - t0
 
@@ -227,11 +366,18 @@ class OpenAICompatAdapter(Adapter):
             text = data["choices"][0]["message"]["content"]
         except (ValueError, KeyError, IndexError, TypeError) as e:
             return Result(ok=False, exit_code=0, error_kind=ErrorKind.PARSE_FAILED,
-                          channel=self.channel, stdout=body, parse_unknown=True,
-                          stderr=f"响应解析失败: {e}",
+                          channel=self.channel, stdout=_scrub(body), parse_unknown=True,
+                          stderr=_scrub(f"响应解析失败: {e}"),
                           usage={'usage_unknown': True, 'duration_s': duration})
 
-        usage = data.get("usage", {}) or {}
+        usage = data.get("usage", {})
+        if usage is None:
+            usage = {}
+        if not isinstance(usage, dict):
+            return Result(ok=False, exit_code=0, error_kind=ErrorKind.PARSE_FAILED,
+                          channel=self.channel, stdout=_scrub(body), parse_unknown=True,
+                          stderr=_scrub('响应 usage 必须是对象'),
+                          usage={'tokens': 0, 'usage_unknown': True, 'duration_s': duration})
         raw_total = usage.get("total_tokens")
         valid_total = type(raw_total) is int and raw_total >= 0
         raw_prompt = usage.get("prompt_tokens")
@@ -305,6 +451,8 @@ class OpenAICompatAdapter(Adapter):
                     blocks = [stripped]
             except ValueError:
                 pass
+        explicit_body: str | None = None
+        fallback_body: str | None = None
         for block in blocks:
             lines = block.splitlines()
             if not lines:
@@ -314,14 +462,15 @@ class OpenAICompatAdapter(Adapter):
                 fname = head.split("# file:", 1)[1].strip().replace("\\", "/")
                 if fname.rsplit("/", 1)[-1] != "review_verdict.json":
                     continue
-                body = "\n".join(lines[1:]).strip()
-            elif head.startswith("{") and '"verdict"' in block:
-                body = block.strip()      # 无文件名标注但明显是结论对象
-            else:
-                continue
+                explicit_body = "\n".join(lines[1:]).strip()
+                break
+            elif fallback_body is None and head.startswith("{") and '"verdict"' in block:
+                fallback_body = block.strip()      # 无文件名标注但明显是结论对象
+        chosen = explicit_body if explicit_body is not None else fallback_body
+        if chosen is not None:
             runs_dir.mkdir(parents=True, exist_ok=True)
             dest = runs_dir / "review_verdict.json"
-            dest.write_text(body + "\n", encoding="utf-8")
+            dest.write_text(chosen + "\n", encoding="utf-8")
             return dest
         return None
 

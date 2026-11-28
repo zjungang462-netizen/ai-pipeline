@@ -6,17 +6,22 @@
 """
 from __future__ import annotations
 
+import atexit
 import hashlib
 import os
 import re
 import shutil
+import stat
 import subprocess
 import tempfile
+import threading
 from pathlib import Path
 
 from .state import sha256_file
 
 _VERIFIED_GIT_VERSION: dict[tuple[str, int], bool] = {}
+_NO_HOOKS_DIR: str | None = None
+_NO_HOOKS_DIR_LOCK = threading.Lock()
 
 
 class GitError(RuntimeError):
@@ -96,8 +101,9 @@ def resolve_git(git: GitContext | None = None) -> str | None:
                 git.executable = cand
             return cand
         try:
+            from .safety import build_subprocess_env
             proc = subprocess.run([cand, "--version"], capture_output=True,
-                                  text=True, timeout=15)
+                                  env=build_subprocess_env(), text=True, timeout=15)
             if proc.returncode == 0:
                 if cache_key is not None:
                     _VERIFIED_GIT_VERSION[cache_key] = True
@@ -109,11 +115,41 @@ def resolve_git(git: GitContext | None = None) -> str | None:
     return None
 
 
+def _cleanup_no_hooks_dir(path: str) -> None:
+    shutil.rmtree(path, ignore_errors=True)
+
+
+def _validate_no_hooks_dir(path: Path) -> None:
+    try:
+        mode = path.lstat().st_mode
+    except OSError as error:
+        raise GitError("禁用 Git hook 的目录不可用") from error
+    if not stat.S_ISDIR(mode):
+        raise GitError("禁用 Git hook 的目录必须是真实目录，拒绝符号链接")
+    if os.name == "posix" and stat.S_IMODE(mode) != 0o700:
+        raise GitError("禁用 Git hook 的目录权限必须为 0700")
+
+
 def _no_hooks_dir() -> str:
-    """空目录当作 core.hooksPath，引擎发起的 git 不执行仓库 hook。"""
-    path = Path(tempfile.gettempdir()) / "ai-pipeline-no-hooks"
-    path.mkdir(parents=True, exist_ok=True)
-    return path.resolve().as_posix()
+    """进程内复用随机空目录，避免共享 core.hooksPath 被预埋 hook。"""
+    global _NO_HOOKS_DIR
+    with _NO_HOOKS_DIR_LOCK:
+        if _NO_HOOKS_DIR is None:
+            path = Path(tempfile.mkdtemp(prefix="ai-pipeline-no-hooks-"))
+            try:
+                if not stat.S_ISDIR(path.lstat().st_mode):
+                    raise GitError("禁用 Git hook 的目录必须是真实目录，拒绝符号链接")
+                if os.name == "posix":
+                    path.chmod(0o700)
+                _validate_no_hooks_dir(path)
+            except (OSError, GitError):
+                shutil.rmtree(path, ignore_errors=True)
+                raise
+            _NO_HOOKS_DIR = path.as_posix()
+            atexit.register(_cleanup_no_hooks_dir, _NO_HOOKS_DIR)
+        else:
+            _validate_no_hooks_dir(Path(_NO_HOOKS_DIR))
+        return _NO_HOOKS_DIR
 
 
 def _git(args: list[str], cwd: Path, check: bool = True,
@@ -121,23 +157,35 @@ def _git(args: list[str], cwd: Path, check: bool = True,
          binary: bool = False, git: GitContext | None = None) -> subprocess.CompletedProcess:
     """git 子进程：env 白名单（不透传 API Key）+ 超时 + 禁用 hook。"""
     from .safety import build_subprocess_env
+    import time
     exe = resolve_git(git) or "git"
     cmd = [exe, "-c", f"core.hooksPath={_no_hooks_dir()}", *args]
+    env = build_subprocess_env()
     try:
         proc = subprocess.run(
-            cmd, cwd=str(cwd), env=build_subprocess_env(),
+            cmd, cwd=str(cwd), env=env,
             input=stdin,
             capture_output=True, text=not binary,
             encoding=None if binary else "utf-8", errors=None if binary else "replace",
             timeout=timeout,
         )
+        if os.name == "nt" and check and proc.returncode != 0 and not proc.stderr and not proc.stdout:
+            time.sleep(0.15)
+            proc = subprocess.run(
+                cmd, cwd=str(cwd), env=env,
+                input=stdin,
+                capture_output=True, text=not binary,
+                encoding=None if binary else "utf-8", errors=None if binary else "replace",
+                timeout=timeout,
+            )
     except subprocess.TimeoutExpired as e:
         raise GitError(f"git {' '.join(args)} 超时（{timeout}s）") from e
     if check and proc.returncode != 0:
         output = proc.stderr.strip() or proc.stdout.strip()
         if isinstance(output, bytes):
             output = output.decode("utf-8", errors="replace")
-        raise GitError(f"git {' '.join(args)} 失败: {output}")
+        detail = output or f"exit {proc.returncode}"
+        raise GitError(f"git {' '.join(args)} 失败: {detail}")
     return proc
 
 
@@ -157,7 +205,7 @@ def ensure_repo(workdir: Path, exclude: Path | None = None, *, git: GitContext |
     workdir.mkdir(parents=True, exist_ok=True)
     fresh = not (workdir / ".git").exists()
     if fresh:
-        _git(["init", "-q"], workdir, git=git)
+        _git(["init", "-q", "--template="], workdir, git=git)
         cfg_file = workdir / ".git" / "config"
         if cfg_file.is_file():
             with cfg_file.open("a", encoding="utf-8", newline="\n") as stream:

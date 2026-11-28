@@ -85,5 +85,8 @@ def write_metrics(engine, results: dict[str, str]) -> None:
         os.link(temporary, path)
     except FileExistsError:
         pass
+    except OSError:
+        if not path.exists():
+            os.replace(temporary, path)
     finally:
         temporary.unlink(missing_ok=True)

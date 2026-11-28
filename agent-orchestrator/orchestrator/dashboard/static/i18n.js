@@ -6,7 +6,7 @@
   'login.intro':'Open the complete link printed in the terminal for this session. The session is local-only and does not require a model API key.',
   'login.token':'Local session token','login.connect':'Establish session',
   'sidebar.workspace':'Local workspace','sidebar.newTask':'＋ New task','sidebar.addProject':'Add project','sidebar.insights':'Insights & optimization','language.toggle':'Switch interface language',
-  'sidebar.taskTree':'Task worktree','sidebar.refresh':'Refresh task list','sidebar.search':'Search tasks…','sidebar.searchAria':'Search tasks',
+  'sidebar.taskTree':'Task worktree','sidebar.refresh':'Refresh task list','sidebar.toggleAria':'Toggle task list','sidebar.search':'Search tasks…','sidebar.searchAria':'Search tasks',
   'sidebar.allProjects':'All projects','sidebar.statusFilter':'Filter by status','sidebar.allStatuses':'All statuses','sidebar.running':'Running',
   'sidebar.paused':'Paused','sidebar.waitingExternal':'Waiting for external conditions','sidebar.waitingOwner':'Waiting for owner action',
   'sidebar.waitingApproval':'Waiting for approval','sidebar.done':'Completed','sidebar.failed':'Failed / cancelled','sidebar.archived':'Archived',
@@ -109,7 +109,7 @@
   'notice.configChanged':'The configuration bound to this run has changed. Do not approve or resume the old task with the new configuration.',
   'notice.paused':'Paused at a checkpoint. The original task validity period and budget remain unchanged.','notice.approval':'Review the specific artifact before approving. Chat comments do not replace approval.',
   'notice.history':'Historical run imported read-only; this page will not take over its process or rewrite historical conclusions.','notice.cancelled':'Execution stopped. Existing commits and incurred usage remain; cancellation does not undo changes.',
-  'scope.criticalChanged':'Attention · Run configuration changed','scope.criticalApproval':'Attention · Artifact awaiting approval','scope.historyBinding':'Historical configuration binding unverified','scope.execution':'Execution scope','scope.attention':'Attention · ','scope.workflow':'Workflow notes · ',
+  'scope.criticalChanged':'Run configuration changed','scope.criticalApproval':'Artifact awaiting approval','scope.historyBinding':'Historical configuration binding unverified','scope.execution':'Execution scope','scope.attention':'Attention · ','scope.workflow':'Workflow notes · ',
   'stage.attempt':'Attempt {attempt} · Feedback rounds {rounds}','stage.approve':'Review & approve this artifact','stage.diff':'View code diff ↗','stage.rerun':'Rerun from this stage',
   'stage.approveTitle':'Approve current artifact','stage.approveBody':'Approve attempt {attempt} of {stage}. The backend will revalidate input and artifact hashes.',
   'stage.rerunTitle':'Rerun from stage','stage.rerunBody':'This invalidates the stage and downstream artifacts. Costs, total rounds, and validity period are not reset.',
@@ -133,7 +133,7 @@
   'feed.cliRefreshed':'refreshed {count} times','feed.cliDetail':'{file}Reported lower bound {tokens} tokens; not a completion receipt','feed.realRecord':'Real execution record','feed.offlineExample':'Offline example',
   'feed.round':'Round {round}/{total}','feed.fullRecord':'View full record','feed.collapse':'Collapse content ⌃','feed.expand':'Expand full report ⌄',
   'feed.consensus':'Roundtable consensus · adopt for execution','feed.suggestion':'Roundtable recommendation · task conclusion unchanged','feed.adoptNote':'Adopt as approval note ↗',
-  'feed.newTask':'Create task from conclusion ↗','feed.viewEvidence':'View execution evidence ↗','feed.copy':'Copy',
+  'feed.newTask':'Create task from conclusion ↗','feed.adoptTaskPrefix':'Execute based on multi-model roundtable consensus:\n','feed.viewEvidence':'View execution evidence ↗','feed.copy':'Copy',
   'event.exitCode':'Exit code {code}','event.queued':'Operation queued · {intent}','event.queuedDetail':'Waiting for executor acknowledgment; not yet effective.',
   'event.receipt':'Operation {status} · {intent}','event.receiptDetail':'{stage} · Attempt {attempt} · Input and artifact hashes verified',
   'event.snapshot':'Run status · {status}','event.discussionQueued':'Role roundtable queued','event.discussion':'Roundtable · {status}','event.created':'Task created',
@@ -149,7 +149,7 @@
   'task.conflictAction':'View task','task.readFailed':'Could not read task; retry: {error}','task.exported':'Delivery report exported: {filename}',
   'task.archived':'Task archived and hidden (disk evidence retained; find it under the Archived status filter)','task.restored':'Task restored to the main list',
   'demo.missing':'The kiroween-demo.example.toml demo template is not registered. Register it in project management and retry.',
-  'demo.task':'【Kiroween five-stage closed-loop demo · offline script】Implement normalize(value): trim outer whitespace, split on whitespace, join with hyphens, and lowercase. Observe the first incorrect implementation fail real tests, then inspect the repair diff, script review, and human approval.',
+  'demo.task':'[Kiroween five-stage closed-loop demo · offline script] Implement normalize(value): trim outer whitespace, split on whitespace, join with hyphens, and lowercase. Observe the first incorrect implementation fail real tests, then inspect the repair diff, script review, and human approval.',
   'cmd.newTask':'＋ New pipeline task','cmd.newTaskSub':'Create and start a new multi-stage task','cmd.demo':'⚡ Load five-stage demo template','cmd.demoSub':'Select an available configuration and fill the standard acceptance task',
   'cmd.builder':'⚙ Arrange a dynamic multi-node project','cmd.builderSub':'Visually add, remove, and reorder 1–12 model and deterministic test nodes',
   'cmd.arena':'⚔ Open usage insights & dual-model arena','cmd.arenaSub':'Compare run metrics, failure lessons, and isolated dual-model candidates',
@@ -173,7 +173,7 @@
   'lessons.selectProject':'Select an available project first','lessons.status':'Scanned {runs} historical runs: found {pending} recurring lessons awaiting approval; {approved} currently active.',
   'lessons.pending':'[Pending approval · {count} occurrences] {source}','lessons.approved':'[Active · {count} occurrences] {source}','lessons.empty':'No recurring failure lessons meet the threshold.',
   'lessons.approvedToast':'Approved {count} failure lessons; they will be injected into future task prompts automatically.',
-  'route.selectProject':'Select an available project first','route.empty':'Scanned {count} terminal metrics; no usable model samples yet.','route.code':'Coding stage (code)','route.report':'Report / planning stage (report)','route.review':'Review stage (review)',
+  'route.selectProject':'Select an available project first','route.empty':'Scanned {count} terminal metrics; no usable model samples yet.','route.code':'Coding stage (code)','route.report':'Report / planning stage (report)','route.review':'Review stage (review)','route.card':'{kind} · {recommendation}',
   'route.recommended':'Recommended: {tool} / {model}','route.insufficient':'No automatic recommendation (insufficient samples)','route.status':'Status','route.tool':'Tool','route.model':'Model','route.samples':'Samples',
   'route.runPass':'Run pass rate','route.stagePass':'Stage pass rate','route.medianDuration':'Median duration','route.medianTokens':'Median tokens','route.unknownCalls':'Unknown calls',
   'route.candidate':'Candidate','route.top':'Recommended','route.smallSample':'Insufficient samples','route.applied':'Filled {count} nodes from historical data: {nodes}','route.noMatch':'Historical terminal samples are insufficient or do not match current node tools; nothing was filled automatically.',
@@ -181,6 +181,7 @@
   'editor.noProjects':'No registered projects yet.','editor.unavailable':'Unavailable: {error}','editor.load':'Load for editing','editor.remove':'Remove registration',
   'editor.removed':'Safely removed registration for project {name}; code directories and historical runs were not deleted.','editor.nodeName':'Node English name (e.g. lead / coding)',
   'editor.report':'Plan / report (report)','editor.code':'Implementation (code)','editor.reviewKind':'Independent review (review)','editor.testKind':'Deterministic test (test)',
+  'editor.preset.pytest':'pytest (python -m pytest -q)','editor.preset.unittest':'unittest (python -m unittest discover -s tests)','editor.preset.npmTest':'npm test','editor.preset.npmBuild':'npm run build',
   'editor.up':'Move up','editor.down':'Move down','editor.delete':'Delete node','editor.command':'Allowlisted deterministic command (no arbitrary shell)',
   'editor.available':' (available{count})','editor.notFound':' (not detected)','editor.modelId':'Manual model ID (optional)','editor.approval':'Human approval required after completion',
   'editor.feedback':'On failure, send back to:','editor.noFeedback':'No automatic feedback','editor.prompt':'Custom prompt for this node (blank uses the role default)','editor.promptPlaceholder':'Supports {task}, {upstream}, and {feedback} placeholders',
@@ -198,9 +199,11 @@
   'error.arenaStaleConfig':'The project configuration changed while the arena job was queued. Refresh and retry.',
   'error.invalidTask':'Task must contain 1 to 64,000 characters.','error.invalidArenaTask':'Arena task description must contain 1 to 16,000 characters.',
   'error.arenaActiveWork':'This project still has an active task or roundtable. Stop it before merging an arena candidate.',
-  'error.arenaIncomplete':'Only completed arena jobs can be adopted.','error.discussionStale':'The configuration bound to the roundtable changed; another configuration will not be used.'
+  'error.arenaIncomplete':'Only completed arena jobs can be adopted.','error.discussionStale':'The configuration bound to the roundtable changed; another configuration will not be used.',
+  'error.arenaCandidateFailed':'Candidate execution failed','error.arenaNoChanges':'No eligible code changes','error.arenaNoScope':'No allowed files declared for this round',
+  'error.arenaOutOfScope':'Changes exceed the allowed file scope','error.arenaNoTestPreset':'No acceptance test selected','error.arenaTestFailed':'Candidate did not pass acceptance tests'
  };
- const statusEn={pending:'Pending',running:'Running',recovering:'Recovering',paused:'Paused',waiting_approval:'Awaiting approval',waiting_external:'Waiting for external conditions',waiting_owner:'Waiting for owner action',done:'Completed',failed:'Failed',timeout:'Timed out',cancelled:'Cancelled',awaiting_approval:'Awaiting approval',stale:'Needs rerun',interrupted:'Interrupted',queued:'Queued',completed:'Roundtable complete',applied:'Applied',rejected:'Rejected'};
+ const statusEn={pending:'Pending',running:'Running',recovering:'Recovering',paused:'Paused',waiting_approval:'Awaiting approval',waiting_external:'Waiting for external conditions',waiting_owner:'Waiting for owner action',done:'Completed',failed:'Failed',timeout:'Timed out',cancelled:'Cancelled',awaiting_approval:'Awaiting approval',stale:'Needs rerun',interrupted:'Interrupted',queued:'Queued',completed:'Roundtable complete',applied:'Applied',rejected:'Rejected',archived:'Archived',unknown:'Unknown'};
  const stageEn={requirements:'Requirements analysis',design:'Solution design',code_review:'Code review',repair_plan:'Repair plan',coding:'Implementation',testing:'Test verification','测试器':'Test runner','离线示例':'Offline example',review:'Independent review',final_review:'Final review',self_tests:'Regression tests',environment:'Environment check',acceptance:'Human acceptance',architect:'Architect',developer:'Developer',skeptic:'Red-team skeptic',reviewer:'Reviewer',consensus:'Roundtable consensus',lead:'Technical lead',cross_review:'Cross-review'};
  const adapterEn={openai_compat:'Compatible API',cli_codex:'Codex CLI',cli_qwen:'Qwen CLI',cli_claude:'Claude Code',cli_qoder:'Qoder CLI',cli_agy:'Antigravity CLI',cli_dsh:'DSH CLI',cli_grok:'Grok container',cli_doubao:'Doubao container',fake:'Offline simulation',command:'Deterministic command'};
  const eventEn={recovery_captured:'Recovery point saved',recovery_applied:'Verified candidate files restored',recovery_rejected:'Recovery point validation rejected',cli_retry_exhausted:'CLI retries exhausted',attempt_start:'Attempt started',attempt_done:'Artifact archived',attempt_fail:'Attempt failed',stage_deferred:'Stage waiting',deferred_resumed:'Resumed from verified receipt',deferred_recovered:'Waiting state restored from sealed record',deferred_rejected:'Waiting receipt validation rejected',model_call_started:'Waiting for model response',precheck:'Pre-execution check',worktree_error:'Could not create isolated test worktree',test_start:'Tests started',test_pass:'Real tests passed',test_fail:'Real tests failed',test_feedback:'Test feedback sent to coding',review_feedback:'Review feedback sent to coding',repair_cycle:'Entering repair cycle',review_pass:'Review JSON passed',review_exhausted:'Review did not pass',policy_approved:'Pre-authorization approved',approved:'Human approval applied',recovery_hint:'Preparing bounded retry',rejected:'Constraint validation failed',interrupted:'Unfinished attempt detected',control_receipt:'Command receipt',cancelled:'Run cancelled',discussion_reserved:'Roundtable budget reserved',discussion_settled:'Roundtable usage settled',inflight_reserved:'Interrupted in-flight reservation settled'};
@@ -265,7 +268,9 @@
   'error.busy':'此项目已有未结束任务；请先暂停、完成或取消。','error.arenaGuard':'离线演练、固定测试或分析流程不会启动本机真实 CLI；请使用代码开发项目。',
   'error.arenaStaleConfig':'竞技场排队期间项目配置已变化，请刷新后重试。','error.staleConfig':'配置已变化，请刷新并核对执行范围后重试。',
   'error.invalidTask':'任务必须为 1 到 64000 字符。','error.invalidArenaTask':'竞技场任务描述须为 1..16000 字符。',
-  'error.arenaActiveWork':'该项目尚有运行中的任务或会诊，请先停止再合并竞技场候选。','error.arenaIncomplete':'只能采纳已完成的竞技场任务。'
+  'error.arenaActiveWork':'该项目尚有运行中的任务或会诊，请先停止再合并竞技场候选。','error.arenaIncomplete':'只能采纳已完成的竞技场任务。',
+  'error.arenaCandidateFailed':'候选生成失败','error.arenaNoChanges':'候选没有可采纳的改动','error.arenaNoScope':'本轮未声明允许改动的文件',
+  'error.arenaOutOfScope':'候选改动超出允许的文件范围','error.arenaNoTestPreset':'本轮未选择验收测试','error.arenaTestFailed':'候选未通过验收测试'
  };
  function error(value){
   const text=String(value||'');
@@ -277,7 +282,10 @@
    [/竞技场排队期间项目配置已变化/i,'error.arenaStaleConfig'],
    [/配置已变化|运行绑定的配置已变化|会诊绑定的配置已变化|configuration changed/i,'error.staleConfig'],
    [/任务必须为 1 到 64000 字符/i,'error.invalidTask'],[/竞技场任务描述须为 1\.\.16000 字符/i,'error.invalidArenaTask'],
-   [/该项目尚有运行中的任务或会诊/i,'error.arenaActiveWork'],[/只能采纳已完成的竞技场任务/i,'error.arenaIncomplete']
+   [/该项目尚有运行中的任务或会诊/i,'error.arenaActiveWork'],[/只能采纳已完成的竞技场任务/i,'error.arenaIncomplete'],
+   [/^候选生成失败$/,'error.arenaCandidateFailed'],[/^候选没有可采纳的改动$/,'error.arenaNoChanges'],
+   [/^本轮未声明允许改动的文件$/,'error.arenaNoScope'],[/^候选改动超出允许的文件范围$/,'error.arenaOutOfScope'],
+   [/^本轮未选择验收测试$/,'error.arenaNoTestPreset'],[/^候选未通过验收测试$/,'error.arenaTestFailed']
   ];
   for(const [pattern,key] of rules)if(pattern.test(text))return language==='en'?messages[key]:errorZh[key];
   return text;

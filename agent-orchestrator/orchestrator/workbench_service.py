@@ -8,6 +8,7 @@ import os
 import socket
 import subprocess
 import sys
+import tempfile
 import time
 import urllib.request
 from pathlib import Path
@@ -58,13 +59,98 @@ def recovery_blockers(database):
     return blocked
 
 
+def _restrict_windows_acl(path: Path) -> None:
+    import ctypes
+    from ctypes import wintypes
+
+    advapi32 = ctypes.WinDLL('advapi32', use_last_error=True)
+    kernel32 = ctypes.WinDLL('kernel32', use_last_error=True)
+
+    class SID_AND_ATTRIBUTES(ctypes.Structure):
+        _fields_ = [('Sid', wintypes.LPVOID), ('Attributes', wintypes.DWORD)]
+
+    class TOKEN_USER(ctypes.Structure):
+        _fields_ = [('User', SID_AND_ATTRIBUTES)]
+
+    advapi32.OpenProcessToken.argtypes = [wintypes.HANDLE, wintypes.DWORD, ctypes.POINTER(wintypes.HANDLE)]
+    advapi32.OpenProcessToken.restype = wintypes.BOOL
+    advapi32.GetTokenInformation.argtypes = [wintypes.HANDLE, wintypes.DWORD, wintypes.LPVOID,
+                                             wintypes.DWORD, ctypes.POINTER(wintypes.DWORD)]
+    advapi32.GetTokenInformation.restype = wintypes.BOOL
+    advapi32.ConvertSidToStringSidW.argtypes = [wintypes.LPVOID, ctypes.POINTER(wintypes.LPWSTR)]
+    advapi32.ConvertSidToStringSidW.restype = wintypes.BOOL
+    advapi32.ConvertStringSecurityDescriptorToSecurityDescriptorW.argtypes = [
+        wintypes.LPCWSTR, wintypes.DWORD, ctypes.POINTER(wintypes.LPVOID), wintypes.LPVOID]
+    advapi32.ConvertStringSecurityDescriptorToSecurityDescriptorW.restype = wintypes.BOOL
+    advapi32.SetFileSecurityW.argtypes = [wintypes.LPCWSTR, wintypes.DWORD, wintypes.LPVOID]
+    advapi32.SetFileSecurityW.restype = wintypes.BOOL
+    kernel32.LocalFree.argtypes = [wintypes.HLOCAL]
+    kernel32.LocalFree.restype = wintypes.HLOCAL
+    kernel32.GetCurrentProcess.restype = wintypes.HANDLE
+    kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
+    kernel32.CloseHandle.restype = wintypes.BOOL
+
+    def checked(ok):
+        if not ok:
+            raise ctypes.WinError(ctypes.get_last_error())
+
+    token = wintypes.HANDLE()
+    checked(advapi32.OpenProcessToken(kernel32.GetCurrentProcess(), 0x0008, ctypes.byref(token)))
+    try:
+        size = wintypes.DWORD()
+        advapi32.GetTokenInformation(token, 1, None, 0, ctypes.byref(size))
+        buffer = ctypes.create_string_buffer(size.value)
+        checked(advapi32.GetTokenInformation(token, 1, buffer, size, ctypes.byref(size)))
+        sid = ctypes.cast(buffer, ctypes.POINTER(TOKEN_USER)).contents.User.Sid
+        sid_text = wintypes.LPWSTR()
+        checked(advapi32.ConvertSidToStringSidW(sid, ctypes.byref(sid_text)))
+        try:
+            sddl = f'D:P(A;;FA;;;{sid_text.value})'
+            descriptor = wintypes.LPVOID()
+            checked(advapi32.ConvertStringSecurityDescriptorToSecurityDescriptorW(
+                sddl, 1, ctypes.byref(descriptor), None))
+            try:
+                checked(advapi32.SetFileSecurityW(str(path), 0x00000004, descriptor))
+            finally:
+                kernel32.LocalFree(descriptor)
+        finally:
+            kernel32.LocalFree(sid_text)
+    finally:
+        kernel32.CloseHandle(token)
+
+
+def _write_private_entry(entry: Path, text: str) -> None:
+    fd, raw_path = tempfile.mkstemp(prefix='.workbench-entry-', dir=str(entry.parent))
+    temporary = Path(raw_path)
+    try:
+        if os.name == 'nt':
+            os.close(fd)
+            fd = -1
+            _restrict_windows_acl(temporary)
+            fd = os.open(temporary, os.O_WRONLY | os.O_TRUNC)
+        else:
+            os.fchmod(fd, 0o600)
+        with os.fdopen(fd, 'w', encoding='utf8', newline='\n') as handle:
+            fd = -1
+            handle.write(text)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary, entry)
+    except BaseException:
+        if fd >= 0:
+            os.close(fd)
+        temporary.unlink(missing_ok=True)
+        raise
+
+
 def serve_child(args):
     from .dashboard.server import create_server
     server = create_server(args.database, args.config, args.port, recover=False)
     app = server.application
     entry = Path(args.directory) / '工作台入口.md'
-    entry.write_text('# 本机工作台\n\n本机私密入口，请勿转发。\n\n'
-                     f'[打开工作台]({app.origin}/#token={app.bootstrap})\n', encoding='utf8')
+    entry_text = ('# 本机工作台\n\n本机私密入口，请勿转发。\n\n'
+                  f'[打开工作台]({app.origin}/#token={app.bootstrap})\n')
+    _write_private_entry(entry, entry_text)
     print('工作台已启动；会话入口仅保存在私密本地文件。', flush=True)
     try:
         server.serve_forever()
@@ -118,7 +204,11 @@ def supervise(args):
                 while child.poll() is None:
                     if (root / 'stop').exists():
                         child.terminate()
-                        child.wait(timeout=10)
+                        try:
+                            child.wait(timeout=10)
+                        except subprocess.TimeoutExpired:
+                            child.kill()
+                            child.wait(timeout=5)
                         record('stopped', reason='stop_requested')
                         return 0
                     if health(args.port, child.pid):
@@ -152,6 +242,11 @@ def supervise(args):
                 child.wait(timeout=10)
             except subprocess.TimeoutExpired:
                 event('child_stop_timeout', pid=child.pid)
+                child.kill()
+                try:
+                    child.wait(timeout=5)
+                except subprocess.TimeoutExpired:
+                    pass
         lock.release()
 
 

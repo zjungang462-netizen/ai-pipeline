@@ -148,6 +148,27 @@ class DoubaoContainer(unittest.TestCase):
             args = adapter._common_run(staging_uid=1234)
         self.assertEqual(args[args.index('--user') + 1], '1234:4444')
         self.assertIn('DAC_OVERRIDE', args)
+        with mock.patch('orchestrator.adapters.cli_doubao.os', SimpleNamespace()):
+            win_args = adapter._common_run(staging_uid=1234)
+        self.assertEqual(win_args[win_args.index('--user') + 1], '1234:65534')
+
+    def test_code_stage_without_editable_files_is_rejected_without_mounting_workspace_rw(self):
+        scratch = TemporaryDirectory()
+        self.addCleanup(scratch.cleanup)
+        root = Path(scratch.name)
+        (root / 'doubao').write_bytes(b'bin')
+        adapter = DoubaoAdapter(
+            'doubao', binary=str(root / 'doubao'), image='pipeline-doubao-probe:2.37.2',
+            machine_id=str(root / 'machine-id'), profile='pipeline-doubao-profile')
+        adapter._version = VERSION
+        adapter._resolved = 'docker'
+        ctx = RunContext('t', 'r', 'code', root, root, kind='code', editable_files=())
+        with mock.patch('orchestrator.adapters.cli_doubao.sha256_file', return_value=BINARY_SHA256), \
+                mock.patch.object(adapter, '_exec') as execute:
+            res = adapter.run('fix', root, ctx)
+        self.assertFalse(res.ok)
+        self.assertEqual(res.error_kind, ErrorKind.REJECTED)
+        execute.assert_not_called()
 
     def test_code_stage_with_editable_files_uses_isolated_staging_and_verifies_writeback(self):
         import csv
@@ -191,8 +212,11 @@ class DoubaoContainer(unittest.TestCase):
                 self.assertEqual(staging.stat().st_mode & 0o777, 0o700)
                 self.assertEqual((staging / 'pricing.py').stat().st_mode & 0o777, 0o600)
                 self.assertEqual((staging / 'readonly.py').stat().st_mode & 0o777, 0o400)
-                if os.geteuid() not in (0, 65534):
+                if staging.stat().st_uid == 65534:
                     self.assertNotIn('DAC_OVERRIDE', args)
+                    self.assertEqual(args[args.index('--user') + 1], '65534:65534')
+                else:
+                    self.assertIn('DAC_OVERRIDE', args)
                     self.assertEqual(args[args.index('--user') + 1], f'{os.geteuid()}:{os.getegid()}')
             # 模拟容器内原子替换可编辑文件、绕过只读挂载改写上下文并创建垃圾文件。
             replacement = staging / 'pricing.py.tmp'

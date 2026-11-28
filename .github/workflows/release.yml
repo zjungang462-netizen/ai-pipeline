@@ -36,4 +36,5 @@ jobs:
         with:
           name: verified-package-${{ github.sha }}
           path: ${{ runner.temp }}/verified-package/
+          overwrite: true
           retention-days: 30

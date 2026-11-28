@@ -6,6 +6,7 @@ from collections.abc import Callable
 from dataclasses import asdict, dataclass, field
 import hashlib
 import hmac
+import http.client
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import json
 import os
@@ -41,6 +42,22 @@ class RemoteJobSpec:
     files_b64: dict[str, str] | None = None
     timeout_s: int = 120
     inputs_hash: str = ''
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.job_id, str) or not self.job_id.strip():
+            raise ValueError('RemoteJobSpec.job_id 必须为非空字符串')
+        for field_name in ('run_id', 'stage', 'kind', 'prompt', 'inputs_hash'):
+            if not isinstance(getattr(self, field_name), str):
+                raise ValueError(f'RemoteJobSpec.{field_name} 必须为字符串')
+        if not isinstance(self.editable_files, tuple) or not all(isinstance(f, str) for f in self.editable_files):
+            raise ValueError('RemoteJobSpec.editable_files 必须为字符串元组')
+        if self.files_b64 is not None and (
+            not isinstance(self.files_b64, dict)
+            or not all(isinstance(k, str) and isinstance(v, str) for k, v in self.files_b64.items())
+        ):
+            raise ValueError('RemoteJobSpec.files_b64 必须为字符串键值字典')
+        if type(self.timeout_s) is not int or not 1 <= self.timeout_s <= 3600:
+            raise ValueError('RemoteJobSpec.timeout_s 必须为 1..3600 的整数')
 
 
 @dataclass(frozen=True)
@@ -110,8 +127,11 @@ class RemoteWorkerClient:
         req = urllib.request.Request(f'{self.endpoint}/health', method='GET')
         try:
             with open_same_origin(req, timeout=timeout_s) as resp:
-                return json.loads(resp.read().decode('utf-8'))
-        except (urllib.error.URLError, TimeoutError, OSError, ValueError) as error:
+                return json.loads(resp.read(MAX_REQUEST_BYTES).decode('utf-8'))
+        except urllib.error.HTTPError as error:
+            error.close()
+            raise RemoteWorkerError(f'Worker 心跳探测失败: HTTP {error.code}') from None
+        except (urllib.error.URLError, http.client.HTTPException, TimeoutError, OSError, ValueError) as error:
             raise RemoteWorkerError(f'Worker 心跳探测失败: {error}') from None
 
     def dispatch(self, spec: RemoteJobSpec, *, workdir: Path | None = None,
@@ -141,8 +161,9 @@ class RemoteWorkerClient:
                 sig = resp.headers.get('X-Worker-Signature-256', '')
                 resp_ts = resp.headers.get('X-Worker-Timestamp', '')
         except urllib.error.HTTPError as error:
+            error.close()
             raise RemoteWorkerError(f'远程 Worker 返回 HTTP {error.code}') from None
-        except (urllib.error.URLError, TimeoutError, OSError) as error:
+        except (urllib.error.URLError, http.client.HTTPException, TimeoutError, OSError) as error:
             raise RemoteWorkerError(f'远程 Worker 通信失败: {error}') from None
 
         try:
@@ -155,6 +176,11 @@ class RemoteWorkerClient:
             raise RemoteWorkerError('远程 Worker 回执签名校验失败')
         try:
             data = json.loads(resp_body.decode('utf-8'))
+            if not isinstance(data, dict):
+                raise TypeError('回执根对象必须是 JSON 对象')
+            raw_updates = data.get('updates_b64') or {}
+            if not isinstance(raw_updates, dict):
+                raise TypeError('updates_b64 必须是 JSON 对象')
             receipt = RemoteJobReceipt(
                 job_id=data['job_id'],
                 worker_id=data['worker_id'],
@@ -163,7 +189,7 @@ class RemoteWorkerClient:
                 text=data.get('text', ''),
                 stderr=data.get('stderr', ''),
                 usage=data.get('usage') or {'usage_unknown': True},
-                updates_b64=data.get('updates_b64') or {},
+                updates_b64=raw_updates,
             )
         except (ValueError, KeyError, TypeError) as error:
             raise RemoteWorkerError(f'远程 Worker 回执格式无效: {error}') from None
@@ -172,7 +198,13 @@ class RemoteWorkerClient:
 
         changed: list[str] = []
         if receipt.status == 'done' and receipt.updates_b64 and workdir is not None:
-            decoded = {k: base64.b64decode(v, validate=True) for k, v in receipt.updates_b64.items()}
+            try:
+                decoded = {
+                    k: base64.b64decode(v, validate=True)
+                    for k, v in receipt.updates_b64.items()
+                }
+            except (ValueError, TypeError, AttributeError) as error:
+                raise RemoteWorkerError(f'远程 Worker 更新文件编码无效: {error}') from None
             changed = apply_raw_updates(
                 workdir, spec.editable_files, original_files, decoded, label='远程 Worker'
             )
@@ -200,6 +232,8 @@ class RemoteWorkerServer:
         parent = self
 
         class Handler(BaseHTTPRequestHandler):
+            timeout = 30
+
             def log_message(self, *args):
                 return
 
@@ -251,15 +285,23 @@ class RemoteWorkerServer:
                     return
                 try:
                     data = json.loads(raw.decode('utf-8'))
+                    if not isinstance(data, dict):
+                        raise TypeError('请求载荷必须是 JSON 对象')
+                    raw_editable = data.get('editable_files') or ()
+                    if not isinstance(raw_editable, (list, tuple)):
+                        raise TypeError('editable_files 必须是数组')
+                    raw_timeout = data.get('timeout_s', 120)
+                    if type(raw_timeout) is not int:
+                        raise TypeError('timeout_s 必须是整数')
                     spec = RemoteJobSpec(
                         job_id=data['job_id'],
                         run_id=data['run_id'],
                         stage=data['stage'],
                         kind=data['kind'],
                         prompt=data['prompt'],
-                        editable_files=tuple(data.get('editable_files') or ()),
+                        editable_files=tuple(raw_editable),
                         files_b64=data.get('files_b64') or {},
-                        timeout_s=int(data.get('timeout_s', 120)),
+                        timeout_s=raw_timeout,
                         inputs_hash=data.get('inputs_hash', ''),
                     )
                 except (ValueError, KeyError, TypeError) as error:

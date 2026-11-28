@@ -74,6 +74,21 @@ def _changed_files(base_sha: str, candidate_sha: str, workdir: Path, git_exe: st
     return sorted(name.decode('utf-8') for name in output.split(b'\0') if name)
 
 
+def _has_non_regular_entries(commit_sha: str, changed_files: list[str], workdir: Path, git_exe: str | None) -> bool:
+    if not commit_sha or not changed_files:
+        return False
+    listing = _git(['--literal-pathspecs', 'ls-tree', '--full-tree', '-r', '-z', commit_sha, '--', *changed_files],
+                   workdir, git_exe, binary=True).stdout
+    for row in listing.split(b'\0'):
+        if not row:
+            continue
+        meta, _sep, _path = row.partition(b'\t')
+        parts = meta.decode('ascii', errors='replace').split()
+        if len(parts) < 2 or parts[0] not in ('100644', '100755') or parts[1] != 'blob':
+            return True
+    return False
+
+
 def _evidence_digest(evidence: dict[str, Any]) -> str:
     encoded = json.dumps(evidence, ensure_ascii=False, sort_keys=True, separators=(',', ':')).encode('utf-8')
     return hashlib.sha256(encoded).hexdigest()
@@ -84,10 +99,13 @@ def _remove_worktree(cfg: Config, arena_dir: Path, worktree: Path, git_lock: thr
     if arena_dir.resolve() != arena_dir or worktree.resolve() != arena_dir / worktree.name:
         return
     with git_lock:
-        _git(['worktree', 'remove', '--force', str(worktree)], cfg.task_workdir, cfg.git_exe, check=False)
+        removed = _git(['worktree', 'remove', '--force', str(worktree)], cfg.task_workdir, cfg.git_exe, check=False)
     if (arena_dir.resolve() == arena_dir and worktree.is_dir()
             and worktree.resolve() == arena_dir / worktree.name):
         shutil.rmtree(worktree, ignore_errors=True)
+    if removed.returncode != 0:
+        with git_lock:
+            _git(['worktree', 'prune'], cfg.task_workdir, cfg.git_exe, check=False)
 
 
 def _build_candidate_adapter_cfg(
@@ -234,6 +252,8 @@ def _run_single_candidate(
             apply_blocked = '候选生成失败'
         elif not changed_files:
             apply_blocked = '候选没有可采纳的改动'
+        elif _has_non_regular_entries(commit_sha, changed_files, cfg.task_workdir, cfg.git_exe):
+            apply_blocked = '候选改动包含符号链接或子模块条目'
         elif not allowed_files:
             apply_blocked = '本轮未声明允许改动的文件'
         elif not set(changed_files).issubset(allowed_files):
@@ -435,7 +455,8 @@ def _verified_candidate(
     if ref_sha != commit_sha or commit_and_parents != [commit_sha, base_sha]:
         raise RuntimeError('封存提交与受验提交或基线不一致')
     changed = _changed_files(base_sha, commit_sha, cfg.task_workdir, cfg.git_exe)
-    if not changed or not set(changed).issubset(scope) or changed != candidate.get('changed_files'):
+    if (not changed or not set(changed).issubset(scope) or changed != candidate.get('changed_files')
+            or _has_non_regular_entries(commit_sha, changed, cfg.task_workdir, cfg.git_exe)):
         raise RuntimeError('封存提交的变更与已确认的文件范围不一致')
 
     try:
@@ -481,6 +502,11 @@ def apply_arena_winner(
     lock = StageLock(cfg.state_dir / 'arenas' / '.apply.lock')
     if not lock.acquire():
         raise RuntimeError('已有另一个竞技场合并操作正在执行，请稍后重试')
+    ws = cfg.task_workdir
+    ws_lock = StageLock(ws.parent / f'.{ws.name}.pipeline.lock')
+    if not ws_lock.acquire():
+        lock.release()
+        raise RuntimeError('目标工作区存在正在运行的流水线任务，请稍后重试')
     try:
         record = json.loads(result_path.read_text(encoding='utf-8'))
         if record.get('applied_label'):
@@ -500,11 +526,21 @@ def apply_arena_winner(
                 raise RuntimeError(f'工作区 HEAD 已变化（当前 {current_head[:12]}，期望 {expected_base_sha[:12]}），拒绝自动合并')
             if _git(['status', '--porcelain'], cfg.task_workdir, cfg.git_exe).stdout:
                 raise RuntimeError('工作区存在未提交改动，请先清理或提交后再采纳竞技场方案')
+            # status 不展示 ignored 未跟踪文件；快进前显式拒绝候选新增路径的冲突。
+            ignored_output = _git(['ls-files', '--others', '--ignored', '--exclude-standard', '-z'],
+                                  cfg.task_workdir, cfg.git_exe, binary=True).stdout
+            ignored_files = {name.decode('utf-8', errors='surrogateescape')
+                             for name in ignored_output.split(b'\0') if name}
+            candidate = next(row for row in record['candidates'] if row.get('label') == label)
+            conflicts = sorted(set(candidate['changed_files']) & ignored_files)
+            if conflicts:
+                raise RuntimeError(
+                    f'工作区存在与候选新增路径冲突的 ignored 文件：{", ".join(conflicts[:5])}，请先清理后再采纳')
             # 先写意向。若合并后最终回执落盘失败，只在同一分支和候选提交上补写回执。
             if pending is None:
                 record['apply_intent'] = intent
                 atomic_write_json(result_path, record)
-            _git(['merge', '--ff-only', commit_sha], cfg.task_workdir, cfg.git_exe)
+            _git(['merge', '--ff-only', '--no-overwrite-ignore', commit_sha], cfg.task_workdir, cfg.git_exe)
             new_head = _git(['rev-parse', 'HEAD'], cfg.task_workdir, cfg.git_exe).stdout.strip()
             if new_head != commit_sha:
                 raise RuntimeError('合并后的 HEAD 与受验提交不一致，请核对采纳记录')
@@ -518,4 +554,5 @@ def apply_arena_winner(
         return {'applied': True, 'arena_id': arena_id, 'label': label, 'commit_sha': commit_sha,
                 'head_sha': commit_sha, 'recovered': recovered}
     finally:
+        ws_lock.release()
         lock.release()

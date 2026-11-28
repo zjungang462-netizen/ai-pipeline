@@ -60,6 +60,18 @@ class FakeAdapter(Adapter):
         workdir.mkdir(parents=True, exist_ok=True)
         if self.scenario == "normalize_repair":
             return self._normalize_repair(workdir, ctx)
+        if self._kind_for(ctx.stage) == "review":
+            report_dir = Path(ctx.runs_dir) / "reports"
+            report_dir.mkdir(parents=True, exist_ok=True)
+            report = report_dir / f"{ctx.stage}_report.md"
+            report.write_text(f"# {ctx.stage} 审查报告\n\n任务: {ctx.task}\n结论: pass\n",
+                              encoding="utf-8")
+            verdict_file = Path(ctx.runs_dir) / "review_verdict.json"
+            verdict_file.write_text(json.dumps({"verdict": "pass", "issues": []}, indent=2),
+                                    encoding="utf-8")
+            return Result(ok=True, exit_code=0, channel=self.channel,
+                          text=report.read_text(encoding="utf-8"),
+                          report_files=[report], verdict_file=verdict_file, tool_version="fake-1.0")
         if self._kind_for(ctx.stage) == "report":
             # 报告类产物落在运行目录（git 之外），不进代码提交树（评审 B3）
             report_dir = Path(ctx.runs_dir) / "reports"

@@ -75,7 +75,8 @@ class UsageLedger:
                 self.final={'tokens':counter(usage['total_tokens'])+counter(usage.get('cache_read_tokens')),
                             'cli_reported_tokens':counter(usage['total_tokens']),
                             'cache_read_tokens':counter(usage.get('cache_read_tokens'))}
-                self.complete=True
+                status_val = event['result'].get('status')
+                self.complete = status_val in (None, 'SUCCESS')
 
     def _put(self,key,values):
         old=self.responses.get(key,{})
@@ -152,7 +153,7 @@ _ASSISTANT_STREAM_USAGE = {
 }
 _ASSISTANT_TOOL_NAMES = {
     'Read': 'read_file', 'Edit': 'edit_file', 'Write': 'write_file', 'Glob': 'glob', 'Grep': 'grep',
-    'read_file': 'read_file', 'edit': 'edit_file',
+    'read_file': 'read_file', 'edit': 'edit_file', 'write_file': 'write_file', 'glob': 'glob', 'grep': 'grep',
 }
 
 
@@ -196,6 +197,7 @@ class CLITrace:
         self.started=time.monotonic()
         self.start_wall=time.time()
         self.last_output=self.start_wall
+        self.last_output_mono=self.started
         self.last_save=0.0
         self.revision=0
         self.files={}
@@ -251,6 +253,7 @@ class CLITrace:
             if self.closed:return
             self.dirty=True
             self.last_output=time.time()
+            self.last_output_mono=time.monotonic()
             self._write(stream,self.redactors[stream].feed(text))
             if stream=='stderr' and self.channel=='cli_agy':
                 lines=(self.stderr_line+text).split('\n')
@@ -410,7 +413,10 @@ class CLITrace:
         if filename:
             try:
                 root=Path(self.ctx.workdir).resolve()
-                target=Path(filename)
+                norm_name=filename
+                if self.channel=='cli_doubao' and isinstance(norm_name,str) and norm_name.startswith('/workspace/'):
+                    norm_name=norm_name[len('/workspace/'):]
+                target=Path(norm_name)
                 # 文件工具的相对路径以子进程任务目录为准，不能借用编排器自身的 cwd。
                 if not target.is_absolute():target=root/target
                 self.current_file=self._scrub(target.resolve().relative_to(root).as_posix())[:240]
@@ -460,7 +466,7 @@ class CLITrace:
             if self.ctx.cancel_requested and self.ctx.cancel_requested():
                 self.reason = self.reason or 'cancelled'
             self._check_token_budget()
-            if time.time()-self.last_output>self.ctx.idle_timeout_s:self.reason=self.reason or 'idle_timeout'
+            if time.monotonic()-self.last_output_mono>self.ctx.idle_timeout_s:self.reason=self.reason or 'idle_timeout'
             if self.dirty or time.monotonic()-self.last_save>=2:self._save(force=not self.dirty)
             return self.reason
 
@@ -494,9 +500,14 @@ class CLITrace:
                 raise primary
 
 
-def partial_usage(stdout):
+def partial_usage(stdout, channel=''):
     ledger=UsageLedger()
+    extra=UsageLedger.observe_grok if channel=='cli_grok' else _ASSISTANT_STREAM_USAGE.get(channel)
     for line in stdout.splitlines():
-        try:ledger.observe(json.loads(line))
+        try:
+            event=json.loads(line)
+            ledger.observe(event)
+            if extra is not None and isinstance(event,dict):
+                extra(ledger,event)
         except (ValueError,TypeError):continue
     return {**ledger.snapshot(),'usage_unknown':True}

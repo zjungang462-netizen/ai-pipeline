@@ -191,11 +191,17 @@ class StageLock:
                     pass
         try:
             fd = os.open(self.lock_path, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
-        except FileExistsError:
+        except (FileExistsError, PermissionError):
             return False
-        with os.fdopen(fd, "w", encoding="utf-8") as f:
-            f.write(json.dumps({"pid": os.getpid(), "token": self.token,
-                                "ts": time.time()}))
+        except OSError:
+            return False
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as f:
+                f.write(json.dumps({"pid": os.getpid(), "token": self.token,
+                                    "ts": time.time()}))
+        except BaseException:
+            self.lock_path.unlink(missing_ok=True)
+            raise
         self._held = True
         return True
 

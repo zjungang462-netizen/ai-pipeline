@@ -50,14 +50,30 @@ def run_test_cmd(cmd: list[str], workdir: Path, timeout_s: int = 600,
             if resolved:
                 argv[0] = resolved
     stream_truncated = False
+    proc = None
+    from .process_tree import attach, close, creation_flags, terminate
     try:
         proc = subprocess.Popen(
             argv, cwd=str(workdir),
             env=env,
             stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
             start_new_session=os.name != "nt",
-            creationflags=subprocess.CREATE_NEW_PROCESS_GROUP if os.name == "nt" else 0,
+            creationflags=creation_flags(),
         )
+        try:
+            proc.__dict__['_pipeline_start_suspended'] = os.name == 'nt'
+            attach(proc)
+        except BaseException:
+            try:
+                proc.kill()
+                proc.wait(timeout=5)
+            except BaseException:
+                pass
+            try:
+                close(proc)
+            except BaseException:
+                pass
+            raise
         tails = [bytearray(), bytearray()]
         counts = [0, 0]
         def drain(pipe, index):
@@ -87,19 +103,24 @@ def run_test_cmd(cmd: list[str], workdir: Path, timeout_s: int = 600,
             if any(thread.is_alive() for thread in threads):
                 raise subprocess.TimeoutExpired(cmd, timeout_s)
         except subprocess.TimeoutExpired:
-            # 先处理子进程树，避免后代持有管道导致 communicate 永不返回。
-            if os.name == "nt":
-                try:
-                    subprocess.run(["taskkill", "/PID", str(proc.pid), "/T", "/F"],
-                                   stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-                                   env=build_subprocess_env(), timeout=5)
-                except (OSError, subprocess.TimeoutExpired):
-                    pass
-            else:
-                try:
-                    os.killpg(proc.pid, signal.SIGKILL)
-                except ProcessLookupError:
-                    pass
+            # 先处理子进程树，避免后代持有管道导致读取线程永不返回。
+            try:
+                grouped = terminate(proc)
+            except Exception:
+                grouped = False
+            if not grouped:
+                if os.name == "nt":
+                    try:
+                        subprocess.run(["taskkill", "/PID", str(proc.pid), "/T", "/F"],
+                                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                                       env=build_subprocess_env(), timeout=5)
+                    except (OSError, subprocess.TimeoutExpired):
+                        pass
+                else:
+                    try:
+                        os.killpg(proc.pid, signal.SIGKILL)
+                    except ProcessLookupError:
+                        pass
             if proc.poll() is None:
                 proc.kill()
             try:
@@ -126,11 +147,17 @@ def run_test_cmd(cmd: list[str], workdir: Path, timeout_s: int = 600,
         out = ""
         code = -1
         err = f"无法执行测试命令: {e}"
+    finally:
+        if proc is not None:
+            try:
+                close(proc)
+            except Exception:
+                pass
     duration = time.monotonic() - t0
     truncated = stream_truncated or len(out) > MAX_OUTPUT
     failure_ids = re.findall(r'(?m)^(?:FAIL|ERROR):\s*(.+)$', out)
     failure_ids += re.findall(r'(?m)^FAILED\s+([^\n]+)', out)
-    if re.search(r'Ran 0 tests\b', out):
+    if code == 0 and not err and re.search(r'Ran 0 tests\b', out):
         code, err = -1, '测试未收集到任何用例'
     return {
         "ok": code == 0,

@@ -79,8 +79,16 @@ class Store:
         try:
             yield
         finally:
+            conn = getattr(self._local, 'connection', None)
             self._local.connection = None
-            db.close()
+            if conn is not None:
+                conn.close()
+
+    def release_session(self):
+        conn = getattr(self._local, 'connection', None)
+        if conn is not None:
+            self._local.connection = None
+            conn.close()
 
     @contextmanager
     def connect(self):
@@ -118,6 +126,8 @@ class Store:
     def remove_project(self, key):
         with self.connect() as db:
             cur = db.execute('DELETE FROM projects WHERE id=?', (key,))
+            if cur.rowcount:
+                db.execute('DELETE FROM task_templates WHERE project_id=?', (key,))
         if cur.rowcount == 0:
             raise KeyError('项目未登记')
         return True
@@ -284,7 +294,10 @@ class Store:
         with self.connect() as db:
             old = db.execute('SELECT * FROM threads WHERE run_id=? AND idempotency=?', (run, idem)).fetchone()
             if old:
-                if old['question'] != question or old['roles'] != encode(roles):
+                old_snap = json.loads(old['snapshot']) if old['snapshot'] else {}
+                new_rt = snapshot.get('roundtable') if isinstance(snapshot, dict) else None
+                if (old['question'] != question or old['roles'] != encode(roles)
+                        or old['budget'] != budget or old_snap.get('roundtable') != new_rt):
                     raise Conflict('议题标识已使用')
                 return self._thread(old)
             key = identifier('topic')

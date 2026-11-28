@@ -5,6 +5,7 @@ import http.client
 import json
 from pathlib import Path
 import subprocess
+import sys
 import tempfile
 import threading
 import unittest
@@ -109,6 +110,199 @@ prompt = "编码：{{task}}"
             self.assertIn('人工审批附注与修订指令', after_prompt)
             self.assertIn('不要降级 pinia，只修改 README 端口', after_prompt)
             self.assertNotEqual(after_hash, before_hash)
+
+    def test_managed_project_roundtrip_preserves_api_connections_and_blocks_active_direct_run(self):
+        from orchestrator.collaboration import project_manager
+        from orchestrator.collaboration.service import Service
+        from orchestrator.collaboration.storage import Conflict
+        from orchestrator.state import StageLock
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            workdir = root / 'work'
+            workdir.mkdir()
+            service = Service(root / 'wb.sqlite3', [], recover=False)
+            self.addCleanup(service._background_sync.close)
+            stages = [
+                {'name': 'design', 'kind': 'report', 'adapter_type': 'openai_compat',
+                 'model': 'model-a', 'base_url': 'https://a.example/v1', 'api_key_env': 'KEY_A'},
+                {'name': 'review', 'kind': 'review', 'adapter_type': 'openai_compat',
+                 'model': 'model-b', 'base_url': 'http://127.0.0.1:9/v1', 'api_key_env': 'KEY_B',
+                 'allow_insecure_http': True, 'feedback_to': 'design'},
+            ]
+            created = project_manager.register_managed_project(service, {
+                'name': 'dual-api', 'workdir': str(workdir), 'stages': stages,
+            })
+            definition = project_manager.project_stage_definition(service, created['id'])
+            self.assertEqual(definition['stages'][0]['base_url'], 'https://a.example/v1')
+            self.assertEqual(definition['stages'][1]['base_url'], 'http://127.0.0.1:9/v1')
+            self.assertEqual(definition['stages'][1]['api_key_env'], 'KEY_B')
+            self.assertTrue(definition['stages'][1]['allow_insecure_http'])
+
+            payload = {
+                'name': 'dual-api', 'workdir': str(workdir), 'stages': definition['stages'],
+                'api_base_url': definition['api_base_url'], 'api_key_env': definition['api_key_env'],
+                'api_allow_insecure_http': definition['api_allow_insecure_http'],
+            }
+            project_manager.register_managed_project(service, payload)
+            cfg = load_config(created['config'])
+            self.assertEqual(cfg.adapters['design_agent'].options['base_url'], 'https://a.example/v1')
+            self.assertEqual(cfg.adapters['design_agent'].options['api_key_env'], 'KEY_A')
+            self.assertEqual(cfg.adapters['review_agent'].options['base_url'], 'http://127.0.0.1:9/v1')
+            self.assertEqual(cfg.adapters['review_agent'].options['api_key_env'], 'KEY_B')
+            self.assertIs(cfg.adapters['review_agent'].options['allow_insecure_http'], True)
+
+            run_key = service.store.register_run(created['id'], 'direct-cli', created['config'], cfg.state_dir)
+            run_dir = cfg.state_dir / 'runs' / 'direct-cli'
+            run_dir.mkdir(parents=True)
+            lock = StageLock(run_dir / '.run.lock')
+            self.assertTrue(lock.acquire())
+            try:
+                self.assertTrue(project_manager.has_active_project_work(service, created['id']))
+                before = Path(created['config']).read_bytes()
+                with self.assertRaises(Conflict):
+                    project_manager.register_managed_project(service, {
+                        **payload, 'stages': [{**stages[0], 'model': 'changed-model'}],
+                    })
+                self.assertEqual(Path(created['config']).read_bytes(), before)
+            finally:
+                lock.release()
+            self.assertFalse(project_manager.has_active_project_work(service, created['id']))
+            self.assertEqual(service.store.run(run_key)['run_id'], 'direct-cli')
+
+    def test_custom_test_command_is_not_silently_rounded_to_preset(self):
+        from orchestrator.collaboration import project_manager
+        from orchestrator.collaboration.service import Service
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            workdir = root / 'work'
+            workdir.mkdir()
+            managed = root / 'managed_projects'
+            managed.mkdir()
+            config = managed / 'custom.toml'
+            config.write_text(
+                f'state_dir = "{(root / "state").as_posix()}"\n'
+                f'task_workdir = "{workdir.as_posix()}"\n'
+                '[[stages]]\nname="verify"\nkind="test"\n'
+                'test_cmd=["python","-c","print(\'custom\')"]\n',
+                encoding='utf-8',
+            )
+            service = Service(root / 'wb.sqlite3', [config], recover=False)
+            self.addCleanup(service._background_sync.close)
+            project_id = service.store.projects()[0]['id']
+            definition = project_manager.project_stage_definition(service, project_id)
+            self.assertEqual(definition['stages'][0]['test_preset'], 'custom')
+            before = config.read_bytes()
+
+            with self.assertRaisesRegex(ValueError, '测试预设'):
+                project_manager.register_managed_project(service, {
+                    'name': 'custom', 'workdir': str(workdir), 'stages': definition['stages'],
+                })
+            self.assertEqual(config.read_bytes(), before)
+
+    def test_corrupted_managed_config_can_be_repaired_after_active_work_stops(self):
+        from orchestrator.collaboration import project_manager
+        from orchestrator.collaboration.service import Service
+        from orchestrator.collaboration.storage import Conflict
+        from orchestrator.state import StageLock
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            workdir = root / 'work'
+            workdir.mkdir()
+            service = Service(root / 'wb.sqlite3', [], recover=False)
+            self.addCleanup(service._background_sync.close)
+            payload = {'name': 'repair', 'workdir': str(workdir), 'preset': 'review_only'}
+            created = project_manager.register_managed_project(service, payload)
+            cfg = load_config(created['config'])
+            service.store.register_run(created['id'], 'active-run', created['config'], cfg.state_dir)
+            run_dir = cfg.state_dir / 'runs' / 'active-run'
+            run_dir.mkdir(parents=True)
+            lock = StageLock(run_dir / '.run.lock')
+            self.assertTrue(lock.acquire())
+            config_path = Path(created['config'])
+            config_path.write_text('{invalid', encoding='utf-8')
+            before = config_path.read_bytes()
+            try:
+                with self.assertRaises(Conflict):
+                    project_manager.register_managed_project(service, payload)
+                self.assertEqual(config_path.read_bytes(), before)
+            finally:
+                lock.release()
+
+            from orchestrator.collaboration import arena_jobs
+            job_dir = arena_jobs._root(cfg, created['id']) / ('arena-' + '0' * 32)
+            job_dir.mkdir(parents=True)
+            state_path = job_dir / 'state.json'
+            state_path.write_text('{"status":"running"}', encoding='utf-8')
+            worker_lock = StageLock(job_dir / '.worker.lock')
+            self.assertTrue(worker_lock.acquire())
+            try:
+                with self.assertRaises(Conflict):
+                    project_manager.register_managed_project(service, payload)
+            finally:
+                worker_lock.release()
+            state_path.write_text('{"status":"done"}', encoding='utf-8')
+
+            project_manager.register_managed_project(service, payload)
+            self.assertTrue(load_config(config_path).stages)
+
+    def test_restarted_service_detects_surviving_discussion_process_lock(self):
+        from orchestrator.collaboration import project_manager
+        from orchestrator.collaboration.service import Service
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            workdir = root / 'work'
+            workdir.mkdir()
+            state_dir = root / 'state'
+            config = root / 'pipeline.toml'
+            config.write_text(
+                f'state_dir = "{state_dir.as_posix()}"\n'
+                f'task_workdir = "{workdir.as_posix()}"\n'
+                '[[stages]]\nname="testing"\nkind="test"\n'
+                'test_cmd=["python","-c","pass"]\n', encoding='utf-8')
+            service = Service(root / 'wb.sqlite3', [config], recover=False)
+            self.addCleanup(service._background_sync.close)
+            project = service.store.projects()[0]['id']
+            run = service.store.register_run(project, 'restart-run', config, state_dir)
+            topic = service.store.create_thread(
+                run, 'question', ['developer'], 1000, {}, 'restart-topic-001')
+            restarted = Service(root / 'wb.sqlite3', [], recover=False)
+            self.addCleanup(restarted._background_sync.close)
+            lock_path = state_dir / 'discussions' / topic['id'] / '.discussion.lock'
+            child_code = (
+                'import json, os, sys\n'
+                'path = sys.argv[1]\n'
+                'os.makedirs(os.path.dirname(path), exist_ok=True)\n'
+                'fd = os.open(path, os.O_CREAT | os.O_EXCL | os.O_WRONLY)\n'
+                'with os.fdopen(fd, "w", encoding="utf-8") as stream:\n'
+                '    json.dump({"pid": os.getpid()}, stream)\n'
+                'print("ready", flush=True)\n'
+                'sys.stdin.read()\n'
+            )
+            process = subprocess.Popen(
+                [sys.executable, '-u', '-c', child_code, str(lock_path)],
+                stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                text=True, encoding='utf-8')
+            try:
+                self.assertEqual(process.stdout.readline().strip(), 'ready')
+                self.assertFalse(restarted.active)
+                self.assertFalse(restarted.active_topics)
+                self.assertTrue(project_manager.has_active_project_work(restarted, project))
+            finally:
+                if process.poll() is None:
+                    process.terminate()
+                process.wait(timeout=5)
+                process.stdin.close()
+                process.stdout.close()
+                process.stderr.close()
+            self.assertFalse(project_manager.has_active_project_work(restarted, project))
+            lock_path.write_text('{invalid', encoding='utf-8')
+            self.assertFalse(project_manager.has_active_project_work(restarted, project))
+            lock_path.unlink()
+            self.assertFalse(project_manager.has_active_project_work(restarted, project))
 
     def test_dashboard_http_project_register_lessons_and_route_recommend(self):
         td = tempfile.TemporaryDirectory()

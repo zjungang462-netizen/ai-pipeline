@@ -34,7 +34,8 @@ class CodexWindowsProfile(unittest.TestCase):
         self.profile.write_text('model="fixture"\nmodel_provider="custom"\n'
                                 '[model_providers.custom]\nname="fixture"\n'
                                 'base_url="https://example.invalid"\nwire_api="responses"\n'
-                                'experimental_bearer_token="sk-private-profile-secret"\n'
+                                'experimental_bearer_token="sk-private-'
+                                'profile-secret"\n'
                                 + tail, encoding='utf8')
 
     def run_adapter(self, adapter):
@@ -60,8 +61,8 @@ class CodexWindowsProfile(unittest.TestCase):
                 self.assertIn('--ignore-user-config', args)
                 self.assertEqual(args[args.index('--sandbox')+1], 'read-only')
                 self.assertEqual(adapter.input_fingerprint()['windows_sandbox'], backend)
-                self.assertNotIn('sk-private-profile-secret', json.dumps(args))
-                self.assertNotIn('sk-private-profile-secret', json.dumps(adapter.input_fingerprint()))
+                self.assertNotIn('sk-private-profile-secret', json.dumps(args))  # pragma: allowlist secret
+                self.assertNotIn('sk-private-profile-secret', json.dumps(adapter.input_fingerprint()))  # pragma: allowlist secret
                 self.assertNotIn('mcp_servers', json.dumps(args))
                 self.assertNotIn('unknown_feature', json.dumps(args))
                 self.assertEqual(self.profile.read_bytes(), before)

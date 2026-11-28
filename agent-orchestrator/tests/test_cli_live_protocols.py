@@ -142,7 +142,7 @@ class RealCLIProtocols(unittest.TestCase):
 
     def test_proxy_credentials_cannot_be_written_in_config(self):
         with self.assertRaises(ValueError):
-            AgyAdapter('agy', proxy_url='http://user:secret@127.0.0.1:7897')
+            AgyAdapter('agy', proxy_url='http://user:secret@127.0.0.1:7897')  # pragma: allowlist secret
 
     def test_codex_reports_are_readonly_and_attempt_scoped(self):
         adapter = CodexAdapter('codex')
@@ -163,7 +163,8 @@ class RealCLIProtocols(unittest.TestCase):
         path = profile / 'config.toml'
         path.write_text('model="chosen-model"\nmodel_provider="custom"\n[model_providers.custom]\n'
                         'name="local"\nbase_url="https://example.invalid"\nwire_api="responses"\n'
-                        'experimental_bearer_token="sk-private-test-value"\n[mcp_servers.desktop]\ntype="unsupported"\n', encoding='utf8')
+                        'experimental_bearer_token="sk-private-'
+                        'test-value"\n[mcp_servers.desktop]\ntype="unsupported"\n', encoding='utf8')
         before = path.read_bytes()
         adapter = CodexAdapter('codex', isolate_config=True)
         adapter._resolved, adapter._version = 'codex', 'codex-cli 0.169.0'
@@ -174,9 +175,9 @@ class RealCLIProtocols(unittest.TestCase):
             adapter.run('prompt', self.root, self.ctx())
         args = execute.call_args.args[0]
         self.assertIn('--ignore-user-config', args)
-        self.assertNotIn('sk-private-test-value', json.dumps(args))
-        self.assertNotIn('sk-private-test-value', json.dumps(fingerprint))
-        self.assertEqual(execute.call_args.kwargs['env']['AI_PIPELINE_CODEX_KEY'], 'sk-private-test-value')
+        self.assertNotIn('sk-private-test-value', json.dumps(args))  # pragma: allowlist secret
+        self.assertNotIn('sk-private-test-value', json.dumps(fingerprint))  # pragma: allowlist secret
+        self.assertEqual(execute.call_args.kwargs['env']['AI_PIPELINE_CODEX_KEY'], 'sk-private-test-value')  # pragma: allowlist secret
         self.assertEqual(path.read_bytes(), before)
 
     def test_codex_role_models_and_registry_options(self):

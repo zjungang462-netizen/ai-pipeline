@@ -34,6 +34,7 @@ def recover_pending_usage(state):
         known=counter(usage.get('known_tokens')) if isinstance(usage,dict) else 0
         stage=record['stage']
         elapsed=min(max(0,time.time()-record['started_at']),record['timeout_s'])
+        total['model_calls']=total.get('model_calls',0)+1
         total['unknown_calls']=total.get('unknown_calls',0)+1
         total['tokens']+=known
         total['reported_tokens']+=known
@@ -42,6 +43,7 @@ def recover_pending_usage(state):
         used=state.stage_usage.setdefault(stage,{'tokens':0,'duration_s':0.0})
         used['tokens']+=known
         used['duration_s']+=elapsed
+        used['unknown_calls']=used.get('unknown_calls',0)+1
         state.log_event('inflight_reserved',stage,call=identifier,reserved_tokens=record['tokens'],known_tokens=known)
         recovered.append((identifier,record))
     return recovered

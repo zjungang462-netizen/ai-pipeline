@@ -54,6 +54,7 @@ class DshProtocol(unittest.TestCase):
         execute.assert_called_once()
         self.assertEqual(execute.call_args.args[0], ['dsh', '--version'])
     def test_stdin_flags_and_explicit_environment_remain_separate(self):
+        self.ctx.kind='code'
         a=build_adapter(AdapterConfig('dsh','cli_dsh',{'permission_mode':'workspace-write',
                'proxy_url':'http://127.0.0.1:7897','extra_env':['DEEPSEEK_API_KEY']}))
         a._resolved='dsh';a._version='0.2.2-rc.3'
@@ -62,6 +63,14 @@ class DshProtocol(unittest.TestCase):
         args=execute.call_args.args[0];self.assertEqual(args[-2:],['--','-'])
         self.assertNotIn('private prompt',args);self.assertIn('workspace-write',args)
         self.assertEqual(execute.call_args.kwargs['input'],'private prompt');self.assertTrue(r.ok)
+    def test_report_context_forces_read_only(self):
+        a=DshAdapter('dsh',permission_mode='workspace-write')
+        a._resolved='dsh';a._version='0.2.2-rc.3'
+        with mock.patch('orchestrator.adapters.cli_base.run_cli_process',return_value=subprocess.CompletedProcess([],0,self.raw,'')) as execute:
+            a.run('private prompt',self.root,self.ctx)
+        args=execute.call_args.args[0]
+        self.assertEqual(args[args.index('--permission-mode')+1],'read-only')
+        self.assertNotIn('workspace-write',args)
     def test_no_full_access_or_proxy_embedded_credentials(self):
         with self.assertRaises(ValueError):DshAdapter('dsh',permission_mode='full-access')
         with self.assertRaises(ValueError):DshAdapter('dsh',proxy_url='http://'+'user:secret@localhost')

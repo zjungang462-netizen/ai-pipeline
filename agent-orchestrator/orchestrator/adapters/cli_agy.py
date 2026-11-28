@@ -84,7 +84,7 @@ class AgyAdapter(CLIAdapter):
             # 1.5.9 的 --print 需要附着值；NDJSON 把完整提示词留在 stdin。
             args = ['--print=', '--input-format', 'stream-json', '--output-format', 'stream-json',
                     '--mode', 'accept-edits' if ctx.kind == 'code' else 'plan',
-                    '--sandbox', '--print-timeout', str(ctx.timeout_s or self.timeout_s) + 's',
+                    '--sandbox', '--print-timeout', str(max(1, int(ctx.timeout_s or self.timeout_s))) + 's',
                     '--add-dir', str(workdir)]
             if self.model:
                 args += ['--model', self.model]
@@ -117,12 +117,16 @@ class AgyAdapter(CLIAdapter):
             usage['cli_reported_tokens'] = reported['total_tokens']
             usage['tokens'] = reported['total_tokens'] + usage.get('cache_read_tokens', 0)
             usage['accounting'] = 'conservative_total_plus_cache_read'
+            if proc.returncode != 0 or final.get('status') != 'SUCCESS':
+                usage['usage_unknown'] = True
         init = next((e['init'] for e in events if e.get('event') == 'init' and isinstance(e.get('init'), dict)), {})
         if isinstance(init.get('model'), str):
             usage['model'] = init['model']
         if proc.returncode != 0:
-            kind = ErrorKind.AUTH if ("auth" in stderr.lower() or "login" in stderr.lower()
-                                      or "sign" in stderr.lower()) else ErrorKind.CRASH
+            err_lower = stderr.lower()
+            kind = ErrorKind.AUTH if any(
+                k in err_lower for k in ("auth", "login", "log in", "sign in", "sign-in", "unauthenticated")
+            ) else ErrorKind.CRASH
             return Result(ok=False, exit_code=proc.returncode, channel=self.channel,
                           stdout=stdout, stderr=stderr, text=stdout,
                           tool_version=self._version, error_kind=kind, usage=usage)

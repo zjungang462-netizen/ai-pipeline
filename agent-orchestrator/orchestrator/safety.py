@@ -69,6 +69,8 @@ def relative_target(root: Path, name: str) -> Path:
         resolved_parts = target.relative_to(root).parts
     except ValueError:
         raise WriteRootViolation(f"路径指向工作区外: {name}") from None
+    if not resolved_parts:
+        raise WriteRootViolation(f"非法相对路径: {name}")
     if any(is_git_component(p) for p in resolved_parts):
         raise WriteRootViolation(f"禁止访问 .git 内部: {name}")
     return target
@@ -100,7 +102,7 @@ class WriteRootGuard:
         for root in self.roots:
             if t == root or root in t.parents:
                 # 禁止写入 .git 内部
-                if ".git" in t.relative_to(root).parts:
+                if any(is_git_component(p) for p in t.relative_to(root).parts):
                     raise WriteRootViolation(f"禁止写入 .git 内部: {t}")
                 return
         raise WriteRootViolation(f"越界写入（不在可写根内）: {t}")
@@ -320,6 +322,7 @@ def preflight_cli(adapter_name: str, exe_name: str, configured: str | None,
     if version_args:
         try:
             proc = subprocess.run([exe, *version_args], capture_output=True,
+                                  env=build_subprocess_env(),
                                   text=True, encoding="utf-8", errors="replace", timeout=30)
             version = (proc.stdout or proc.stderr).strip().splitlines()[0] if (proc.stdout or proc.stderr) else None
         except (OSError, subprocess.TimeoutExpired):

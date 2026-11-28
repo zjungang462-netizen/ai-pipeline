@@ -40,7 +40,7 @@
   </aside>
   <main>
     <header class="topbar">
-      <div class="topbar-location"><button id="sidebar-toggle" class="icon-button mobile-menu" aria-label="展开任务列表" aria-expanded="false">☰</button><span id="breadcrumb" data-i18n="breadcrumb.overview">工作空间 / 运行概览</span></div>
+      <div class="topbar-location"><button id="sidebar-toggle" class="icon-button mobile-menu" aria-label="展开任务列表" data-i18n-aria="sidebar.toggleAria" aria-expanded="false">☰</button><span id="breadcrumb" data-i18n="breadcrumb.overview">工作空间 / 运行概览</span></div>
       <div class="topbar-right">
         <button id="cmd-open" type="button" class="kbd-btn" title="打开全局命令面板 (Ctrl+K)" data-i18n="cmd.open" data-i18n-title="cmd.openTitle">⌘K 命令面板</button>
         <button id="language-toggle" type="button" class="language-btn" aria-pressed="false">中文 / EN</button>
@@ -152,7 +152,7 @@
     <div class="insights-grid"><label><span data-i18n="insights.gitProject">选择 Git 项目</span><select id="arena-project"></select></label><label><span data-i18n="insights.testPreset">验收测试（采纳时必需）</span><select id="arena-test-preset"><option value="" data-i18n="insights.noTests">不跑测试，仅比对 Diff</option><option value="pytest">pytest (python -m pytest -q)</option><option value="python_unittest">unittest</option><option value="npm_test">npm test</option><option value="npm_run_build">npm run build</option></select></label></div>
     <div class="insights-grid">
       <label><span data-i18n="insights.candidateA">方案 A 工具与模型</span><div class="arena-pair"><select id="arena-type-a"><option value="cli_agy" data-i18n="insights.antigravity">反重力 CLI</option><option value="cli_codex">Codex CLI</option><option value="cli_claude">Claude Code</option><option value="cli_qwen">Qwen CLI</option><option value="cli_qoder">Qoder CLI</option></select><input id="arena-model-a" value="gemini-3.8-flash-high" maxlength="160" placeholder="模型 ID" data-i18n-placeholder="insights.modelId"></div></label>
-      <label><span data-i18n="insights.candidateB">方案 B 工具与模型</span><div class="arena-pair"><select id="arena-type-b"><option value="cli_agy" data-i18n="insights.antigravity">反重力 CLI</option><option value="cli_codex">Codex CLI</option><option value="cli_claude">Claude Code</option><option value="cli_qwen">Qwen CLI</option><option value="cli_qoder">Qoder CLI</option></select><input id="arena-model-b" value="claude-sonnet-5-5-high" maxlength="160" placeholder="模型 ID" data-i18n-placeholder="insights.modelId"></div></label>
+      <label><span data-i18n="insights.candidateB">方案 B 工具与模型</span><div class="arena-pair"><select id="arena-type-b"><option value="cli_agy" data-i18n="insights.antigravity">反重力 CLI</option><option value="cli_codex">Codex CLI</option><option value="cli_claude">Claude Code</option><option value="cli_qwen">Qwen CLI</option><option value="cli_qoder">Qoder CLI</option></select><input id="arena-model-b" value="claude-sonnet-4-6" maxlength="160" placeholder="模型 ID" data-i18n-placeholder="insights.modelId"></div></label>
     </div>
     <label class="task-desc-field"><span data-i18n="insights.allowedFiles">允许改动的文件（每行一个相对路径，留空沿用项目白名单）</span><textarea id="arena-allowed-files" rows="2" placeholder="src/utils/retry.py"></textarea></label>
     <label class="task-desc-field"><span data-i18n="insights.arenaTask">竞技场编码任务</span><textarea id="arena-task" rows="3" maxlength="16000" placeholder="例如：修复 src/utils/retry.py 中的退避上限边界并补充单测…" data-i18n-placeholder="insights.arenaTaskPlaceholder"></textarea></label>

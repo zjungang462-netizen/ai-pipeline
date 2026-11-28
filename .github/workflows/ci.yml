@@ -35,16 +35,37 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: '22'
-      - name: Check configuration and incremental credentials
+      - name: Check configuration and credentials
         working-directory: agent-orchestrator
         env:
           BEFORE: ${{ github.event.before }}
           BASE_BRANCH: ${{ github.base_ref }}
         run: |
+          $scanAll = $false
           $base = $env:BEFORE
-          if ($env:BASE_BRANCH) { $base = git merge-base HEAD "origin/$env:BASE_BRANCH" }
-          if (-not $base -or $base -match '^0+$') { $base = git rev-parse HEAD^ }
-          python scripts/precommit.py --checks-only --base-ref $base
+          if ($env:BASE_BRANCH) {
+            $base = git merge-base HEAD "origin/$env:BASE_BRANCH"
+            if ($LASTEXITCODE -ne 0 -or -not $base) { throw '无法确定 PR 凭据扫描基线，拒绝继续' }
+          }
+          if ($env:GITHUB_EVENT_NAME -eq 'workflow_dispatch') {
+            $scanAll = $true
+            $base = 'HEAD'
+          } elseif (-not $base -or $base -match '^0+$') {
+            if ($env:GITHUB_EVENT_NAME -eq 'push') {
+              $scanAll = $true
+              $base = 'HEAD'
+            } else {
+              throw '无法确定凭据扫描基线，拒绝继续'
+            }
+          }
+          if ($scanAll) {
+            $scanArgs = @('--scan-all')
+          } else {
+            git cat-file -e "$base^{commit}" 2>$null
+            if ($LASTEXITCODE -ne 0) { throw '推送前基线不可用，拒绝降级为不完整扫描' }
+            $scanArgs = @('--base-ref', $base)
+          }
+          python scripts/precommit.py --checks-only @scanArgs
       - name: Offline judge demo through approval
         run: python -X utf8 agent-orchestrator/scripts/verify_judge_demo.py
       - name: Quick offline acceptance
@@ -71,6 +92,7 @@ jobs:
           path: |
             ci-evidence/
             ci-benchmark/
+          overwrite: true
           retention-days: 14
   # 快速集不含 CLI 可靠性等慢模块；全量至少在 Windows 上对每个候选提交跑一次。
   full:
@@ -107,4 +129,5 @@ jobs:
         with:
           name: offline-full-${{ github.sha }}
           path: ci-evidence-full/
+          overwrite: true
           retention-days: 14

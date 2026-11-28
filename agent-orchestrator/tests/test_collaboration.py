@@ -1,4 +1,5 @@
 """协作存储、进程控制和本地接口的实际文件与 HTTP 回归。"""
+import hashlib
 import http.client
 import json
 import sys
@@ -11,7 +12,7 @@ from unittest import mock
 
 from orchestrator.collaboration.service import Service
 from orchestrator.collaboration.storage import Store, Conflict
-from orchestrator.collaboration.projection import directory
+from orchestrator.collaboration.projection import directory, project
 from orchestrator.dashboard.server import create_server
 from orchestrator.config import load_config
 
@@ -74,6 +75,37 @@ class Collaboration(unittest.TestCase):
         events = store.events('run')
         self.assertEqual(len(events), 3)
         self.assertEqual(store.events('run', events[0]['cursor']), events[1:])
+
+    def test_projection_message_conflict_does_not_advance_offset(self):
+        from orchestrator.state import atomic_write_json
+
+        store = Store(self.root / 'projection.sqlite3')
+        project_id = store.register_project(self.config)
+        run_id = 'conflict-run'
+        state_dir = self.root / 'state'
+        run_key = store.register_run(project_id, run_id, self.config, state_dir)
+        root = state_dir / 'runs' / run_id
+        attempt = root / 'stages' / 'verify' / 'attempts' / '1'
+        attempt.mkdir(parents=True)
+        atomic_write_json(root / 'state.json', {
+            'task': 'conflict', 'stages': {'verify': {'status': 'done'}}, 'events': [],
+        })
+        atomic_write_json(root / 'job.json', {'status': 'done'})
+        atomic_write_json(attempt / 'success.json', {})
+        (attempt / 'final_text.txt').write_text('new body', encoding='utf8')
+        idem = run_key + ':output:verify:1'
+        message_key = 'msg-' + hashlib.sha256(idem.encode()).hexdigest()[:24]
+        store.message(run_key, 'old body', idem, key=message_key)
+
+        with self.assertRaises(Conflict):
+            project(store, store.run(run_key))
+        with store.connect() as db:
+            offset = db.execute('SELECT 1 FROM projection_offsets WHERE run_id=?', (run_key,)).fetchone()
+        self.assertIsNone(offset)
+        with store.connect() as db:
+            message = db.execute('SELECT body FROM messages WHERE run_id=? AND idempotency=?',
+                                 (run_key, idem)).fetchone()
+        self.assertEqual(message['body'], 'old body')
 
     def test_atomic_state_replace_retries_transient_windows_read_lock(self):
         import os

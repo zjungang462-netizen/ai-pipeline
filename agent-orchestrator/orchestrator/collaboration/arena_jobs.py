@@ -108,8 +108,7 @@ def _snapshot(path, cfg, *, include_result=False):
     return result
 
 
-def _jobs(cfg, project_id):
-    root = _root(cfg, project_id)
+def _job_paths(root):
     if not root.is_dir():
         return
     for path in root.iterdir():
@@ -117,8 +116,22 @@ def _jobs(cfg, project_id):
             yield path
 
 
+def _jobs(cfg, project_id):
+    return _job_paths(_root(cfg, project_id))
+
+
 def has_active_job(cfg, project_id):
-    return any(_state(path)['status'] not in TERMINAL for path in _jobs(cfg, project_id))
+    return has_active_job_in(cfg.state_dir, project_id)
+
+
+def has_active_job_in(state_dir, project_id):
+    root = Path(state_dir) / 'arena_jobs' / _digest(project_id)
+    return any(_state(path)['status'] not in TERMINAL for path in _job_paths(root))
+
+
+def has_idempotent_job(cfg, project_id, idem):
+    job_id = 'arena-' + _digest([project_id, idem])[:32]
+    return (_root(cfg, project_id) / job_id / 'state.json').is_file()
 
 
 def list_jobs(cfg, project_id):

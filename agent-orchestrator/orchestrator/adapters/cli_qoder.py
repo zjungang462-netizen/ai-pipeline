@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import math
+import re
 import subprocess
 from pathlib import Path
 
@@ -78,11 +79,15 @@ class QoderAdapter(CLIAdapter):
         stdout = strip_ansi(proc.stdout or "")
         stderr = strip_ansi(proc.stderr or "")
         if proc.returncode != 0:
-            kind = ErrorKind.AUTH if ("auth" in stderr.lower() or "token" in stderr.lower()
-                                      or "login" in stderr.lower()) else ErrorKind.CRASH
+            err_lower = stderr.lower()
+            kind = ErrorKind.AUTH if (
+                any(k in err_lower for k in ("auth", "login", "not logged", "access token", "invalid token"))
+                or re.search(r'\b(?:401|403)\b', err_lower)
+            ) else ErrorKind.CRASH
             if self._version == SUPPORTED_VERSION and stdout.strip():
-                result=self._parse_1189(proc,stdout,stderr)
-                result.ok=False;result.error_kind=kind
+                result = self._parse_1189(proc, stdout, stderr)
+                result.ok = False
+                result.error_kind = kind
                 return result
             return Result(ok=False, exit_code=proc.returncode, channel=self.channel,
                           stdout=stdout, stderr=stderr, text=stdout,

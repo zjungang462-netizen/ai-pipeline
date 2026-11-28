@@ -178,6 +178,29 @@ class BackgroundSyncTests(unittest.TestCase):
         self.s.sync(incremental=True)
         self.assertEqual(self.count_offsets(),3)
 
+    def test_incremental_projection_errors_are_redacted_bounded_and_cleared(self):
+        entries=self.seed_many(range(2))
+        secret='sync-error-private-token-123456'
+        def fail(store,run,cache):
+            label='first' if run['id']==entries[0][0] else 'second'
+            raise OSError(f'{label} projection failure: {secret} '+('x'*600))
+        with mock.patch.dict(os.environ,{'SYNC_ERROR_TOKEN':secret}), \
+                mock.patch.object(background_sync,'project',fail):
+            stats=self.s.sync(incremental=True)
+        self.assertEqual(stats['errors'],2)
+        self.assertIn('first projection failure',stats['last_error'])
+        self.assertNotIn('second projection failure',stats['last_error'])
+        self.assertNotIn(secret,stats['last_error'])
+        self.assertIn('[REDACTED]',stats['last_error'])
+        self.assertLessEqual(len(stats['last_error']),500)
+        self.assertEqual(self.s.last_sync_error,stats['last_error'])
+        self.assertEqual(self.s.last_sync_stats['last_error'],stats['last_error'])
+        stats=self.s.sync(incremental=True)
+        self.assertEqual(stats['errors'],0)
+        self.assertEqual(stats['last_error'],'')
+        self.assertEqual(self.s.last_sync_error,'')
+        self.assertEqual(self.count_offsets(),2)
+
     def test_directory_handles_close_and_closed_sync_stops_scanning(self):
         self.seed_many(range(51))
         self.s.sync(incremental=True)
@@ -264,6 +287,8 @@ class BackgroundSyncTests(unittest.TestCase):
         (entries[0][1]/'state.json').write_text(json.dumps({'stages':[]}),encoding='utf8')
         stats=self.s.sync(incremental=True)
         self.assertGreaterEqual(stats['errors'],1)
+        self.assertTrue(stats['last_error'])
+        self.assertEqual(self.s.last_sync_error,stats['last_error'])
         self.assertEqual(self.count_offsets(),2)
         summaries={r['run_id']:r for r in self.s.list_runs()}
         self.assertEqual(summaries['r-0000']['task'],'')

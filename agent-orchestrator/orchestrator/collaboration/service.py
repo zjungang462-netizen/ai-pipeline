@@ -1,6 +1,7 @@
 """本地控制服务，不接受浏览器提供的任意磁盘路径或命令。"""
 from __future__ import annotations
 
+from collections import OrderedDict
 import base64
 import hashlib
 import json
@@ -15,22 +16,48 @@ from ..config import load_config
 from ..safety import environment_secrets
 from ..state import RunState, atomic_write_json
 from .storage import Store, Conflict, identifier
-from .projection import project, directory, lifecycle, artifact_list, read_json, stage_target, SummaryCache
+from .projection import ProjectionCache, project, directory, lifecycle, artifact_list, read_json, stage_target, SummaryCache
 from .execution_scope import execution_scope, is_verified_showcase
 from .read_cache import ReadCache, file_stamp
 from . import run_listing
 
 
+class _ProcessMap(dict):
+    """兼容 dict，迭代时返回受锁保护的快照元组以避免并发修改异常。"""
+    def __init__(self, lock: threading.RLock):
+        super().__init__()
+        self._lock = lock
+
+    def values(self):
+        with self._lock:
+            return tuple(super().values())
+
+    def items(self):
+        with self._lock:
+            return tuple(super().items())
+
+    def keys(self):
+        with self._lock:
+            return tuple(super().keys())
+
+    def __iter__(self):
+        with self._lock:
+            return iter(tuple(super().keys()))
+
+
 class Service:
+    _CONFIG_CACHE_LIMIT = 128
+
     def __init__(self, database, configs, *, recover=True):
         self.store = Store(database)
         self.recover = recover
         self.operations = threading.RLock()
-        self.active = {}
-        self.active_topics = {}
+        self._config_lock = threading.RLock()
+        self.active = _ProcessMap(self.operations)
+        self.active_topics = _ProcessMap(self.operations)
         self._command_waiters = set()
-        self._configs = {}
-        self._projection_cache = {}
+        self._configs = OrderedDict()
+        self._projection_cache = ProjectionCache(512)
         self._summary_cache = SummaryCache()
         self._room_artifacts = ReadCache(64)
         self._room_json = ReadCache(256)
@@ -53,11 +80,35 @@ class Service:
     def config(self, path):
         key = str(path)
         signature = file_stamp(Path(path))
-        cached = self._configs.get(key)
-        if cached is None or cached[0] != signature:
-            cached = (signature, load_config(path))
-            self._configs[key] = cached
-        return cached[1]
+        with self._config_lock:
+            cached = self._configs.get(key)
+            if cached is not None and cached[0] == signature:
+                self._configs.move_to_end(key)
+                return cached[1]
+        loaded = load_config(path)
+        with self._config_lock:
+            self._configs[key] = (signature, loaded)
+            self._configs.move_to_end(key)
+            while len(self._configs) > self._CONFIG_CACHE_LIMIT:
+                self._configs.popitem(last=False)
+        return loaded
+
+    def drop_config(self, path):
+        with self._config_lock:
+            self._configs.pop(str(path), None)
+
+    def _watch_child(self, registry, item_key, proc):
+        with self.operations:
+            if len(registry) > 64:
+                for k, p in registry.items():
+                    if k != item_key and p.poll() is not None:
+                        registry.pop(k, None)
+        def _reap():
+            try:
+                proc.wait()
+            except Exception:
+                pass
+        threading.Thread(target=_reap, daemon=True).start()
 
     def redact(self, value):
         secrets = environment_secrets()
@@ -96,7 +147,11 @@ class Service:
         with self._sync_lock:
             stats = self._background_sync.sync(recover, incremental)
             self.last_sync_stats = dict(stats)
-            self.last_sync_error = ''
+            if stats.get('errors') or stats.get('last_error'):
+                self.last_sync_error = self.redact(
+                    stats.get('last_error') or self.last_sync_error)[:500]
+            else:
+                self.last_sync_error = ''
             return stats
 
     def sync_run_events(self, run):
@@ -265,6 +320,9 @@ class Service:
                                  if r['id'] != parent and self._summary_cache.read(r)[1] in unfinished), None)
                 if blocking:
                     raise Conflict('此项目已有未结束任务；请先处理或取消', blocking)
+                from .arena_jobs import has_active_job
+                if has_active_job(cfg, project_id):
+                    raise Conflict('该项目尚有运行中的任务或会诊，请先停止后再创建任务')
                 if parent:
                     from .config_copy import derive
                     cfg = load_config(derive(original, run_id))
@@ -301,11 +359,13 @@ class Service:
             if os.environ.get('PIPELINE_STREAM_DISCUSSION') == '1':
                 allow.append('PIPELINE_STREAM_DISCUSSION')
             with (directory(run) / 'manager.log').open('ab') as log:
-                self.active[key] = subprocess.Popen(
+                proc = subprocess.Popen(
                     [sys.executable, '-X', 'utf8', '-m', 'orchestrator.collaboration.runner', str(self.store.path), key],
                     cwd=Path(__file__).resolve().parents[2], env=build_subprocess_env(allow),
                     stdout=log, stderr=subprocess.STDOUT, start_new_session=os.name != 'nt',
                     creationflags=subprocess.CREATE_NEW_PROCESS_GROUP if os.name == 'nt' else 0)
+                self.active[key] = proc
+                self._watch_child(self.active, key, proc)
 
     def _run(self, key):
         run = self.store.run(key)
@@ -479,12 +539,14 @@ class Service:
             if lock and _pid_alive(lock.get('pid')):
                 return
             with (base / 'worker.log').open('ab') as log:
-                self.active_topics[topic] = subprocess.Popen(
+                proc = subprocess.Popen(
                     [sys.executable, '-X', 'utf8', '-m', 'orchestrator.collaboration.discussion_runner',
                      str(self.store.path), topic], cwd=Path(__file__).resolve().parents[2],
                     env=build_subprocess_env(allow), stdout=log, stderr=subprocess.STDOUT,
                     start_new_session=os.name != 'nt',
                     creationflags=subprocess.CREATE_NEW_PROCESS_GROUP if os.name == 'nt' else 0)
+                self.active_topics[topic] = proc
+                self._watch_child(self.active_topics, topic, proc)
 
     def _discuss(self, topic):
         from .discussion import execute

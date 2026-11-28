@@ -11,7 +11,7 @@ from pathlib import Path
 
 from ..cli_telemetry import UsageLedger
 from ..contracts import ErrorKind, PreflightReport, Result, RunContext
-from ..safety import WriteRootViolation, build_subprocess_env, resolve_exe
+from ..safety import WriteRootViolation, build_subprocess_env, is_secret_env_name, resolve_exe
 from ..state import sha256_file
 from .cli_base import CLIAdapter, run_cli_process
 from .cli_result_stream import ResultStream
@@ -104,7 +104,7 @@ class GrokAdapter(CLIAdapter):
                 raise ValueError
             secrets = tuple(value for record in records.values() if isinstance(record, dict)
                             for key, value in record.items() if isinstance(value, str)
-                            and (key == 'key' or 'token' in key.lower()))
+                            and (key == 'key' or 'token' in key.lower() or is_secret_env_name(key)))
             if not secrets:
                 raise ValueError
         except (OSError, ValueError):

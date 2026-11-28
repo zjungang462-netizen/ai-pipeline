@@ -86,8 +86,8 @@ def supervise(config_path: Path, run_id: str, task: str, max_restarts: int = 2,
                 return job
             job['status'] = 'pending'
             atomic_write_json(jobfile, job)
-        allow = [a.options['api_key_env'] for a in config.adapters.values()
-                 if a.type == 'openai_compat']
+        from .safety import adapter_env_allow
+        allow = adapter_env_allow(config.adapters)
         environment = build_subprocess_env(allow)
         while True:
             remaining = job['max_duration_s'] - (time.time() - job['started_at'])

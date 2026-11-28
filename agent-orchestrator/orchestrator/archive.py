@@ -102,7 +102,7 @@ class ArchiveOperations:
         # 先归档最终文件；seal 统一对最终文件和提交树计算哈希。
         for rf in result.report_files:
             rf = Path(rf)
-            if rf.is_file():
+            if rf.is_file() and not rf.is_symlink():
                 dest = attempt_dir / rf.name
                 if rf.resolve() != dest.resolve():
                     shutil.copy2(rf, dest)
@@ -115,7 +115,7 @@ class ArchiveOperations:
                        self.state.run_dir / f"{spec.name}_review_verdict.json",
                        self.state.run_dir / "review_verdict.json"]
             for source in sources:
-                if source is not None and Path(source).is_file():
+                if source is not None and Path(source).is_file() and not Path(source).is_symlink():
                     dest = attempt_dir / "review_verdict.json"
                     if Path(source).resolve() != dest.resolve():
                         shutil.copy2(source, dest)

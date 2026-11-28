@@ -51,6 +51,11 @@ def replace_file(path: Path, content: bytes) -> None:
         temporary.chmod(path.stat().st_mode & 0o777)
         os.replace(temporary, path)
     finally:
+        if temporary.exists():
+            try:
+                temporary.chmod(0o600)
+            except OSError:
+                pass
         temporary.unlink(missing_ok=True)
 
 
@@ -85,7 +90,10 @@ def apply_raw_updates(
             applied.append(key)
     except OSError:
         for key in applied:
-            replacer(relative_target(workdir, key), original[key])
+            try:
+                replacer(relative_target(workdir, key), original[key])
+            except OSError:
+                pass
         raise
     return list(updates)
 

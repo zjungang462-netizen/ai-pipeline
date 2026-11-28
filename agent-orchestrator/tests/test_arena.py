@@ -9,7 +9,7 @@ import tempfile
 import unittest
 from unittest import mock
 
-from orchestrator.arena import apply_arena_winner, run_arena
+from orchestrator.arena import _has_non_regular_entries, apply_arena_winner, run_arena
 from orchestrator.state import atomic_write_json
 from orchestrator.config import load_config
 from orchestrator.contracts import Result
@@ -152,6 +152,15 @@ class TestArena(unittest.TestCase):
             apply()
         (repo / 'dirty.tmp').unlink()
 
+        from orchestrator.state import StageLock
+        pipeline_lock = repo.parent / '.repo.pipeline.lock'
+        with StageLock(pipeline_lock):
+            with self.assertRaisesRegex(RuntimeError, '正在运行的流水线任务'):
+                apply()
+        self.assertEqual(_git(['rev-parse', 'HEAD'], repo), base_sha)
+        self.assertEqual(_git(['status', '--porcelain'], repo), '')
+        self.assertFalse((repo / '.pipeline.lock').exists())
+
         # 在合入完成但最终回执未落盘处注入故障。重试应补写回执。
         def fail_final_receipt(path, record):
             if record.get('applied_label'):
@@ -180,6 +189,92 @@ class TestArena(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, '禁止重复合并'):
             apply()
 
+    def test_apply_rejects_ignored_local_file_conflicting_with_candidate_addition(self):
+        from orchestrator.config import parse_config
+
+        td = tempfile.TemporaryDirectory()
+        self.addCleanup(td.cleanup)
+        root = Path(td.name)
+        repo = root / 'repo'
+        repo.mkdir()
+        _git(['init'], repo)
+        _git(['config', 'user.name', 'Test User'], repo)
+        _git(['config', 'user.email', 'test@local'], repo)
+        (repo / '.gitignore').write_text('ignored-cache.txt\n', encoding='utf-8')
+        (repo / 'base.txt').write_text('base\n', encoding='utf-8')
+        _git(['add', '-A'], repo)
+        _git(['commit', '-m', 'initial'], repo)
+        base_sha = _git(['rev-parse', 'HEAD'], repo)
+        local_ignored = repo / 'ignored-cache.txt'
+        local_ignored.write_text('local ignored content\n', encoding='utf-8')
+        cfg = parse_config({'task_workdir': 'repo', 'state_dir': 'state', 'stages': [
+            {'name': 't', 'kind': 'test', 'test_cmd': ['python', '-c', 'pass']},
+        ]}, base_dir=root)
+
+        class _FakeCandidate:
+            def __init__(self, label: str):
+                self.label = label
+                self.model = 'm-' + label
+
+            def run(self, prompt, workdir: Path, ctx):
+                (workdir / 'ignored-cache.txt').write_text(f'candidate {self.label}\n', encoding='utf-8')
+                _git(['add', '-f', '--', 'ignored-cache.txt'], workdir)
+                return Result(ok=True, text=f'方案 {self.label} 完成')
+
+        candidates = [{'label': label, 'adapter_type': 'cli_agy'} for label in 'AB']
+        with mock.patch('orchestrator.arena.run_test_cmd', return_value={
+            'ok': True, 'exit_code': 0,
+            'cmd': ['python', '-m', 'unittest', 'discover', '-s', 'tests'],
+        }):
+            record = run_arena(
+                cfg, '新增 ignored-cache.txt', candidates,
+                test_preset='python_unittest', allowed_files=['ignored-cache.txt'],
+                arena_id='arena-ignored-conflict',
+                adapter_factory=lambda label, *_: _FakeCandidate(label),
+            )
+        candidate = next(row for row in record['candidates'] if row['label'] == 'A')
+        self.assertTrue(candidate['apply_eligible'])
+        self.assertEqual(candidate['changed_files'], ['ignored-cache.txt'])
+        self.assertEqual(_git(['status', '--porcelain'], repo), '')
+
+        with self.assertRaisesRegex(RuntimeError, '候选新增路径冲突的 ignored 文件'):
+            apply_arena_winner(cfg, record['arena_id'], 'A', base_sha,
+                               candidate['commit_sha'], candidate['test_evidence_sha256'])
+        self.assertEqual(_git(['rev-parse', 'HEAD'], repo), base_sha)
+        self.assertEqual(local_ignored.read_text(encoding='utf-8'), 'local ignored content\n')
+        saved = json.loads((cfg.state_dir / 'arenas' / record['arena_id'] / 'result.json').read_text(encoding='utf-8'))
+        self.assertNotIn('apply_intent', saved)
+        self.assertNotIn('applied_label', saved)
+
+    def test_non_regular_entry_with_pathspec_syntax_is_not_hidden(self):
+        td = tempfile.TemporaryDirectory()
+        self.addCleanup(td.cleanup)
+        repo = Path(td.name) / 'repo'
+        repo.mkdir()
+        _git(['init'], repo)
+        _git(['config', 'user.name', 'Test User'], repo)
+        _git(['config', 'user.email', 'test@local'], repo)
+        (repo / 'calc.py').write_text('x = 1\n', encoding='utf-8')
+        _git(['add', '-A'], repo)
+        _git(['commit', '-m', 'initial'], repo)
+        base_sha = _git(['rev-parse', 'HEAD'], repo)
+        blob = subprocess.run(
+            ['git', 'hash-object', '-w', '--stdin'], cwd=str(repo), input='calc.py',
+            env=dict(os.environ), capture_output=True, text=True, encoding='utf-8', check=True,
+        ).stdout.strip()
+        tree = subprocess.run(
+            ['git', 'mktree'], cwd=str(repo),
+            input=f'100644 blob {blob}\tcalc.py\n120000 blob {blob}\t:(top)link\n'.encode('utf-8'),
+            env=dict(os.environ), capture_output=True, check=True,
+        ).stdout.decode('ascii').strip()
+        candidate_sha = _git(['commit-tree', tree, '-p', base_sha, '-m', 'pathspec symlink'], repo)
+
+        self.assertFalse(_has_non_regular_entries(candidate_sha, ['calc.py'], repo, None))
+        self.assertTrue(_has_non_regular_entries(candidate_sha, [':(top)link'], repo, None))
+        nested = repo / 'nested'
+        nested.mkdir()
+        self.assertTrue(_has_non_regular_entries(candidate_sha, [':(top)link'], nested, None))
+
     def test_run_test_cmd_resolves_cmd_wrapper_via_which_without_shell(self):
         from unittest import mock
         from orchestrator.testrun import run_test_cmd
@@ -207,7 +302,9 @@ class TestArena(unittest.TestCase):
                 return 0
 
         with mock.patch('orchestrator.testrun.shutil.which', return_value='C:\\nodejs\\npm.cmd') as mock_which, \
-                mock.patch('orchestrator.testrun.subprocess.Popen', side_effect=_FakeProc):
+                mock.patch('orchestrator.testrun.subprocess.Popen', side_effect=_FakeProc), \
+                mock.patch('orchestrator.process_tree.attach'), \
+                mock.patch('orchestrator.process_tree.close'):
             rec = run_test_cmd(['npm', 'test'], root, timeout_s=30)
             self.assertTrue(rec['ok'])
             self.assertEqual(rec['cmd'], ['npm', 'test'])

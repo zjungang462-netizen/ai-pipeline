@@ -27,6 +27,12 @@ class BackgroundSync:
             iterator.close()
         self.scans.clear()
 
+    def _record_error(self, stats, error):
+        stats['errors'] += 1
+        if not stats.get('last_error'):
+            reason = str(error) or error.__class__.__name__
+            stats['last_error'] = self.service.redact(reason)[:500]
+
     def _import(self, entry, cfg, path, stats):
         if not (path / 'state.json').is_file():
             self.imports.pop((entry['id'], str(path)), None)
@@ -65,9 +71,9 @@ class BackgroundSync:
                 if self.service.closed.is_set():return
                 try:
                     cfg = self.service.config(entry['config'])
-                except Exception:
+                except Exception as error:
                     # 单个登记配置不可读不能中止整轮；下一轮重试该配置。
-                    stats['errors'] += 1
+                    self._record_error(stats, error)
                     continue
                 root = cfg.state_dir / 'runs'
                 if not root.is_dir():continue
@@ -91,9 +97,9 @@ class BackgroundSync:
             if key not in configs:
                 try:
                     configs[key] = self.service.config(entry['config'])
-                except Exception:
+                except Exception as error:
                     # 该配置本轮不可用：计入错误并跳过，下一轮重新加载（不缓存失败）。
-                    stats['errors'] += 1
+                    self._record_error(stats, error)
                     exhausted.add(key)
                     continue
             cfg = configs[key]
@@ -107,9 +113,9 @@ class BackgroundSync:
                 except FileNotFoundError:
                     exhausted.add(key)
                     continue
-                except OSError:
+                except OSError as error:
                     exhausted.add(key)
-                    stats['errors'] += 1
+                    self._record_error(stats, error)
                     continue
                 self.scans[key] = saved
             try:item = next(saved[1])
@@ -117,16 +123,16 @@ class BackgroundSync:
                 self.scans.pop(key)[1].close()
                 exhausted.add(key)
                 continue
-            except OSError:
+            except OSError as error:
                 self.scans.pop(key)[1].close()
                 exhausted.add(key)
-                stats['errors'] += 1
+                self._record_error(stats, error)
                 continue
             stats['directories_checked'] += 1
             if item.is_dir(follow_symlinks=False):
                 try:self._import(entry, cfg, Path(item.path), stats)
                 except ValueError:stats['invalid_directories'] += 1
-                except OSError:stats['errors'] += 1
+                except OSError as error:self._record_error(stats, error)
 
     def _project(self, run, recover, stats):
         store = self.service.store
@@ -142,9 +148,8 @@ class BackgroundSync:
             stats['projections_unchanged'] += 1
         else:
             state, job = project(store, run, self.service._projection_cache)
+            self.service._projection_cache.trim(self.PROJECTION_CACHE_LIMIT)
             status = lifecycle(state, job)
-            while len(self.service._projection_cache) > self.PROJECTION_CACHE_LIMIT:
-                self.service._projection_cache.pop(next(iter(self.service._projection_cache)))
         if recover and run['managed'] and (
                 status in ('running', 'pending', 'recovering') or queued):
             self.service.launch(run['id'])
@@ -167,7 +172,8 @@ class BackgroundSync:
 
     def sync(self, recover=False, incremental=False):
         stats = dict(directories_checked=0, imports_updated=0, imports_unchanged=0,
-                     invalid_directories=0, runs_checked=0, projections_unchanged=0, errors=0)
+                     invalid_directories=0, runs_checked=0, projections_unchanged=0,
+                     errors=0, last_error='')
         if self.service.closed.is_set():
             self.close()
             return stats
@@ -183,7 +189,7 @@ class BackgroundSync:
                         # 任意单条失败都只计数并继续，绝不能让一条坏记录
                         # 或畸形状态文件卡死整轮后台同步（其它记录仍要推进）。
                         try:self._project(run, recover, stats)
-                        except Exception:stats['errors'] += 1
+                        except Exception as error:self._record_error(stats, error)
                     else:
                         self._project(run, recover, stats)
             if incremental:

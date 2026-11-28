@@ -77,16 +77,41 @@ def _validate_model_id(value: str, label: str) -> str:
     return cleaned
 
 
-def has_active_project_work(service, project_id: str) -> bool:
+def _validate_api_connection(base_url: Any, api_key_env: Any, label: str) -> tuple[str, str]:
+    url = str(base_url or '').strip()
+    key_env = str(api_key_env or '').strip()
+    parsed = urlsplit(url)
+    if parsed.scheme not in ('http', 'https') or not parsed.hostname or parsed.username or parsed.password:
+        raise ValueError(f'{label} 必须是不含凭据的 HTTP(S) 地址')
+    if not re.fullmatch(r'[A-Za-z_][A-Za-z0-9_]{0,63}', key_env):
+        raise ValueError(f'{label} 的环境变量名不合法')
+    return url, key_env
+
+
+def has_active_project_work(service, project_id: str, *, include_arena: bool = True) -> bool:
     """检查该项目是否存在本进程托管或跨重启存活的活跃任务/会诊进程。"""
     from ..state import _pid_alive
     from .projection import directory, read_json
 
-    from .arena_jobs import has_active_job
+    from .arena_jobs import has_active_job_in
 
-    entry = service.store.project(project_id)
-    if has_active_job(service.config(entry['config']), project_id):
-        return True
+    runs = service.store.project_runs(project_id)
+    if include_arena:
+        entry = service.store.project(project_id)
+        state_dirs = {Path(run['state_dir']) for run in runs}
+        managed_dir = Path(service.store.path).resolve().parent / 'managed_projects'
+        try:
+            config_path = Path(entry['config']).resolve()
+            if config_path.parent == managed_dir:
+                state_dirs.add(managed_dir / f'state-{config_path.stem}')
+        except OSError:
+            pass
+        try:
+            state_dirs.add(service.config(entry['config']).state_dir)
+        except (OSError, ValueError):
+            pass
+        if any(has_active_job_in(state_dir, project_id) for state_dir in state_dirs):
+            return True
 
     prefix = project_id + ':'
     for run_key, proc in list(getattr(service, 'active', {}).items()):
@@ -101,10 +126,18 @@ def has_active_project_work(service, project_id: str) -> bool:
                 return True
         except Exception:
             continue
-    for run in service.store.project_runs(project_id):
-        lock = read_json(directory(run) / '.supervisor.lock')
-        if lock and _pid_alive(lock.get('pid')):
-            return True
+    for run in runs:
+        root = directory(run)
+        for name in ('.supervisor.lock', '.run.lock'):
+            lock = read_json(root / name)
+            if lock and _pid_alive(lock.get('pid')):
+                return True
+        for topic in service.store.threads(run['id']):
+            if topic['status'] not in ('queued', 'running'):
+                continue
+            lock = read_json(Path(run['state_dir']) / 'discussions' / topic['id'] / '.discussion.lock')
+            if _pid_alive(lock.get('pid')):
+                return True
     return False
 
 
@@ -160,17 +193,21 @@ def project_stage_definition(service, project_id: str) -> dict[str, Any]:
     """导出已登记项目的当前节点定义，供工作台动态增删/调整节点后热保存。"""
     entry, cfg = _find_project_config(service, project_id)
     proxy_url = ''
+    api_base_url = ''
+    api_key_env = ''
+    api_allow_insecure_http = False
     allow_patch_probe = True
     stages_out = []
     for st in cfg.stages:
         if st.kind == 'test':
             cmd_tuple = tuple(st.test_cmd or ())
-            matched_preset = next((k for k, v in TEST_PRESETS.items() if v == cmd_tuple), 'pytest')
+            matched_preset = next((k for k, v in TEST_PRESETS.items() if v == cmd_tuple), 'custom')
             stages_out.append({
                 'name': st.name,
                 'kind': 'test',
                 'test_preset': matched_preset,
                 'feedback_to': str(st.feedback_to or ''),
+                'max_rounds': int(st.max_rounds or 1),
             })
             continue
         if st.kind not in _ALLOWED_STAGE_KINDS or not st.adapter or st.adapter not in cfg.adapters:
@@ -180,15 +217,28 @@ def project_stage_definition(service, project_id: str) -> dict[str, Any]:
             if not proxy_url and ad.options.get('proxy_url'):
                 proxy_url = str(ad.options['proxy_url'])
             allow_patch_probe = bool(ad.options.get('allow_patch_probe', True))
-        stages_out.append({
+        elif ad.type == 'openai_compat':
+            if not api_base_url and ad.options.get('base_url'):
+                api_base_url = str(ad.options['base_url'])
+                api_key_env = str(ad.options.get('api_key_env') or '')
+                api_allow_insecure_http = ad.options.get('allow_insecure_http') is True
+        stage_out = {
             'name': st.name,
             'kind': st.kind,
             'adapter_type': ad.type if ad.type in _ALLOWED_STAGE_ADAPTER_TYPES else 'cli_agy',
             'model': str(ad.options.get('model') or ''),
             'approval': bool(st.approval),
             'feedback_to': str(st.feedback_to or ''),
+            'max_rounds': int(st.max_rounds or 1),
             'prompt': str(st.prompt or ''),
-        })
+        }
+        if ad.type == 'openai_compat':
+            stage_out.update(
+                base_url=str(ad.options.get('base_url') or ''),
+                api_key_env=str(ad.options.get('api_key_env') or ''),
+                allow_insecure_http=ad.options.get('allow_insecure_http') is True,
+            )
+        stages_out.append(stage_out)
     managed_dir = Path(service.store.path).resolve().parent / 'managed_projects'
     try:
         is_managed = Path(entry['config']).resolve().is_relative_to(managed_dir)
@@ -200,6 +250,9 @@ def project_stage_definition(service, project_id: str) -> dict[str, Any]:
         'managed': is_managed,
         'workdir': str(cfg.task_workdir),
         'proxy_url': proxy_url,
+        'api_base_url': api_base_url,
+        'api_key_env': api_key_env,
+        'api_allow_insecure_http': api_allow_insecure_http,
         'max_duration_s': int(cfg.run_budget.max_duration_s or 900),
         'max_model_calls': int(cfg.run_budget.max_model_calls or 15),
         'allow_patch_probe': allow_patch_probe,
@@ -208,17 +261,21 @@ def project_stage_definition(service, project_id: str) -> dict[str, Any]:
 
 
 def remove_managed_project(service, project_id: str, *, delete_config_file: bool = False) -> dict[str, Any]:
-    """从工作台安全注销项目；可选仅删除 managed_projects/ 下托管的 .toml，绝不碰用户工作目录或历史运行。"""
+    """从工作台安全注销项目；可选仅删除无历史运行引用的托管 .toml，绝不碰用户工作目录或历史运行。"""
     from .storage import Conflict
 
     with service.operations:
         entry = service.store.project(project_id)
         if has_active_project_work(service, project_id):
             raise Conflict('该项目尚有运行中的任务或会诊，请先停止后再移除登记')
+        has_runs = bool(service.store.project_runs(project_id))
         service.store.remove_project(project_id)
-        service._configs.pop(entry['config'], None)
+        if hasattr(service, 'drop_config'):
+            service.drop_config(entry['config'])
+        else:
+            service._configs.pop(entry['config'], None)
         config_deleted = False
-        if delete_config_file:
+        if delete_config_file and not has_runs:
             managed_dir = Path(service.store.path).resolve().parent / 'managed_projects'
             cfg_path = Path(entry['config']).resolve()
             try:
@@ -255,13 +312,13 @@ def register_managed_project(service, payload: dict[str, Any]) -> dict[str, Any]
 
     agy_model = _validate_model_id(payload.get('agy_model') or 'gemini-3.8-flash-high', 'agy_model')
     api_model = _validate_model_id(payload.get('api_model') or 'deepseek-chat', 'api_model')
-    api_base_url = str(payload.get('api_base_url') or 'https://api.deepseek.com/v1').strip()
-    api_key_env = str(payload.get('api_key_env') or 'DEEPSEEK_API_KEY').strip()
-    if not re.fullmatch(r'[A-Za-z_][A-Za-z0-9_]{0,63}', api_key_env):
-        raise ValueError('api_key_env 必须是合法环境变量名')
-    parsed_api = urlsplit(api_base_url)
-    if parsed_api.scheme not in ('http', 'https') or not parsed_api.hostname or parsed_api.username or parsed_api.password:
-        raise ValueError('api_base_url 必须是不含凭据的 HTTP(S) 地址')
+    api_base_url, api_key_env = _validate_api_connection(
+        payload.get('api_base_url') or 'https://api.deepseek.com/v1',
+        payload.get('api_key_env') or 'DEEPSEEK_API_KEY',
+        'api_base_url',
+    )
+    api_allow_insecure_http = _strict_bool(
+        payload.get('api_allow_insecure_http'), False, label='api_allow_insecure_http')
 
     proxy_url = str(payload.get('proxy_url') or '').strip()
     if proxy_url:
@@ -334,6 +391,17 @@ def register_managed_project(service, payload: dict[str, Any]) -> dict[str, Any]
             default_model = api_model if atype == 'openai_compat' else (agy_model if atype == 'cli_agy' else '')
             raw_model = item.get('model') if item.get('model') is not None else default_model
             model = _validate_model_id(raw_model, f'节点 {sname} 的模型标识')
+            stage_base_url, stage_key_env = api_base_url, api_key_env
+            stage_allow_insecure_http = api_allow_insecure_http
+            if atype == 'openai_compat':
+                stage_base_url, stage_key_env = _validate_api_connection(
+                    item.get('base_url') or api_base_url,
+                    item.get('api_key_env') or api_key_env,
+                    f'节点 {sname} 的 API 连接',
+                )
+                stage_allow_insecure_http = _strict_bool(
+                    item.get('allow_insecure_http'), api_allow_insecure_http,
+                    label=f'节点 {sname} 的 allow_insecure_http')
             approval = _strict_bool(item.get('approval'), False, label=f'节点 {sname} 的 approval')
             prompt = str(item.get('prompt') or '').strip() or _DEFAULT_PROMPTS_BY_KIND[kind]
             seen_names.append(sname)
@@ -343,6 +411,9 @@ def register_managed_project(service, payload: dict[str, Any]) -> dict[str, Any]
                 'adapter_name': f'{sname}_agent',
                 'adapter_type': atype,
                 'model': model,
+                'base_url': stage_base_url,
+                'api_key_env': stage_key_env,
+                'allow_insecure_http': stage_allow_insecure_http,
                 'approval': approval,
                 'feedback_to': feedback_to,
                 'max_rounds': max_rounds,
@@ -368,10 +439,12 @@ def register_managed_project(service, payload: dict[str, Any]) -> dict[str, Any]
             lines.append(f'[adapters.{st["adapter_name"]}]')
             lines.append(f'type = {_toml_str(atype)}')
             if atype == 'openai_compat':
-                lines.append(f'base_url = {_toml_str(api_base_url)}')
-                lines.append(f'api_key_env = {_toml_str(api_key_env)}')
+                lines.append(f'base_url = {_toml_str(st["base_url"])}')
+                lines.append(f'api_key_env = {_toml_str(st["api_key_env"])}')
                 lines.append(f'model = {_toml_str(st["model"] or api_model)}')
                 lines.append('review_json_mode = true')
+                if st['allow_insecure_http']:
+                    lines.append('allow_insecure_http = true')
             elif atype == 'cli_agy':
                 if st['model']:
                     lines.append(f'model = {_toml_str(st["model"])}')
@@ -443,6 +516,8 @@ def register_managed_project(service, payload: dict[str, Any]) -> dict[str, Any]
                 lines.append(f'api_key_env = {_toml_str(api_key_env)}')
                 lines.append(f'model = {_toml_str(model or api_model)}')
                 lines.append('review_json_mode = true')
+                if api_allow_insecure_http:
+                    lines.append('allow_insecure_http = true')
             elif atype == 'cli_agy':
                 if model:
                     lines.append(f'model = {_toml_str(model)}')
@@ -535,18 +610,27 @@ def register_managed_project(service, payload: dict[str, Any]) -> dict[str, Any]
                 'max_attempts = 1',
             ]
 
-    managed_dir.mkdir(parents=True, exist_ok=True)
-    state_dir.mkdir(parents=True, exist_ok=True)
-    tmp_path = config_path.with_suffix('.toml.tmp')
-    tmp_path.write_text('\n'.join(lines) + '\n', encoding='utf-8')
-    try:
-        load_config(tmp_path)
-    except Exception:
-        tmp_path.unlink(missing_ok=True)
-        raise
-    tmp_path.replace(config_path)
-    project_id = service.store.register_project(config_path)
-    cfg = service.config(config_path)
+    from .storage import Conflict
+
+    with service.operations:
+        managed_dir.mkdir(parents=True, exist_ok=True)
+        state_dir.mkdir(parents=True, exist_ok=True)
+        resolved_cfg_str = str(config_path.resolve())
+        existing = next((p for p in service.store.projects() if p['config'] == resolved_cfg_str), None)
+        if existing is not None and has_active_project_work(service, existing['id']):
+            raise Conflict('该项目尚有运行中的任务或会诊，请先停止后再保存配置')
+        tmp_path = config_path.with_suffix('.toml.tmp')
+        tmp_path.write_text('\n'.join(lines) + '\n', encoding='utf-8')
+        try:
+            load_config(tmp_path)
+        except Exception:
+            tmp_path.unlink(missing_ok=True)
+            raise
+        tmp_path.replace(config_path)
+        if hasattr(service, 'drop_config'):
+            service.drop_config(config_path)
+        project_id = service.store.register_project(config_path)
+        cfg = service.config(config_path)
     return {
         'id': project_id,
         'name': name,

@@ -64,7 +64,7 @@ Open the exact tokenized localhost URL printed by the process, such as `http://1
 
 ![Code diff for the repaired coding attempt: identity return replaced by hyphen-join.](docs/screenshots/aipipeline_03_repair_diff.png)
 
-![Repaired coding diff with both attempt markers; the run remains at human acceptance awaiting approval.](docs/screenshots/aipipeline_04_review_approval.png)
+![AST review verdict, hash-verified human approval, review_verdict.json archive, and all five stages completed.](docs/screenshots/aipipeline_04_review_approval.png)
 
 ### Simulation and live-model boundaries
 

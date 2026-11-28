@@ -119,15 +119,57 @@ class SummaryCache:
         return task, status
 
 
+class ProjectionCache:
+    """线程安全、按签名缓存的运行投影字典，兼容普通 dict 访问方式。"""
+    def __init__(self, limit=512):
+        self.limit = limit
+        self._rows = OrderedDict()
+        self._lock = RLock()
+
+    def get(self, key, default=None):
+        with self._lock:
+            if key not in self._rows:
+                return default
+            self._rows.move_to_end(key)
+            return self._rows[key]
+
+    def __contains__(self, key):
+        with self._lock:
+            return key in self._rows
+
+    def __getitem__(self, key):
+        with self._lock:
+            value = self._rows[key]
+            self._rows.move_to_end(key)
+            return value
+
+    def __setitem__(self, key, value):
+        with self._lock:
+            self._rows[key] = value
+            self._rows.move_to_end(key)
+            while len(self._rows) > self.limit:
+                self._rows.popitem(last=False)
+
+    def __len__(self):
+        with self._lock:
+            return len(self._rows)
+
+    def trim(self, limit: int) -> None:
+        with self._lock:
+            self.limit = limit
+            while len(self._rows) > limit:
+                self._rows.popitem(last=False)
+
+
 def project(store, run, cache=None):
     root = directory(run)
     signature = _signature(root)
 
     # 不能把旧 state 与随后提交的终态 job 拼成一次看似已完成的快照。
-    if cache is not None and run['id'] in cache:
-        saved_signature, state, job = cache[run['id']]
-        if saved_signature == signature:
-            return state, job
+    if cache is not None:
+        cached_entry = cache.get(run['id'])
+        if cached_entry is not None and cached_entry[0] == signature:
+            return cached_entry[1], cached_entry[2]
     signature, state, job = _state_pair(root, signature)
     with store.connect() as db:
         old = db.execute('SELECT signature FROM projection_offsets WHERE run_id=?', (run['id'],)).fetchone()
@@ -167,12 +209,11 @@ def project(store, run, cache=None):
                 if text_path.is_file():
                     body = text_path.read_text(encoding='utf8', errors='replace')
                 else:
-                    raw = read_json(attempt / 'stdout.txt')
                     try:
                         body = raw['choices'][0]['message']['content']
                     except (KeyError, IndexError, TypeError):
                         body = ''
-                if not isinstance(body, str) or not body:
+                if not isinstance(body, str) or not body.strip():
                     continue
                 source, role = 'agent_response', stage_name
                 if str(execution.get('tool_version', '')).startswith('fake'):

@@ -100,7 +100,8 @@ class ClaudeAdapter(CLIAdapter):
               '--permission-mode','acceptEdits' if ctx.kind=='code' else 'dontAsk','--permission-prompts','none']
         if model:args+=['--model',model]
         if effort:args+=['--effort',effort]
-        result=self._exec(args,workdir,ctx,stdin_data=prompt,env_overrides=env)
+        extra_secrets=tuple(v for k in ('ANTHROPIC_API_KEY','ANTHROPIC_AUTH_TOKEN') if isinstance(v:=env.get(k),str) and v)
+        result=self._exec(args,workdir,ctx,stdin_data=prompt,env_overrides=env,additional_secrets=extra_secrets)
         result.usage['backend_endpoint']=env.get('ANTHROPIC_BASE_URL','https://api.anthropic.com')
         return self._finalize(result,ctx)
 

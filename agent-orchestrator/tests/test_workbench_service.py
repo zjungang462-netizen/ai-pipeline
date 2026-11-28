@@ -12,7 +12,7 @@ from unittest import mock
 
 from orchestrator.collaboration.storage import Store
 from orchestrator.dashboard.server import create_server
-from orchestrator.workbench_service import health, recovery_blockers
+from orchestrator.workbench_service import _write_private_entry, health, recovery_blockers
 
 
 class WorkbenchService(unittest.TestCase):
@@ -51,6 +51,51 @@ class WorkbenchService(unittest.TestCase):
                     server.application.service.sync(recover=server.application.service.recover)
                 finally:
                     server.server_close()
+
+    def test_private_entry_replaces_insecure_file_and_symlink_without_following(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            entry = root / '工作台入口.md'
+            entry.write_text('old', encoding='utf8')
+            entry.chmod(0o644)
+            _write_private_entry(entry, 'new-secret')
+            self.assertEqual(entry.read_text(encoding='utf8'), 'new-secret')
+            if os.name != 'nt':
+                self.assertEqual(entry.stat().st_mode & 0o777, 0o600)
+            else:
+                icacls = Path(os.environ.get('SystemRoot', r'C:\Windows')) / 'System32' / 'icacls.exe'
+                result = subprocess.run([str(icacls), str(entry)], capture_output=True,
+                                        text=True, encoding='utf-8', errors='replace', check=True)
+                self.assertNotIn('*S-1-1-0', result.stdout)
+                self.assertNotIn('*S-1-5-11', result.stdout)
+            target = root / 'outside.txt'
+            target.write_text('unchanged', encoding='utf8')
+            entry.unlink()
+            try:
+                entry.symlink_to(target)
+            except OSError:
+                if os.name != 'nt':
+                    raise
+                return
+            _write_private_entry(entry, 'replacement-secret')
+            self.assertFalse(entry.is_symlink())
+            self.assertEqual(target.read_text(encoding='utf8'), 'unchanged')
+            self.assertEqual(entry.read_text(encoding='utf8'), 'replacement-secret')
+
+    def test_private_entry_acl_failure_closes_original_descriptor_once(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            entry = root / '工作台入口.md'
+            fake_os = mock.Mock(wraps=os)
+            fake_os.name = 'nt'
+            error = OSError('acl failed')
+            with mock.patch('orchestrator.workbench_service.os', fake_os), \
+                    mock.patch('orchestrator.workbench_service._restrict_windows_acl', side_effect=error):
+                with self.assertRaises(OSError) as raised:
+                    _write_private_entry(entry, 'secret')
+            self.assertIs(raised.exception, error)
+            fake_os.close.assert_called_once()
+            self.assertEqual(list(root.iterdir()), [])
 
     def test_real_service_restarts_only_web_child_and_honors_stop_file(self):
         with tempfile.TemporaryDirectory() as tmp:

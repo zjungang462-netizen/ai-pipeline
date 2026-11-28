@@ -30,7 +30,9 @@ def verify(directory):
                command, str(config), '--run-id', RUN_ID, *args]
         proc = subprocess.run(cmd, cwd=ROOT, timeout=90, capture_output=True,
                               encoding='utf8', errors='replace')
-        check(proc.returncode == expected, f'{command} exited {proc.returncode}, expected {expected}')
+        detail = (proc.stderr or proc.stdout or '').strip()[-400:]
+        check(proc.returncode == expected,
+              f'{command} exited {proc.returncode}, expected {expected}' + (f': {detail}' if detail else ''))
 
     invoke('run', '--task', 'Build demo module', expected=11)
     invoke('status')

@@ -46,7 +46,8 @@ class DshAdapter(CLIAdapter):
             return Result(ok=False, exit_code=-1, channel=self.channel, tool_version=self._version,
                           parse_unknown=True, error_kind=ErrorKind.PARSE_FAILED,
                           stderr='未确认已验证的 DSH 版本，没有发起模型请求')
-        args=['--profile','headless','--json','--permission-mode',self.permission_mode,'--approval-policy','never','--','-']
+        effective_mode = self.permission_mode if ctx.kind == 'code' else 'read-only'
+        args=['--profile','headless','--json','--permission-mode',effective_mode,'--approval-policy','never','--','-']
         env={}
         if self.proxy_url:
             env.update(HTTP_PROXY=self.proxy_url,HTTPS_PROXY=self.proxy_url,ALL_PROXY=self.proxy_url,NO_PROXY='localhost,127.0.0.1,::1')

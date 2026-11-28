@@ -131,6 +131,11 @@ def _normalise_origin(value: str) -> str:
 class WorkbenchServer(ThreadingHTTPServer):
     daemon_threads = True
 
+    def __init__(self, server_address, RequestHandlerClass, bind_and_activate=True):
+        if isinstance(server_address, tuple) and server_address and ':' in str(server_address[0]):
+            self.address_family = socket.AF_INET6
+        super().__init__(server_address, RequestHandlerClass, bind_and_activate=bind_and_activate)
+
     def serve_forever(self, poll_interval=0.05):
         """缩短唤醒间隔，避免本地停服额外等待 0.5 秒。"""
         return super().serve_forever(poll_interval)
@@ -146,10 +151,23 @@ class WorkbenchServer(ThreadingHTTPServer):
 
 class Handler(BaseHTTPRequestHandler):
     protocol_version = 'HTTP/1.1'
+    timeout = 20
 
     @property
     def app(self):
         return self.server.application
+
+    def setup(self):
+        super().setup()
+        with self.app.requests:
+            self.app.connections.add(self.connection)
+
+    def finish(self):
+        try:
+            super().finish()
+        finally:
+            with self.app.requests:
+                self.app.connections.discard(self.connection)
 
     def log_message(self, *args):
         pass  # 不把本地会话、任务文本或产物内容写入访问日志。
@@ -170,7 +188,8 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header('Content-Type', 'application/json; charset=utf-8')
         self.send_header('Content-Length', str(len(data)))
         if cookie:
-            self.send_header('Set-Cookie', f'workbench_session={self.app.session}; HttpOnly; SameSite=Strict; Path=/')
+            secure_attr = '; Secure' if self.app.origin.startswith('https://') else ''
+            self.send_header('Set-Cookie', f'workbench_session={self.app.session}; HttpOnly; SameSite=Strict; Path=/{secure_attr}')
         self.end_headers()
         self.wfile.write(data)
 
@@ -185,7 +204,11 @@ class Handler(BaseHTTPRequestHandler):
     def handle_request(self, method):
         # 限制同时处理的请求数，避免线程与 SQLite 会话无界增长。
         if not self.app.request_slots.acquire(blocking=False):
-            return self.respond({'error': '工作台繁忙，请稍后重试'}, 503)
+            try:
+                return self.respond({'error': '工作台繁忙，请稍后重试'}, 503)
+            except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError, OSError):
+                self.close_connection = True
+                return
         try:
             # 响应字节发完不等于 SQLite 会话已关闭；关闭服务须等待 finally。
             with self.app.requests:
@@ -196,6 +219,8 @@ class Handler(BaseHTTPRequestHandler):
             try:
                 with self.app.service.store.session():
                     return self.handle_session_request(method)
+            except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError):
+                self.close_connection = True
             finally:
                 with self.app.requests:
                     self.app.active_requests -= 1
@@ -212,7 +237,14 @@ class Handler(BaseHTTPRequestHandler):
             path = unquote(parsed.path)
             query = parse_qs(parsed.query, keep_blank_values=True)
             if path == '/api/health' and method == 'GET':
-                return self.respond({'status': 'ok', 'pid': os.getpid(), 'version': self.app.version})
+                stats = self.app.service.last_sync_stats
+                return self.respond({
+                    'status': 'ok', 'pid': os.getpid(), 'version': self.app.version,
+                    'projection': {
+                        'errors': stats.get('errors', 0),
+                        'last_error': self.app.service.last_sync_error or stats.get('last_error', ''),
+                    },
+                })
             if method == 'GET' and path in _STATIC_FILES:
                 name, content_type = _STATIC_FILES[path]
                 asset = _static_asset(name)
@@ -344,12 +376,17 @@ class Handler(BaseHTTPRequestHandler):
                     if method == 'GET':
                         return self.respond(service.redact({'jobs': arena_jobs.list_jobs(cfg, project_id)}))
                     if method == 'POST':
+                        from ..collaboration import project_manager
                         from ..collaboration.execution_scope import execution_scope
                         scope = execution_scope(cfg)
                         if scope['mode'] != 'development':
                             raise Conflict('离线演练、固定测试或分析流程不会启动本机真实 CLI；请使用代码开发项目')
+                        idem_key = self.idem()
                         with service.operations:
-                            job = arena_jobs.start_job(cfg, entry['config'], project_id, self.idem(), body)
+                            if (not arena_jobs.has_idempotent_job(cfg, project_id, idem_key)
+                                    and project_manager.has_active_project_work(service, project_id, include_arena=False)):
+                                raise Conflict('该项目尚有运行中的任务或会诊，请先停止后再启动竞技场')
+                            job = arena_jobs.start_job(cfg, entry['config'], project_id, idem_key, body)
                         return self.respond(service.redact(job), 202)
             if len(parts) in (5, 6) and parts[:2] == ['api', 'projects'] and parts[3] == 'arena' and parts[4] != 'apply':
                 from ..collaboration import arena_jobs
@@ -480,6 +517,8 @@ class Handler(BaseHTTPRequestHandler):
             return self.respond({'error': str(error)}, 404)
         except (ValueError, TypeError) as error:
             return self.respond({'error': str(error)}, 400)
+        except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError):
+            raise
         except (OSError, RuntimeError) as error:
             return self.respond({'error': str(error)}, 503)
 
@@ -507,6 +546,11 @@ class Handler(BaseHTTPRequestHandler):
             self.send_header('Connection', 'close')
             self.end_headers()
             self.close_connection = True
+            self.app.service.store.release_session()
+            try:
+                self.connection.settimeout(None)
+            except OSError:
+                pass
             heartbeat = time.monotonic()
             while not self.app.closed.is_set():
                 for event in self.app.service.redact(rows) if rows else ():
@@ -537,12 +581,18 @@ class Handler(BaseHTTPRequestHandler):
             self.send_header('Connection', 'keep-alive')
             self.end_headers()
             headers_sent = True
+            self.app.service.store.release_session()
+            try:
+                self.connection.settimeout(None)
+            except OSError:
+                pass
             self.wfile.write(b'retry: 1500\n\n')
             self.wfile.flush()
             last_heartbeat = time.monotonic()
             while not self.app.closed.is_set():
-                self.app.service.sync_run_events(run)
-                events = self.app.service.store.events(run['id'], cursor, 100)
+                with self.app.service.store.session():
+                    self.app.service.sync_run_events(run)
+                    events = self.app.service.store.events(run['id'], cursor, 100)
                 for event in self.app.service.redact(events) if events else ():
                     packet = 'id: ' + str(event['cursor']) + '\nevent: update\ndata: ' + json.dumps(
                         event, ensure_ascii=False) + '\n\n'
@@ -576,7 +626,8 @@ def create_server(database, configs, port=8765, *, recover=True, host='127.0.0.1
     app = Application(database, configs, recover=recover)
     server = WorkbenchServer((host, port), Handler)
     server.application = app
-    app.origin = expected_origin or f'http://127.0.0.1:{server.server_port}'
+    default_host = 'localhost' if host.lower() == 'localhost' else f'[{host}]' if ':' in host else '127.0.0.1'
+    app.origin = expected_origin or f'http://{default_host}:{server.server_port}'
     app.start_projection()
     return server
 

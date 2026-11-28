@@ -55,7 +55,24 @@ class Qoder1189(unittest.TestCase):
     def test_nonzero_exit_preserves_reported_credits_and_fails(self):
         result=self.parse(self.final,7)
         self.assertFalse(result.ok);self.assertEqual(result.exit_code,7)
+        self.assertFalse(result.parse_unknown)
         self.assertGreater(result.usage['qoder_credits'],0)
+
+    def test_nonzero_exit_does_not_hide_unmatched_protocol(self):
+        proc=subprocess.CompletedProcess([],9,'claims success','')
+        result=self.adapter._parse(proc,self.root,self.ctx)
+        self.assertFalse(result.ok);self.assertEqual(result.error_kind,ErrorKind.CRASH)
+        self.assertTrue(result.parse_unknown)
+
+    def test_auth_detection_uses_standalone_http_status_tokens(self):
+        for stderr,expected in [('request 4010 failed',ErrorKind.CRASH),
+                                ('code 40312',ErrorKind.CRASH),
+                                ('HTTP 401 Unauthorized',ErrorKind.AUTH),
+                                ('HTTP 403 Forbidden',ErrorKind.AUTH)]:
+            with self.subTest(stderr=stderr):
+                proc=subprocess.CompletedProcess([],2,'',stderr)
+                result=self.adapter._parse(proc,self.root,self.ctx)
+                self.assertEqual(result.error_kind,expected)
 
     def test_invalid_counters_and_unstructured_success_rejected(self):
         for value in (-1,False,'0'):

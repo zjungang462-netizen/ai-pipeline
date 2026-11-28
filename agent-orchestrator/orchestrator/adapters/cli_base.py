@@ -17,9 +17,9 @@ import time
 from pathlib import Path
 
 from ..contracts import ErrorKind, PreflightReport, Result, RunContext
-from ..safety import build_subprocess_env, environment_secrets, preflight_cli, resolve_exe
+from ..safety import build_subprocess_env, environment_secrets, is_secret_env_name, preflight_cli, resolve_exe
 from .base import Adapter
-from ..cli_telemetry import CLITrace, counter, partial_usage
+from ..cli_telemetry import CLITrace, MAX_LOG, counter, partial_usage
 from ..output_tail import TextTail
 
 
@@ -153,13 +153,13 @@ def run_cli_process(command, *, cwd, env, input, capture_output=True, text=True,
                     except ProcessLookupError:pass
             process.wait(timeout=10)
         for thread in io_threads:thread.join(5)
-        if any(t.is_alive() for t in readers):raise OSError('CLI 管道未关闭')
         if failures:raise OSError('CLI 实时日志记录失败：'+str(failures[0]))
         stdout,stderr=buffers['stdout'].getvalue(),buffers['stderr'].getvalue()
         if stopped:
             error=subprocess.TimeoutExpired(command,timeout,output=stdout,stderr=stderr)
             error.stop_reason=stopped
             raise error
+        if any(t.is_alive() for t in readers):raise OSError('CLI 管道未关闭')
         # 非零退出的 stdout/stderr 仍交给适配器诊断；输入未写完时不能采信零退出码。
         if process.returncode == 0 and input_failures:
             error=input_failures[0]
@@ -173,6 +173,9 @@ def run_cli_process(command, *, cwd, env, input, capture_output=True, text=True,
         cleanup_errors=[]
         def stop_and_wait():
             if process.poll() is not None:
+                if os.name!='nt' and (stopped or any(t.is_alive() for t in io_threads)):
+                    try:os.killpg(process.pid,signal.SIGKILL)
+                    except (ProcessLookupError,PermissionError,OSError):pass
                 return
             try:
                 grouped=terminate(process)
@@ -182,7 +185,7 @@ def run_cli_process(command, *, cwd, env, input, capture_output=True, text=True,
             if not grouped:
                 if os.name!='nt':
                     try:os.killpg(process.pid,signal.SIGKILL)
-                    except ProcessLookupError:pass
+                    except (ProcessLookupError,PermissionError,OSError):pass
                 else:process.kill()
             process.wait(timeout=10)
         try:
@@ -273,6 +276,10 @@ class CLIAdapter(Adapter):
         env = build_subprocess_env(extra_allow=allow)
         env.update(env_overrides or {})
         secrets = set(environment_secrets())
+        secrets.update(
+            value for key, value in (env_overrides or {}).items()
+            if isinstance(value, str) and is_secret_env_name(key)
+        )
         secrets.update(additional_secrets)
         secrets = sorted((secret for secret in secrets if len(secret) >= 4), key=len, reverse=True)
         trace=CLITrace(ctx,secrets,channel=self.channel)
@@ -299,7 +306,7 @@ class CLIAdapter(Adapter):
                 raise
             trace.finish('stopped' if trace.reason else 'exited')
         except subprocess.TimeoutExpired as e:
-            usage=_merge_observed_usage(partial_usage(scrub(e.stdout)),trace.ledger.snapshot())
+            usage=_merge_observed_usage(partial_usage(scrub(e.stdout), channel=self.channel),trace.ledger.snapshot())
             usage['usage_unknown']=True
             reason=getattr(e,'stop_reason','call_timeout')
             kind=ErrorKind.AUTH if reason=='authentication_required' else ErrorKind.REJECTED if reason in ('budget_limit','output_limit') else ErrorKind.TOOL_LIMIT if reason in ('tool_error_limit','repeated_read_limit') else ErrorKind.TIMEOUT
@@ -322,7 +329,7 @@ class CLIAdapter(Adapter):
                                else ErrorKind.TIMEOUT)
             result.stderr=(result.stderr+'\nCLI 停止：'+trace.reason).strip()
         if 'tokens' not in result.usage or (not result.ok and not trace.ledger.complete):
-            result.usage=_merge_observed_usage(result.usage,partial_usage(proc.stdout))
+            result.usage=_merge_observed_usage(result.usage,partial_usage(proc.stdout, channel=self.channel))
         result.usage=_merge_observed_usage(result.usage,trace.ledger.snapshot())
         return result
 

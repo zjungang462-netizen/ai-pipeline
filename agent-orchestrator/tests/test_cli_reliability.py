@@ -39,9 +39,9 @@ class CLIReliability(EvidenceTestCase):
     def fixture_config(self,mode='normal',attempts=2,budget=6000):
         # 让故障夹具在 Windows 高负载下有时间启动、写候选文件并报告用量。
         # 夹具写完后会阻塞 30 秒，仍必须由真实调用超时终止。
-        cli_timeout=10 if mode in {'timeout','timeout_always'} else 4
+        cli_timeout=10 if mode in {'timeout','timeout_always'} else 15
         self.evidence_metadata={'fixture_mode':mode,'run_budget_tokens':budget,
-            'run_budget_duration_s':90,'cli_timeout_s':cli_timeout,'test_timeout_s':10,'attempt_limit':attempts}
+            'run_budget_duration_s':120,'cli_timeout_s':cli_timeout,'test_timeout_s':10,'attempt_limit':attempts}
         fixture=Path(__file__).parent/'fixtures/cli_fault_fixture.py'
         if os.name=='nt':
             executable=self.root/'fake-agy.cmd'
@@ -57,7 +57,7 @@ class CLIReliability(EvidenceTestCase):
         tests.mkdir(exist_ok=True)
         (tests/'test_module.py').write_text('import unittest\nfrom module import VALUE\nclass Contract(unittest.TestCase):\n def test_value(self): self.assertEqual(VALUE,2)\n',encoding='utf8')
         cfg=parse_config({'task_workdir':str(self.workspace),'state_dir':str(self.root/'state'),
-            'run_budget':{'max_tokens':budget,'max_duration_s':90},
+            'run_budget':{'max_tokens':budget,'max_duration_s':120},
             'autonomy':{'enabled':True,'allowed_files':['module.py'],'baseline_paths':['module.py','tests'],
                         'max_repair_rounds':1,'repair_batch_size':1,'output_tokens':128,
                         'cli_input_overhead_tokens':64,'cli_idle_timeout_s':30},

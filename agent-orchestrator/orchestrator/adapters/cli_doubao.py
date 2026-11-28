@@ -80,7 +80,8 @@ class DoubaoAdapter(CLIAdapter):
         return f'/opt/doubao/{self.binary.name}'
 
     def _common_run(self, *, staging_uid=None):
-        user = f'{staging_uid}:{os.getegid()}' if staging_uid is not None else '65534:65534'
+        egid = getattr(os, 'getegid', lambda: 65534)()
+        user = f'{staging_uid}:{egid}' if staging_uid is not None else '65534:65534'
         args = [*base_run_args(host=HOST, user=user)]
         if staging_uid is not None:
             args += ['--cap-add', 'DAC_OVERRIDE']
@@ -160,6 +161,9 @@ class DoubaoAdapter(CLIAdapter):
                           error_kind=ErrorKind.REJECTED, channel=self.channel)
         name = 'pipeline-doubao-' + uuid.uuid4().hex
         writable = ctx.kind == 'code'
+        if writable and not ctx.editable_files:
+            return Result(False, -1, stderr='豆包编码阶段需要声明可编辑文件',
+                          error_kind=ErrorKind.REJECTED, channel=self.channel)
         isolated = writable and bool(ctx.editable_files)
         files = {}
         names = ()

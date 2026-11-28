@@ -135,7 +135,9 @@ def run_case(output, scenario, live_config=None):
         interrupted = True
         engine = Engine(cfg, instances, 'sample-01', TASK)
         status = engine.run()
-    checked = subprocess.run([sys.executable, str(check)], cwd=work, capture_output=True, timeout=30)
+    from orchestrator.safety import build_subprocess_env
+    checked = subprocess.run([sys.executable, str(check)], cwd=work,
+                             env=build_subprocess_env(), capture_output=True, timeout=30)
     complete = bool(status) and all(v == 'done' for v in status.values()) and checked.returncode == 0
     unchanged = hashlib.sha256(check.read_bytes()).hexdigest() == expected_check_hash
     state = engine.state
